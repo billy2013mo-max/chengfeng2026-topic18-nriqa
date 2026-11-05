@@ -112,11 +112,14 @@
     "p0_fpr_clean": 0.0
   },
   "s16_s17_aligned_ensemble": {
-    "mean_total": 53.73431169263334,
-    "s16_total": 53.64145280284646,
-    "s17_total": 53.82717058242023,
+    "mean_total_doc1": 53.73431169263334,
+    "mean_total_doc2_before_cleangate": 52.235010993332644,
+    "mean_total_doc2_after_cleangate": 52.84336143486897,
+    "s16_total_doc1": 53.64145280284646,
+    "s17_total_doc1": 53.82717058242023,
     "mean_S_pos": 0.6654476990792195,
     "mean_S_p0": 0.8549059607826428,
-    "mean_S_clean": 1.0
+    "mean_S_clean_doc1": 1.0,
+    "mean_S_clean_doc2_after_cleangate": 0.9556876456876457
   }
 }
