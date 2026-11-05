@@ -1,0 +1,35 @@
+# Large pretrained weights & checkpoints
+models/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+
+# Raw image datasets & synthetic images
+data/raw/
+data/images/
+data/synth*/
+data/v9_fulldata/synth*/
+**/synth_*/
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.bmp
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Large numpy probability/feature caches (keep lightweight .json summaries & submissions)
+*.npz
+*.npy
+data/*.csv
+
+# Logs & temporary files
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+tmp/

@@ -1,0 +1,302 @@
+{
+  "p0_recipes": {
+    "模糊": {
+      "th": 0.5,
+      "steps": [
+        [
+          "v6ep/pcl_448t3_seed1_ep1",
+          0.35,
+          0.0
+        ],
+        [
+          "v6_val/pcl_384t2_seed2",
+          -0.15,
+          0.5
+        ],
+        [
+          "phase5/tb_plain_seed2",
+          -0.15,
+          0.0
+        ]
+      ]
+    },
+    "纹理损失": {
+      "th": 0.27,
+      "steps": [
+        [
+          "v3_ablate/E_synth",
+          0.35,
+          0.0
+        ],
+        [
+          "v6ep/d3_384t2_seed1_ep4",
+          -0.15,
+          0.0
+        ],
+        [
+          "backbone_fixed/pcg_seed1",
+          -0.15,
+          0.5
+        ],
+        [
+          "v6ep/pcl_448t3_seed1_ep3",
+          -0.15,
+          0.5
+        ],
+        [
+          "night/4/final_seed1",
+          0.1,
+          0.25
+        ]
+      ]
+    },
+    "过锐": {
+      "th": 0.48000000000000004,
+      "steps": [
+        [
+          "v6ep/pcl_448t3_seed1_ep2",
+          0.35,
+          0.0
+        ],
+        [
+          "v6ep/pcl_448t3_seed1_ep2",
+          0.35,
+          0.5
+        ],
+        [
+          "v8_experts/V8_ExpB_sharp",
+          0.2,
+          0.5
+        ],
+        [
+          "v6ep/d3_448t3_seed1_ep3",
+          -0.15,
+          0.5
+        ]
+      ]
+    },
+    "花屏": {
+      "th": 0.39,
+      "steps": [
+        [
+          "backbone_exp/pcgadd_seed2",
+          -0.15,
+          0.0
+        ]
+      ]
+    },
+    "过度生成": {
+      "th": 0.31,
+      "steps": [
+        [
+          "v6_val/d3_384t2_seed1",
+          0.35,
+          0.5
+        ],
+        [
+          "v3_ablate/A_base",
+          -0.15,
+          0.25
+        ],
+        [
+          "v3_ablate/C_p1",
+          -0.15,
+          0.0
+        ],
+        [
+          "v6_val/d3_384t2_seed1",
+          -0.15,
+          0.0
+        ],
+        [
+          "backbone_exp/d3add_seed2",
+          -0.15,
+          0.5
+        ]
+      ]
+    },
+    "虚化突兀": {
+      "th": 0.30000000000000004,
+      "steps": [
+        [
+          "v3_ablate/G_v6",
+          0.35,
+          0.0
+        ],
+        [
+          "v3_ablate/E_synth",
+          -0.15,
+          0.0
+        ],
+        [
+          "v2/v2_eupe_seed1",
+          -0.15,
+          0.0
+        ],
+        [
+          "v8_experts/V8_ExpD_bokeh",
+          0.2,
+          0.0
+        ],
+        [
+          "phase5/tb_l03_seed1",
+          -0.15,
+          0.0
+        ]
+      ]
+    }
+  },
+  "p1p2_recipes": {
+    "模糊": {
+      "t2": 0.38000000000000006,
+      "t1p": 0.22,
+      "tcum": 0.48,
+      "t1": 0.29,
+      "r12": 0.92,
+      "w0": 0.15,
+      "q1_steps": [],
+      "q2p_steps": [
+        [
+          "v6ep/pcl_448t3_seed1_ep2",
+          0.45
+        ],
+        [
+          "v6ep/d3_448t3_seed1_ep2",
+          0.3
+        ],
+        [
+          "v6ep/pcl_448t3_seed1_ep3",
+          0.15
+        ]
+      ],
+      "q2g_steps": [
+        [
+          "v6ep/d3_384t2_seed1_ep3",
+          0.45
+        ],
+        [
+          "v3_ablate/A_base",
+          -0.15
+        ],
+        [
+          "backbone_fixed/base_seed2",
+          -0.15
+        ]
+      ]
+    },
+    "纹理损失": {
+      "t2": 0.34,
+      "t1p": 0.22,
+      "tcum": 0.48,
+      "t1": 0.08,
+      "r12": 0.83,
+      "w0": 0.45,
+      "q1_steps": [
+        [
+          "backbone_exp/pcladd_seed1",
+          0.15
+        ],
+        [
+          "v6ep/d3_384t2_seed1_ep1",
+          0.15
+        ],
+        [
+          "phase5/tb_l03_seed1",
+          -0.15
+        ]
+      ],
+      "q2p_steps": [
+        [
+          "v3_ablate/F_v5",
+          0.15
+        ],
+        [
+          "backbone_fixed/base_seed2",
+          0.3
+        ]
+      ],
+      "q2g_steps": [
+        [
+          "v6ep/d3_448t3_seed1_ep1",
+          0.15
+        ]
+      ]
+    },
+    "过锐": {
+      "t2": 0.29000000000000004,
+      "t1p": 0.18,
+      "tcum": 0.34,
+      "t1": 0.1,
+      "r12": 1.3400000000000003,
+      "w0": 0.0,
+      "q1_steps": [
+        [
+          "v6ep/d3_448t3_seed1_ep4",
+          0.3
+        ],
+        [
+          "v8_experts/V8_ExpD_bokeh",
+          -0.15
+        ]
+      ],
+      "q2p_steps": [
+        [
+          "v3_ablate/B_gen3",
+          0.3
+        ],
+        [
+          "v6ep/pcl_384t2_seed2_ep2",
+          0.15
+        ],
+        [
+          "v3_ablate/A_base",
+          0.15
+        ]
+      ],
+      "q2g_steps": [
+        [
+          "v6ep/d3_384t2_seed1_ep3",
+          0.15
+        ]
+      ]
+    },
+    "过度生成": {
+      "t2": 0.21000000000000002,
+      "t1p": 0.18,
+      "tcum": 0.48,
+      "t1": 0.06,
+      "r12": 1.4600000000000004,
+      "w0": 0.3,
+      "q1_steps": [
+        [
+          "phase5/tb_plain_seed2",
+          -0.15
+        ],
+        [
+          "night/4/final_seed2",
+          -0.15
+        ],
+        [
+          "v3_ablate/F_v5",
+          -0.15
+        ],
+        [
+          "v6ep/d3_384t2_seed1_ep1",
+          -0.15
+        ]
+      ],
+      "q2p_steps": [
+        [
+          "backbone_fixed/pcg_seed2",
+          0.3
+        ]
+      ],
+      "q2g_steps": [
+        [
+          "v6ep/pcl_448t3_seed1_ep2",
+          -0.15
+        ]
+      ]
+    }
+  }
+}
