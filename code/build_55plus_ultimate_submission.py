@@ -39,6 +39,32 @@ from utils import (
     eval_14ch, competition_score, format_submission,
 )
 from build_v10_fulldata_test150_submission import load_exact_5243_anchor
+from phaseA_decoder import (
+    decode_competition_ratio, sinkhorn_prior_shift_calibration,
+    probs_14ch_to_mutually_exclusive_6x4, mutually_exclusive_6x4_to_14ch,
+)
+
+# Phase A (roadmap PDF): P1/P2 competition decoder + damped Sinkhorn prior shift.
+USE_PHASEA = os.environ.get('PHASEA_DECODER', '1') == '1'
+KAPPA_P1P2 = np.array([float(x) for x in
+                       os.environ.get('PHASEA_KAPPA', '1.2,1.8,1.4,1.3').split(',')],
+                      dtype=np.float64)
+SINKHORN_STRENGTH = float(os.environ.get('PHASEA_SINKHORN', '0.2'))
+
+
+def phaseA_decode(probs, t0, t1, t2, tau, roll_p2=False, base_clean=None):
+    return decode_competition_ratio(
+        probs, t0, t1, t2, tau, kappa_p1p2=KAPPA_P1P2,
+        base_clean=base_clean, roll_p2=roll_p2)
+
+
+def apply_sinkhorn(probs14, clean_mask):
+    if not USE_PHASEA or SINKHORN_STRENGTH <= 0:
+        return probs14
+    P6 = probs_14ch_to_mutually_exclusive_6x4(probs14)
+    P6 = sinkhorn_prior_shift_calibration(
+        P6, clean_mask=clean_mask, strength=SINKHORN_STRENGTH)
+    return mutually_exclusive_6x4_to_14ch(P6)
 
 # Canonical online-verified baseline. The 52.89 score was measured on the Phase 1
 # breakthrough file; the later QualiRAG/55+ files are unverified variants and must
@@ -308,13 +334,15 @@ def optimize_shrinkage_thresholds(
     y_oof_6d: np.ndarray,
     shrinkage: float = 0.50,
     l2_penalty: float = 1.0,
+    decoder_fn=None,
 ):
     best_t0 = T150_T0.copy()
     best_t1 = T150_T1.copy()
     best_t2 = T150_T2.copy()
+    _dec = decoder_fn or hierarchical_rolldown_decode
 
     def eval_obj(t0, t1, t2):
-        preds = hierarchical_rolldown_decode(oof_probs, t0, t1, t2, T150_TAU_ANY, roll_p2=False)
+        preds = _dec(oof_probs, t0, t1, t2, T150_TAU_ANY, roll_p2=False)
         sc = competition_score(preds, y_oof_6d)["total"]
         pen = l2_penalty * (
             np.sum((t0 - T150_T0) ** 2)
@@ -457,7 +485,8 @@ def load_quality_filtered_v12_abmil_test150(ordered_names, c14_anchor):
     return None
 
 
-def evaluate_s16_s20_blind_benchmark():
+def evaluate_s16_s20_blind_benchmark(save_dir: str = None, use_quantile: bool = True):
+    align_fam = align_moments_and_quantiles_14ch if use_quantile else align_moments_only_14ch
     print("=" * 85)
     print("=== Part 1: 5-Split Blind Benchmark Evaluation (s16~s20, N=5,000 Test Samples) ===")
     print("=" * 85)
@@ -545,7 +574,7 @@ def evaluate_s16_s20_blind_benchmark():
         pred_f1 = dec_fn(anchor_te)
         sc_f1 = competition_score(pred_f1, gold_te)['total']
 
-        iv_aligned = align_moments_and_quantiles_14ch(fams_te[4], anchor_te)
+        iv_aligned = align_fam(fams_te[4], anchor_te)
         sc_f2 = competition_score(dec_fn(iv_aligned), gold_te)['total']
 
         p1_blend = 0.50 * anchor_te + 0.50 * iv_aligned
@@ -568,7 +597,7 @@ def evaluate_s16_s20_blind_benchmark():
             anc_o = 0.25 * sum(sdo['fams'][j][mask_disjoint] for j in range(4))
             oof_anchors.append(anc_o)
             for k in range(len(fam_names)):
-                aligned_k = align_moments_and_quantiles_14ch(sdo['fams'][k][mask_disjoint], anc_o)
+                aligned_k = align_fam(sdo['fams'][k][mask_disjoint], anc_o)
                 oof_fams[k].append(safe_logit(aligned_k))
             oof_gold.append(sdo['gold'][mask_disjoint])
             oof_emb.append(sdo['emb'][mask_disjoint])
@@ -586,7 +615,7 @@ def evaluate_s16_s20_blind_benchmark():
 
         oof_probs_list = [expit(oof_logits_list[k]) for k in range(len(fam_names))]
         te_probs_list = [
-            align_moments_and_quantiles_14ch(fams_te[k], anchor_te)
+            align_fam(fams_te[k], anchor_te)
             for k in range(len(fam_names))
         ]
         oof_routed_p = sum(oof_probs_list[k] * W[k : k + 1, :] for k in range(len(fam_names)))
@@ -610,14 +639,31 @@ def evaluate_s16_s20_blind_benchmark():
         test_probs = apply_cross_defect_cooccurrence_refinement(test_probs, y_oof_14, alpha_co=0.04)
         test_probs = align_moments_only_14ch(test_probs, p1_blend)
 
+        oof_clean_mask = (y_oof_6d == 0).all(axis=1)
+        oof_cal = apply_sinkhorn(oof_probs, oof_clean_mask) if USE_PHASEA else oof_probs
+        test_cal = apply_sinkhorn(test_probs, base_clean) if USE_PHASEA else test_probs
         t0_opt, t1_opt, t2_opt = optimize_shrinkage_thresholds(
-            oof_probs, y_oof_6d, shrinkage=0.50, l2_penalty=1.0
+            oof_cal, y_oof_6d, shrinkage=0.50, l2_penalty=1.0,
+            decoder_fn=(phaseA_decode if USE_PHASEA else None),
         )
         t0_learned_all.append(t0_opt)
         t1_learned_all.append(t1_opt)
         t2_learned_all.append(t2_opt)
 
-        pred_ult = hierarchical_rolldown_decode(test_probs, t0_opt, t1_opt, t2_opt, T150_TAU_ANY, roll_p2=False)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            np.savez_compressed(
+                os.path.join(save_dir, f'phaseA_{s_eval}.npz'),
+                test_probs=test_probs, oof_probs=oof_probs, gold=gold_te,
+                y_oof=y_oof_6d, t0=t0_opt, t1=t1_opt, t2=t2_opt,
+                base_clean=base_clean, p1_blend=p1_blend,
+            )
+
+        if USE_PHASEA:
+            pred_ult = phaseA_decode(test_cal, t0_opt, t1_opt, t2_opt, T150_TAU_ANY,
+                                     roll_p2=False, base_clean=base_clean)
+        else:
+            pred_ult = hierarchical_rolldown_decode(test_probs, t0_opt, t1_opt, t2_opt, T150_TAU_ANY, roll_p2=False)
         pred_ult[base_clean[:, None] & (pred_ult == 3)] = 0
         sc_ult = competition_score(pred_ult, gold_te)['total']
 
@@ -877,6 +923,18 @@ def build_test150_submission(
     )
     p_smooth_t150 = apply_cross_defect_cooccurrence_refinement(p_smooth_t150, y_oof_all_14, alpha_co=0.04)
     p_smooth_t150 = align_moments_only_14ch(p_smooth_t150, c14_5289)
+    t150_clean_mask = (pred_5289 == 0).all(axis=1)
+    p_smooth_t150 = apply_sinkhorn(p_smooth_t150, t150_clean_mask)
+
+    os.makedirs('results/phaseA', exist_ok=True)
+    np.savez_compressed(
+        'results/phaseA/test150_routed.npz',
+        p_smooth_t150=p_smooth_t150,
+        p_routed=p_routed,
+        t0=t0_oof, t1=t1_oof, t2=t2_oof,
+        pred_5289=pred_5289, base_is_clean=(pred_5289 == 0).all(axis=1),
+        pred_5243=pred_5243, sh_5243=sh_5243,
+    )
 
     print("\n--- OOF-Learned 50%-Shrinkage Thresholds vs Static Anchor ---")
     print("  T0 (opt vs anchor):", np.round(t0_oof, 3), "vs", T150_T0)
@@ -887,7 +945,10 @@ def build_test150_submission(
     for j, d in enumerate(FULL_DIMS):
         tau_any_opt[d] = min(T150_TAU_ANY[d], t2_oof[j])
 
-    dec_opt = lambda p: hierarchical_rolldown_decode(p, t0_oof, t1_oof, t2_oof, tau_any_opt, roll_p2=False)
+    dec_opt = (lambda p: phaseA_decode(p, t0_oof, t1_oof, t2_oof, tau_any_opt,
+                                       roll_p2=False, base_clean=t150_clean_mask)) \
+        if USE_PHASEA else \
+        (lambda p: hierarchical_rolldown_decode(p, t0_oof, t1_oof, t2_oof, tau_any_opt, roll_p2=False))
     pred_routed_opt = dec_opt(p_smooth_t150)
 
     pred_f1_5243 = pred_5243.copy()
@@ -931,7 +992,9 @@ def build_test150_submission(
             # Evaluate candidate priority score & safety
             if g_cand == 3 and g_base != 3:
                 margin = float(p0_smooth[i, ci] - t0_oof[ci])
-                if margin >= 0.035 and spec_cnt[3] >= 3 and g_base >= 1:
+                # Bug A fix: 虚化突兀 (ci==5) is binary, so g_base is 0 or 3; the old
+                # `g_base >= 1` condition made P0 recall mathematically impossible.
+                if margin >= 0.035 and spec_cnt[3] >= 3 and (g_base >= 1 or ci == 5):
                     score = margin + 0.15 * (spec_cnt[3] / n_spec)
                     candidate_revisions.append((score, i, ci, g_base, 3, f"spec={spec_cnt[3]}/{n_spec} (p0={p0_smooth[i,ci]:.3f})"))
                 continue
