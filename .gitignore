@@ -33,3 +33,7 @@ __pycache__/
 *.log
 .DS_Store
 tmp/
+
+# Local retraining archives & logs (large, not part of the submission)
+results/_archive_*/
+logs_retrain/

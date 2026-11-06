@@ -51,8 +51,14 @@ CAUSE_TEMPLATES = {
 
 
 class FastStudentCORNTower(nn.Module):
-    """Compact student ordinal network deployed on single RTX 4090 (< 6.5 GB VRAM)."""
-    def __init__(self, d_in=6912 + 6144 + 7680, d_hid=512, dropout=0.15):
+    """Compact student ordinal network deployed on single RTX 4090 (< 6.5 GB VRAM).
+
+    d_in must match the concatenated teacher feature convention used by
+    `train_real_distilled_student_weights`:
+        SigLIP2-SO400M (6*1152=6912) + PE-Core-L14 (6*1024=6144) + C-RADIOv4-H (5*3072=15360)
+        = 28416.
+    """
+    def __init__(self, d_in=6912 + 6144 + 15360, d_hid=512, dropout=0.15):
         super().__init__()
         self.d_in = d_in
         self.encoder = nn.Sequential(
@@ -92,6 +98,105 @@ class FastStudentCORNTower(nn.Module):
             p0[:, ci] = torch.sigmoid(lb[j][:, 0])
 
         return p0, p1, p2
+
+
+class RealFeatureExtractor:
+    """Replicates the exact offline feature conventions used to train the student.
+
+    - SigLIP2-SO400M / PE-Core-L14: global 384/336 view + 2x2 tiles, each pooled as
+      [tok.mean, tok.max], then [global, local_mean, local_max] -> 6*D.
+    - C-RADIOv4-H: global 768 view + 2x2 tiles, per view [summary, feat.mean, feat.max],
+      then [global, local_mean, local_max] -> 5*(summary+2*feat).
+
+    The concatenation order MUST be SigLIP2, PE-Core-L14, C-RADIOv4-H to match
+    `train_real_distilled_student_weights` (feat_files order).
+    """
+    def __init__(self, device='cuda'):
+        from extract_feats import load_model, forward_pool
+        self._forward_pool = forward_pool
+        self.device = device
+        self.sig, self.sig_mean, self.sig_std, self.sig_cfg = load_model('siglip2-so400m', device)
+        self.pe, self.pe_mean, self.pe_std, self.pe_cfg = load_model('pe-core-l14', device)
+        from transformers import AutoModel
+        self.radio = AutoModel.from_pretrained(
+            'models/c-radio-v4-h', trust_remote_code=True
+        ).eval().to(device)
+        self.radio_size = 768
+        self.out_dim = 6912 + 6144 + 15360
+
+    @staticmethod
+    def _prep(im, size):
+        im = im.resize((size, size), Image.BILINEAR)
+        return torch.from_numpy(np.asarray(im, dtype=np.float32).copy()).permute(2, 0, 1) / 255.
+
+    def _views(self, im, size):
+        w, h = im.size
+        views = [self._prep(im, size)]
+        for dy in (0, 1):
+            for dx in (0, 1):
+                box = (dx * w // 2, dy * h // 2, (dx + 1) * w // 2, (dy + 1) * h // 2)
+                views.append(self._prep(im.crop(box), size))
+        return views
+
+    def _pool_6d(self, model, mean, std, cfg, im):
+        size = cfg['size']
+        x = torch.stack(self._views(im, size)).to(self.device)
+        mean_t = torch.tensor(mean, dtype=torch.float32, device=self.device).view(1, 3, 1, 1)
+        std_t = torch.tensor(std, dtype=torch.float32, device=self.device).view(1, 3, 1, 1)
+        f = self._forward_pool(model, (x - mean_t) / std_t, cfg['kind'])
+        return torch.cat([f[0], f[1:].mean(0), f[1:].amax(0)])
+
+    def _pool_radio(self, im):
+        x = torch.stack(self._views(im, self.radio_size)).to(self.device)
+        with torch.inference_mode():
+            summ, feat = self.radio(x)
+        per = torch.cat([summ.float(), feat.float().mean(1), feat.float().amax(1)], dim=1)
+        return torch.cat([per[0], per[1:].mean(0), per[1:].amax(0)])
+
+    @torch.inference_mode()
+    def extract(self, im):
+        f_sig = self._pool_6d(self.sig, self.sig_mean, self.sig_std, self.sig_cfg, im)
+        f_pe = self._pool_6d(self.pe, self.pe_mean, self.pe_std, self.pe_cfg, im)
+        f_radio = self._pool_radio(im)
+        feat = torch.cat([f_sig, f_pe, f_radio]).float()
+        if feat.numel() != self.out_dim:
+            raise RuntimeError(f"Feature dim mismatch: got {feat.numel()}, expected {self.out_dim}")
+        return feat.cpu().numpy()
+
+
+def student_probs_to_utils_order(p0, p1, p2):
+    """Map the student's CLASSES-order outputs to utils.DIMS / FULL_DIMS order.
+
+    Student FULL_CLASSES = ['模糊','纹理损失','过度生成','过锐'].
+    utils   FULL_DIMS    = ['模糊','纹理损失','过锐','过度生成'].
+    Student p0 columns are CLASSES order
+    ['模糊','纹理损失','过度生成','虚化突兀','过锐','花屏'].
+    """
+    p0_utils = p0[:, [0, 1, 4, 5, 2, 3]]
+    p1_utils = p1[:, [0, 1, 3, 2]]
+    p2_utils = p2[:, [0, 1, 3, 2]]
+    return p0_utils, p1_utils, p2_utils
+
+
+def decode_student_outputs(p0, p1, p2):
+    """Decode student P0/P1/P2 into the competition 6-class grade matrix."""
+    from utils import p012_to_14ch
+    from build_55plus_ultimate_submission import (
+        hierarchical_rolldown_decode, T150_T0, T150_T1, T150_T2, T150_TAU_ANY
+    )
+    p0_u, p1_u, p2_u = student_probs_to_utils_order(p0, p1, p2)
+    probs14 = p012_to_14ch(p0_u, p1_u, p2_u)
+    pred_utils = hierarchical_rolldown_decode(
+        probs14, T150_T0, T150_T1, T150_T2, T150_TAU_ANY, roll_p2=False
+    )
+    # The decoder returns columns in utils.DIMS order; map back to CLASSES order so the
+    # attribution engine and the submission writer agree on class names.
+    pred = pred_utils[:, [0, 1, 4, 5, 2, 3]]
+    # Per-class "any defect" probability in CLASSES order for the attribution engine.
+    any_prob = p0.copy() if hasattr(p0, 'copy') else p0.clone()
+    for j, ci in enumerate(FULL_IDX):
+        any_prob[:, ci] = p0[:, ci] + p1[:, j] + p2[:, j]
+    return probs14, pred, any_prob
 
 
 def train_real_distilled_student_weights(
@@ -327,11 +432,35 @@ class MarkovHysteresisVideoAggregator:
         return aggregated
 
 
+def load_or_train_student(device, weights_path, train_if_missing):
+    if os.path.exists(weights_path):
+        ckpt = torch.load(weights_path, map_location=device)
+        student = FastStudentCORNTower(d_in=int(ckpt.get('d_in', 28416))).to(device).eval()
+        student.load_state_dict(ckpt['state_dict'])
+        print(f"[Student] Loaded distilled weights: {weights_path} (d_in={student.d_in})")
+        return student
+    if not train_if_missing:
+        raise FileNotFoundError(
+            f"Student weights not found: {weights_path}. Re-run with --train-student."
+        )
+    student = train_real_distilled_student_weights(save_path=weights_path, device=device)
+    if student is None:
+        raise RuntimeError("Student distillation could not run: cached feature files are missing.")
+    return student.eval()
+
+
 def main():
     parser = argparse.ArgumentParser(description='Topic 18 Single-GPU Deployment & Student KD Pipeline')
     parser.add_argument('--image', type=str, default=None, help='Path to single test image')
     parser.add_argument('--batch-dir', type=str, default=None, help='Directory containing images')
-    parser.add_argument('--train-student', action='store_true', default=True, help='Fit real student KD weights if feats exist')
+    parser.add_argument('--weights', type=str,
+                        default='results/final/single_gpu_student_corn_weights.pt',
+                        help='Distilled student weights path')
+    parser.add_argument('--train-student', action='store_true',
+                        help='Fit the student from cached features if weights are missing')
+    parser.add_argument('--benchmark', action='store_true',
+                        help='Run a real end-to-end latency/VRAM benchmark on data/test_150')
+    parser.add_argument('--benchmark-images', type=int, default=20)
     args = parser.parse_args()
 
     print("=" * 70)
@@ -341,16 +470,22 @@ def main():
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'})")
 
-    student_model = None
-    if args.train_student and torch.cuda.is_available():
-        student_model = train_real_distilled_student_weights(device=str(device))
+    # Real end-to-end model: 3 frozen teachers -> 28416-d feature -> distilled student.
+    extractor = RealFeatureExtractor(device=str(device))
+    student_model = load_or_train_student(
+        device, args.weights, train_if_missing=(args.train_student or args.benchmark)
+    )
 
     engine = FastSpatialAttributionEngine()
     aggregator = MarkovHysteresisVideoAggregator()
 
-    if args.image is None and args.batch_dir is None:
-        dummy_img = Image.new('RGB', (1080, 1920), color=(120, 130, 140))
-        test_images = [('mock_1080p_stream_frame.jpg', dummy_img)]
+    run_benchmark = args.benchmark or (args.image is None and args.batch_dir is None)
+    if run_benchmark:
+        img_dir = 'data/test_150'
+        files = sorted(fn for fn in os.listdir(img_dir)
+                       if fn.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')))
+        files = files[:max(1, args.benchmark_images)]
+        test_images = [(fn, Image.open(os.path.join(img_dir, fn)).convert('RGB')) for fn in files]
     elif args.image:
         test_images = [(os.path.basename(args.image), Image.open(args.image).convert('RGB'))]
     else:
@@ -359,23 +494,31 @@ def main():
             if fn.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
                 test_images.append((fn, Image.open(os.path.join(args.batch_dir, fn)).convert('RGB')))
 
+    def infer(img):
+        feat = extractor.extract(img)
+        feat_t = torch.from_numpy(feat).unsqueeze(0).to(device)
+        with torch.no_grad():
+            p0_t, p1_t, p2_t = student_model.predict_probs(feat_t)
+        p0 = p0_t.cpu().numpy()
+        p1 = p1_t.cpu().numpy()
+        p2 = p2_t.cpu().numpy()
+        probs14, pred, any_prob = decode_student_outputs(p0, p1, p2)
+        labels = {c: GRADE_NAMES[int(pred[0, ci])] for ci, c in enumerate(CLASSES)}
+        probs = {c: round(float(any_prob[0, ci]), 4) for ci, c in enumerate(CLASSES)}
+        return labels, probs
+
+    # One warm-up to exclude lazy CUDA init from the measured latency.
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    t_start = time.time()
+    infer(test_images[0][1])
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
+    t_start = time.time()
     results = []
     for fn, img in test_images:
         t0 = time.time()
-        if student_model is not None:
-            with torch.no_grad():
-                dummy_feat = torch.zeros((1, student_model.d_in), device=device)
-                p0_t, p1_t, p2_t = student_model.predict_probs(dummy_feat)
-                p0_v = p0_t[0].cpu().numpy()
-                probs = {c: round(float(p0_v[i]), 4) for i, c in enumerate(CLASSES)}
-        else:
-            probs = {'模糊': 0.12, '纹理损失': 0.45, '过度生成': 0.08, '虚化突兀': 0.02, '过锐': 0.05, '花屏': 0.01}
-
-        labels = {'模糊': '无问题', '纹理损失': 'P2', '过度生成': '无问题', '虚化突兀': '无问题', '过锐': '无问题', '花屏': '无问题'}
+        labels, probs = infer(img)
         attr = engine.generate_explanation(img, labels, probs)
         agg_labels = aggregator.update(labels)
         dt = time.time() - t0
@@ -390,19 +533,33 @@ def main():
 
     total_time = max(1e-6, time.time() - t_start)
     peak_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
+    mean_ms = (total_time / len(test_images)) * 1000
 
     print("\n" + "=" * 70)
     print("=== Single-GPU Deployment Benchmark Results (S_deploy & S_cost) ===")
     print("=" * 70)
+    print(f"  Images                   : {len(test_images)}")
     print(f"  Single Image Throughput  : {len(test_images) / total_time:.2f} images/sec")
-    print(f"  Average End-to-End Latency: {(total_time / len(test_images)) * 1000:.2f} ms / image (Limit: < 15,000 ms)")
+    print(f"  Average End-to-End Latency: {mean_ms:.2f} ms / image (Limit: < 15,000 ms)")
     print(f"  Peak VRAM Allocated      : {peak_vram_mb:.1f} MB (Budget: 24,576 MB on RTX 4090)")
     print("=" * 70)
 
-    out_path = 'results/final/single_gpu_deployment_sample.json'
     os.makedirs('results/final', exist_ok=True)
+    out_path = 'results/final/single_gpu_deployment_sample.json'
     with open(out_path, 'w', encoding='utf-8') as f:
         json.dump(results[0], f, ensure_ascii=False, indent=2)
+    if run_benchmark:
+        with open('results/final/single_gpu_benchmark.json', 'w', encoding='utf-8') as f:
+            json.dump({
+                'num_images': len(test_images),
+                'mean_latency_ms': round(mean_ms, 2),
+                'throughput_img_per_s': round(len(test_images) / total_time, 2),
+                'peak_vram_mb': round(peak_vram_mb, 1),
+                'device': str(device),
+                'student_d_in': student_model.d_in,
+                'results': results,
+            }, f, ensure_ascii=False, indent=2)
+    print(f"Saved {out_path}")
 
 
 if __name__ == '__main__':

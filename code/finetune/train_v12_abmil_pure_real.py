@@ -313,7 +313,9 @@ def main():
         b_sca_s, th_sca_s = optimise_scaled(gv_s, vp0_s, vp1_s, vp2_s, a.tau)
         if b_sca_s['total'] >= best[0] - 0.15:
             print(f'[V12 SWA] Using SWA state (val_sca={b_sca_s["total"]:.2f} vs best={best[0]:.2f})', flush=True)
-            best = (max(best[0], b_sca_s['total']), best[1], th_sca_s, swa_state)
+            # Report the SWA model's own score/thresholds; keeping max(best, swa) here
+            # would pair the old score with the new thresholds.
+            best = (b_sca_s['total'], best[1], th_sca_s, swa_state)
         else:
             net.load_state_dict(best[3])
     else:

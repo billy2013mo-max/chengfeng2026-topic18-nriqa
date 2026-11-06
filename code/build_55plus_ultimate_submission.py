@@ -40,6 +40,18 @@ from utils import (
 )
 from build_v10_fulldata_test150_submission import load_exact_5243_anchor
 
+# Canonical online-verified baseline. The 52.89 score was measured on the Phase 1
+# breakthrough file; the later QualiRAG/55+ files are unverified variants and must
+# NOT silently replace this anchor (their Clean counts differ: 16 vs 15).
+BASELINE_5289_PATH = os.environ.get(
+    'BASELINE_5289_PATH', 'results/final/pred_nriqa_dataset_test_phase1_breakthrough.json'
+)
+# Optional reference file: any cell where the chosen baseline differs from this
+# reference is treated as an already-validated "golden" change and is frozen
+# (never revised again). Use this to preserve the b983d87 QualiRAG upgrades while
+# still applying new specialist revisions on the remaining cells.
+FREEZE_DIFF_FROM = os.environ.get('FREEZE_DIFF_FROM', '')
+
 ANCHOR_T0 = np.array([0.35, 0.35, 0.38, 0.35, 0.38, 0.35], dtype=np.float64)
 ANCHOR_T1 = np.array([0.28, 0.30, 0.30, 0.28], dtype=np.float64)
 ANCHOR_T2 = np.array([0.26, 0.28, 0.27, 0.26], dtype=np.float64)
@@ -378,7 +390,9 @@ def load_quality_filtered_v13_vlm_test150(ordered_names, c14_anchor):
         if not os.path.exists(npz_f):
             continue
         meta = json.load(open(jf))
-        ep_arg = int(meta.get('args', {}).get('epochs', 0))
+        # Use the actually-best epoch, not args.epochs: some prediction-only reruns
+        # were launched with --epochs 0 and would be wrongly down-weighted.
+        ep_arg = int(meta.get('best_epoch', meta.get('args', {}).get('epochs', 0)))
         tot = float(meta.get('test', {}).get('total', 0.0))
         s_cln = float(meta.get('test', {}).get('S_clean', 0.0))
         if tot < 49.0 or s_cln < 0.85:
@@ -648,6 +662,8 @@ def build_test150_submission(
     t1_oof: np.ndarray,
     t2_oof: np.ndarray,
     max_revisions: int = 30,
+    max_p0_upgrades: int = 4,
+    max_p0_downgrades: int = 0,
 ):
     print("\n" + "=" * 85)
     print("=== Part 2: Building Ultimate 55+ Production Submission for test_150 ===")
@@ -657,11 +673,28 @@ def build_test150_submission(
     n = len(ordered_names)
     c14_5243 = p012_to_14ch(p0_5243, p1_5243, p2_5243)
 
-    sub_5289 = json.load(open('results/final/pred_nriqa_dataset_test_phase1_breakthrough.json'))
+    import hashlib
+    with open(BASELINE_5289_PATH, 'rb') as _bf:
+        baseline_bytes = _bf.read()
+    sub_5289 = json.loads(baseline_bytes)
     pred_5289 = np.zeros((n, 6), dtype=np.int64)
     for i, e in enumerate(sub_5289):
         for ci, c in enumerate(DIMS):
             pred_5289[i, ci] = GRADE_REV[e['label'][c]]
+    print(f"[Baseline] {BASELINE_5289_PATH}  sha1={hashlib.sha1(baseline_bytes).hexdigest()[:12]}  "
+          f"clean_images={int((pred_5289 == 0).all(axis=1).sum())}  "
+          f"p0_images={int((pred_5289 == 3).any(axis=1).sum())}")
+
+    frozen_cells = np.zeros((n, 6), dtype=bool)
+    if FREEZE_DIFF_FROM:
+        ref_rows = json.load(open(FREEZE_DIFF_FROM, encoding='utf-8'))
+        ref_pred = np.zeros((n, 6), dtype=np.int64)
+        for i, e in enumerate(ref_rows):
+            for ci, c in enumerate(DIMS):
+                ref_pred[i, ci] = GRADE_REV[e['label'][c]]
+        frozen_cells = (pred_5289 != ref_pred)
+        print(f"[Freeze] {int(frozen_cells.sum())} validated golden cells frozen from "
+              f"{FREEZE_DIFF_FROM} (never revised)")
 
     from build_phase1_breakthrough_submission import load_pure_real_internvit_ensemble
     p0_iv, p1_iv, p2_iv = load_pure_real_internvit_ensemble()
@@ -882,6 +915,8 @@ def build_test150_submission(
         for ci, c in enumerate(DIMS):
             if ci == 3:
                 continue  # Ironclad Guardrail 2: Never alter 花屏 (dim 3) P0 predictions (10/10 optimal)
+            if frozen_cells[i, ci]:
+                continue  # Preserve already-validated golden cells
 
             g_base = int(pred_5289[i, ci])
             g_cand = int(pred_routed_opt[i, ci])
@@ -902,10 +937,14 @@ def build_test150_submission(
                 continue
 
             if g_base == 3 and g_cand != 3:
-                margin = float(t0_oof[ci] - p0_smooth[i, ci])
-                if ci in FULL_DIMS and g_cand == 2 and margin >= 0.035 and spec_cnt[2] >= 3:
-                    score = margin + 0.12 * (spec_cnt[2] / n_spec)
-                    candidate_revisions.append((score, i, ci, 3, 2, f"spec={spec_cnt[2]}/{n_spec} (p0={p0_smooth[i,ci]:.3f})"))
+                # Preserve the verified 52.89 P0 image set by default. Downgrading a P0
+                # risks a double penalty (missed P0 + wrong grade); only enable it
+                # explicitly with --max-p0-downgrades > 0.
+                if max_p0_downgrades > 0:
+                    margin = float(t0_oof[ci] - p0_smooth[i, ci])
+                    if ci in FULL_DIMS and g_cand == 2 and margin >= 0.035 and spec_cnt[2] >= 3:
+                        score = margin + 0.12 * (spec_cnt[2] / n_spec)
+                        candidate_revisions.append((score, i, ci, 3, 2, f"spec={spec_cnt[2]}/{n_spec} (p0={p0_smooth[i,ci]:.3f})"))
                 continue
 
             if ci in FULL_DIMS:
@@ -913,15 +952,15 @@ def build_test150_submission(
                 s1_new = float(p1_smooth[i, j] + 0.45 * p0_smooth[i, ci])
                 p_any_new = float(p0_smooth[i, ci] + p1_smooth[i, j] + p2_smooth[i, j])
 
-                if g_base == 1 and g_cand == 2 and spec_cnt[2] >= 2:
+                if g_base == 1 and g_cand == 2 and spec_cnt[2] >= 3:
                     margin = max(0.0, s1_new - t1_oof[j])
                     score = margin + 0.18 * (spec_cnt[2] / n_spec)
                     candidate_revisions.append((score, i, ci, 1, 2, f"spec={spec_cnt[2]}/{n_spec} (s1={s1_new:.3f})"))
-                elif g_base == 2 and g_cand == 1 and spec_cnt[1] >= 2:
+                elif g_base == 2 and g_cand == 1 and spec_cnt[1] >= 3:
                     margin = max(0.0, t1_oof[j] - s1_new)
                     score = margin + 0.16 * (spec_cnt[1] / n_spec)
                     candidate_revisions.append((score, i, ci, 2, 1, f"spec={spec_cnt[1]}/{n_spec} (s1={s1_new:.3f})"))
-                elif g_base == 0 and g_cand in (1, 2) and (spec_cnt[1] + spec_cnt[2]) >= 2:
+                elif g_base == 0 and g_cand in (1, 2) and (spec_cnt[1] + spec_cnt[2]) >= 3:
                     margin = max(0.0, p_any_new - t2_oof[j])
                     # Extra priority for Over-generation (ci==4) where VLM & Giant specialists recover missed recalls
                     bonus = 0.06 if ci == 4 else 0.0
@@ -932,9 +971,27 @@ def build_test150_submission(
                     score = margin + 0.14 * (spec_cnt[0] / n_spec)
                     candidate_revisions.append((score, i, ci, 1, 0, f"spec_clean={spec_cnt[0]}/{n_spec} (p_any={p_any_new:.3f})"))
 
-    # Sort all candidate revisions by confidence score descending and apply top `max_revisions`
+    # Sort all candidate revisions by confidence score descending, then apply up to
+    # `max_revisions` while respecting the P0 up/down budgets. This guarantees the
+    # pre-submission Gate 3 (|total P0 drift| <= 4) is reachable by construction.
     candidate_revisions.sort(key=lambda x: x[0], reverse=True)
-    selected_revisions = candidate_revisions[:max_revisions]
+    selected_revisions = []
+    p0_up = p0_down = 0
+    for cand in candidate_revisions:
+        _, _i, _ci, g_old, g_new, _info = cand
+        if g_new == 3 and g_old != 3:
+            if p0_up >= max_p0_upgrades:
+                continue
+            p0_up += 1
+        elif g_old == 3 and g_new != 3:
+            if p0_down >= max_p0_downgrades:
+                continue
+            p0_down += 1
+        selected_revisions.append(cand)
+        if len(selected_revisions) >= max_revisions:
+            break
+    print(f"[Revision Budget] selected={len(selected_revisions)} candidates "
+          f"from {len(candidate_revisions)}; P0 upgrades={p0_up}, P0 downgrades={p0_down}")
 
     pred_final = pred_5289.copy()
     pred_final[sh_5243 | base_is_clean] = 0
@@ -1009,11 +1066,17 @@ def build_test150_submission(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--max-revisions', type=int, default=30, help='Maximum ranked specialist cell revisions over 52.89')
+    ap.add_argument('--max-revisions', type=int, default=28, help='Maximum ranked specialist cell revisions over 52.89')
+    ap.add_argument('--max-p0-upgrades', type=int, default=4, help='Cap on new P0 cells (Gate 3 allows <=4)')
+    ap.add_argument('--max-p0-downgrades', type=int, default=0,
+                    help='Cap on removing existing 52.89 P0 cells (default 0 = preserve verified P0 set)')
     args = ap.parse_args()
 
     W_s16_s20, fam_names, t0_oof, t1_oof, t2_oof = evaluate_s16_s20_blind_benchmark()
-    build_test150_submission(W_s16_s20, fam_names, t0_oof, t1_oof, t2_oof, max_revisions=args.max_revisions)
+    build_test150_submission(W_s16_s20, fam_names, t0_oof, t1_oof, t2_oof,
+                             max_revisions=args.max_revisions,
+                             max_p0_upgrades=args.max_p0_upgrades,
+                             max_p0_downgrades=args.max_p0_downgrades)
 
 
 if __name__ == '__main__':

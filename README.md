@@ -1,5 +1,12 @@
 # 【2026乘风挑战赛·命题18】晴羽观感体系·画质BadCase的无参检测模型 — 完整复现指南 (README)
 
+> **最新状态（2026-11-06，commit `d1a437a`）**：当前最终提交候选为
+> `pred_nriqa_dataset_test_FINAL_d1a437a.json`（b983d87 + 8 处专家共识修订，
+> Clean/P0 集合不变）。五折盲测门禁 +0.524（p<0.0001）。
+> 详细执行记录见 [`docs/D1A437A_FINAL_RESULT_REPORT.md`](docs/D1A437A_FINAL_RESULT_REPORT.md)，
+> 提交与回滚记录见 [`docs/SUBMISSION_LEDGER.md`](docs/SUBMISSION_LEDGER.md)。
+> 下文第 1–5 节为 V9 阶段的历史复现说明。
+
 本仓库为 **【2026乘风挑战赛】命题18：晴羽观感体系·画质BadCase的无参检测模型** 的完整训练、合成数据构造、零泄漏交叉验证与一键推理代码库。
 
 ---

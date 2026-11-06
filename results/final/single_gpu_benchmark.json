@@ -1,0 +1,1050 @@
+{
+  "num_images": 20,
+  "mean_latency_ms": 332.92,
+  "throughput_img_per_s": 3.0,
+  "peak_vram_mb": 4817.6,
+  "device": "cuda:0",
+  "student_d_in": 28416,
+  "results": [
+    {
+      "image": "137212400938_frame14.png",
+      "label": {
+        "模糊": "P2",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "P0"
+      },
+      "aggregated_label": {
+        "模糊": "P2",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.3569,
+        "纹理损失": 0.9746,
+        "过度生成": 0.0069,
+        "虚化突兀": 0.0001,
+        "过锐": 0.1736,
+        "花屏": 0.8267
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [花屏]，严重等级定级为 [P0]。",
+        "primary_defect": "花屏",
+        "severity": "P0",
+        "confidence": 0.8267,
+        "affected_regions_3x3": [
+          "左上 (Top-Left)",
+          "右下 (Bottom-Right)"
+        ],
+        "grid_anomaly_scores": [
+          1.91,
+          1.16,
+          0.56,
+          -0.0,
+          -0.49,
+          0.04,
+          -0.86,
+          -1.02,
+          -1.29
+        ],
+        "physical_evidence": "主缺陷 [花屏] 置信度 0.83；空间异常主要富集于 左上 (Top-Left), 右下 (Bottom-Right) 区域。",
+        "causal_explanation": "局部像素出现大面积色块错乱、高频马赛克或通道条纹截断，主要由码流传输丢包或解码器硬件损伤所致。"
+      },
+      "inference_time_ms": 404.76
+    },
+    {
+      "image": "151918507262_000175.png",
+      "label": {
+        "模糊": "无问题",
+        "纹理损失": "P2",
+        "过度生成": "P1",
+        "虚化突兀": "无问题",
+        "过锐": "P2",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "无问题",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.1905,
+        "纹理损失": 0.7212,
+        "过度生成": 0.8894,
+        "虚化突兀": 0.0219,
+        "过锐": 0.471,
+        "花屏": 0.0006
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [过度生成]，严重等级定级为 [P1]。",
+        "primary_defect": "过度生成",
+        "severity": "P1",
+        "confidence": 0.8894,
+        "affected_regions_3x3": [
+          "右下 (Bottom-Right)",
+          "中心 (Center)"
+        ],
+        "grid_anomaly_scores": [
+          0.95,
+          1.17,
+          0.36,
+          0.18,
+          1.37,
+          -0.94,
+          -1.22,
+          -0.39,
+          -1.48
+        ],
+        "physical_evidence": "主缺陷 [过度生成] 置信度 0.89；空间异常主要富集于 右下 (Bottom-Right), 中心 (Center) 区域。",
+        "causal_explanation": "画面局部出现结构不合理的新生幻影、残肢或非自然形变，主要由生成式超分/扩图算法在复杂语义先验不足时的伪影幻觉引起。"
+      },
+      "inference_time_ms": 319.39
+    },
+    {
+      "image": "152861394819_53.png",
+      "label": {
+        "模糊": "P0",
+        "纹理损失": "P1",
+        "过度生成": "P0",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.936,
+        "纹理损失": 0.6083,
+        "过度生成": 0.9791,
+        "虚化突兀": 0.006,
+        "过锐": 0.0507,
+        "花屏": 0.0059
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [过度生成]，严重等级定级为 [P0]。",
+        "primary_defect": "过度生成",
+        "severity": "P0",
+        "confidence": 0.9791,
+        "affected_regions_3x3": [
+          "左上 (Top-Left)",
+          "中下 (Bottom-Center)"
+        ],
+        "grid_anomaly_scores": [
+          2.21,
+          0.01,
+          -0.02,
+          -0.41,
+          -0.58,
+          -0.71,
+          -0.73,
+          1.24,
+          -1.02
+        ],
+        "physical_evidence": "主缺陷 [过度生成] 置信度 0.98；空间异常主要富集于 左上 (Top-Left), 中下 (Bottom-Center) 区域。",
+        "causal_explanation": "画面局部出现结构不合理的新生幻影、残肢或非自然形变，主要由生成式超分/扩图算法在复杂语义先验不足时的伪影幻觉引起。"
+      },
+      "inference_time_ms": 364.51
+    },
+    {
+      "image": "152863271821_302.png",
+      "label": {
+        "模糊": "P0",
+        "纹理损失": "P0",
+        "过度生成": "P0",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "P0",
+        "纹理损失": "无问题",
+        "过度生成": "P0",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.9875,
+        "纹理损失": 0.9695,
+        "过度生成": 0.7871,
+        "虚化突兀": 0.1878,
+        "过锐": 0.0972,
+        "花屏": 0.0043
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [模糊]，严重等级定级为 [P0]。",
+        "primary_defect": "模糊",
+        "severity": "P0",
+        "confidence": 0.9875,
+        "affected_regions_3x3": [
+          "中下 (Bottom-Center)",
+          "右上 (Top-Right)"
+        ],
+        "grid_anomaly_scores": [
+          0.25,
+          -0.44,
+          -1.22,
+          -0.52,
+          0.12,
+          -0.74,
+          -0.0,
+          2.53,
+          0.03
+        ],
+        "physical_evidence": "主缺陷 [模糊] 置信度 0.99；空间异常主要富集于 中下 (Bottom-Center), 右上 (Top-Right) 区域。",
+        "causal_explanation": "画面高频边缘梯度严重衰减（Sobel/Laplacian响应缺失），轮廓发虚，主要由源内容低清采集或强烈运动失真导致。"
+      },
+      "inference_time_ms": 307.93
+    },
+    {
+      "image": "164190196424_337.png",
+      "label": {
+        "模糊": "P1",
+        "纹理损失": "P1",
+        "过度生成": "P1",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.9603,
+        "纹理损失": 0.9895,
+        "过度生成": 0.9476,
+        "虚化突兀": 0.0139,
+        "过锐": 0.1851,
+        "花屏": 0.0003
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [纹理损失]，严重等级定级为 [P1]。",
+        "primary_defect": "纹理损失",
+        "severity": "P1",
+        "confidence": 0.9895,
+        "affected_regions_3x3": [
+          "左上 (Top-Left)",
+          "中上 (Top-Center)"
+        ],
+        "grid_anomaly_scores": [
+          -2.24,
+          1.53,
+          0.47,
+          -0.67,
+          -0.02,
+          -0.45,
+          0.64,
+          0.16,
+          0.58
+        ],
+        "physical_evidence": "主缺陷 [纹理损失] 置信度 0.99；空间异常主要富集于 左上 (Top-Left), 中上 (Top-Center) 区域。",
+        "causal_explanation": "高频小波子带能量（Haar/DWT）异常偏低，局部微观细节被平滑抹除，主要由过度降噪（Denoising）或高压缩比编解码丢弃造成。"
+      },
+      "inference_time_ms": 330.68
+    },
+    {
+      "image": "165065099488_516.png",
+      "label": {
+        "模糊": "P2",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "P0"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.3409,
+        "纹理损失": 0.9361,
+        "过度生成": 0.0104,
+        "虚化突兀": 0.0001,
+        "过锐": 0.0834,
+        "花屏": 0.9826
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [花屏]，严重等级定级为 [P0]。",
+        "primary_defect": "花屏",
+        "severity": "P0",
+        "confidence": 0.9826,
+        "affected_regions_3x3": [
+          "左上 (Top-Left)",
+          "中下 (Bottom-Center)"
+        ],
+        "grid_anomaly_scores": [
+          -1.56,
+          -1.09,
+          -1.01,
+          0.19,
+          0.58,
+          0.91,
+          0.9,
+          1.48,
+          -0.4
+        ],
+        "physical_evidence": "主缺陷 [花屏] 置信度 0.98；空间异常主要富集于 左上 (Top-Left), 中下 (Bottom-Center) 区域。",
+        "causal_explanation": "局部像素出现大面积色块错乱、高频马赛克或通道条纹截断，主要由码流传输丢包或解码器硬件损伤所致。"
+      },
+      "inference_time_ms": 322.04
+    },
+    {
+      "image": "167282867920_v7HighV2_014.png",
+      "label": {
+        "模糊": "无问题",
+        "纹理损失": "P2",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.1763,
+        "纹理损失": 0.5462,
+        "过度生成": 0.0851,
+        "虚化突兀": 0.0003,
+        "过锐": 0.1571,
+        "花屏": 0.09
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [纹理损失]，严重等级定级为 [P2]。",
+        "primary_defect": "纹理损失",
+        "severity": "P2",
+        "confidence": 0.5462,
+        "affected_regions_3x3": [
+          "中上 (Top-Center)",
+          "右下 (Bottom-Right)"
+        ],
+        "grid_anomaly_scores": [
+          -0.35,
+          2.02,
+          0.91,
+          -0.49,
+          0.68,
+          -0.62,
+          -1.16,
+          0.22,
+          -1.22
+        ],
+        "physical_evidence": "主缺陷 [纹理损失] 置信度 0.55；空间异常主要富集于 中上 (Top-Center), 右下 (Bottom-Right) 区域。",
+        "causal_explanation": "高频小波子带能量（Haar/DWT）异常偏低，局部微观细节被平滑抹除，主要由过度降噪（Denoising）或高压缩比编解码丢弃造成。"
+      },
+      "inference_time_ms": 325.57
+    },
+    {
+      "image": "178686376267_v7L3HiV2_3.png",
+      "label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "P0",
+        "虚化突兀": "无问题",
+        "过锐": "P2",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.1849,
+        "纹理损失": 0.9666,
+        "过度生成": 0.9141,
+        "虚化突兀": 0.2449,
+        "过锐": 0.7609,
+        "花屏": 0.0004
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [过度生成]，严重等级定级为 [P0]。",
+        "primary_defect": "过度生成",
+        "severity": "P0",
+        "confidence": 0.9141,
+        "affected_regions_3x3": [
+          "中上 (Top-Center)",
+          "右上 (Top-Right)"
+        ],
+        "grid_anomaly_scores": [
+          0.32,
+          2.42,
+          -1.25,
+          0.21,
+          -0.01,
+          -1.15,
+          -0.07,
+          -0.15,
+          -0.31
+        ],
+        "physical_evidence": "主缺陷 [过度生成] 置信度 0.91；空间异常主要富集于 中上 (Top-Center), 右上 (Top-Right) 区域。",
+        "causal_explanation": "画面局部出现结构不合理的新生幻影、残肢或非自然形变，主要由生成式超分/扩图算法在复杂语义先验不足时的伪影幻觉引起。"
+      },
+      "inference_time_ms": 448.08
+    },
+    {
+      "image": "178984587163_v7L3HiV2_4030.png",
+      "label": {
+        "模糊": "P1",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "P0",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.9593,
+        "纹理损失": 0.9975,
+        "过度生成": 0.0535,
+        "虚化突兀": 0.4231,
+        "过锐": 0.1925,
+        "花屏": 0.0006
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [虚化突兀]，严重等级定级为 [P0]。",
+        "primary_defect": "虚化突兀",
+        "severity": "P0",
+        "confidence": 0.4231,
+        "affected_regions_3x3": [
+          "中下 (Bottom-Center)",
+          "左下 (Bottom-Left)"
+        ],
+        "grid_anomaly_scores": [
+          -0.72,
+          -0.71,
+          -0.85,
+          -0.4,
+          -0.39,
+          -0.88,
+          1.08,
+          2.1,
+          0.77
+        ],
+        "physical_evidence": "主缺陷 [虚化突兀] 置信度 0.42；空间异常主要富集于 中下 (Bottom-Center), 左下 (Bottom-Left) 区域。",
+        "causal_explanation": "景深边缘梯度突变，主体抠图轮廓与背景虚化区域存在明显生硬阶跃，主要由虚化算法前后景分割不精准导致。"
+      },
+      "inference_time_ms": 306.35
+    },
+    {
+      "image": "180020556041_006.jpg",
+      "label": {
+        "模糊": "无问题",
+        "纹理损失": "P2",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "P0"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.1879,
+        "纹理损失": 0.4943,
+        "过度生成": 0.0172,
+        "虚化突兀": 0.0015,
+        "过锐": 0.0418,
+        "花屏": 0.9983
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [花屏]，严重等级定级为 [P0]。",
+        "primary_defect": "花屏",
+        "severity": "P0",
+        "confidence": 0.9983,
+        "affected_regions_3x3": [
+          "左上 (Top-Left)",
+          "左中 (Mid-Left)"
+        ],
+        "grid_anomaly_scores": [
+          -2.34,
+          -0.04,
+          0.7,
+          -1.07,
+          0.12,
+          0.95,
+          0.45,
+          0.51,
+          0.73
+        ],
+        "physical_evidence": "主缺陷 [花屏] 置信度 1.00；空间异常主要富集于 左上 (Top-Left), 左中 (Mid-Left) 区域。",
+        "causal_explanation": "局部像素出现大面积色块错乱、高频马赛克或通道条纹截断，主要由码流传输丢包或解码器硬件损伤所致。"
+      },
+      "inference_time_ms": 303.33
+    },
+    {
+      "image": "180798402816_v7L3HiV2_1.png",
+      "label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "P1",
+        "虚化突兀": "无问题",
+        "过锐": "P2",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.3091,
+        "纹理损失": 0.9856,
+        "过度生成": 0.8884,
+        "虚化突兀": 0.2233,
+        "过锐": 0.7735,
+        "花屏": 0.0003
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [纹理损失]，严重等级定级为 [P1]。",
+        "primary_defect": "纹理损失",
+        "severity": "P1",
+        "confidence": 0.9856,
+        "affected_regions_3x3": [
+          "中下 (Bottom-Center)",
+          "左下 (Bottom-Left)"
+        ],
+        "grid_anomaly_scores": [
+          -0.56,
+          -0.22,
+          -0.95,
+          -0.49,
+          -0.62,
+          -0.94,
+          1.7,
+          1.81,
+          0.25
+        ],
+        "physical_evidence": "主缺陷 [纹理损失] 置信度 0.99；空间异常主要富集于 中下 (Bottom-Center), 左下 (Bottom-Left) 区域。",
+        "causal_explanation": "高频小波子带能量（Haar/DWT）异常偏低，局部微观细节被平滑抹除，主要由过度降噪（Denoising）或高压缩比编解码丢弃造成。"
+      },
+      "inference_time_ms": 435.71
+    },
+    {
+      "image": "181204643103_v7L3HiV2_18101.png",
+      "label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "P1",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.0927,
+        "纹理损失": 0.9945,
+        "过度生成": 0.2522,
+        "虚化突兀": 0.0498,
+        "过锐": 0.9704,
+        "花屏": 0.0002
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [纹理损失]，严重等级定级为 [P1]。",
+        "primary_defect": "纹理损失",
+        "severity": "P1",
+        "confidence": 0.9945,
+        "affected_regions_3x3": [
+          "中下 (Bottom-Center)",
+          "右上 (Top-Right)"
+        ],
+        "grid_anomaly_scores": [
+          -0.72,
+          -0.63,
+          -0.76,
+          -0.31,
+          -0.31,
+          -0.48,
+          -0.06,
+          2.57,
+          0.7
+        ],
+        "physical_evidence": "主缺陷 [纹理损失] 置信度 0.99；空间异常主要富集于 中下 (Bottom-Center), 右上 (Top-Right) 区域。",
+        "causal_explanation": "高频小波子带能量（Haar/DWT）异常偏低，局部微观细节被平滑抹除，主要由过度降噪（Denoising）或高压缩比编解码丢弃造成。"
+      },
+      "inference_time_ms": 302.26
+    },
+    {
+      "image": "181258970129_v7L3HiV2_7164.png",
+      "label": {
+        "模糊": "P0",
+        "纹理损失": "P0",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.9887,
+        "纹理损失": 0.9962,
+        "过度生成": 0.1665,
+        "虚化突兀": 0.3059,
+        "过锐": 0.2688,
+        "花屏": 0.0008
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [纹理损失]，严重等级定级为 [P0]。",
+        "primary_defect": "纹理损失",
+        "severity": "P0",
+        "confidence": 0.9962,
+        "affected_regions_3x3": [
+          "中下 (Bottom-Center)",
+          "右下 (Bottom-Right)"
+        ],
+        "grid_anomaly_scores": [
+          -0.3,
+          0.35,
+          -0.55,
+          -0.34,
+          0.01,
+          -0.58,
+          -0.14,
+          2.63,
+          -1.06
+        ],
+        "physical_evidence": "主缺陷 [纹理损失] 置信度 1.00；空间异常主要富集于 中下 (Bottom-Center), 右下 (Bottom-Right) 区域。",
+        "causal_explanation": "高频小波子带能量（Haar/DWT）异常偏低，局部微观细节被平滑抹除，主要由过度降噪（Denoising）或高压缩比编解码丢弃造成。"
+      },
+      "inference_time_ms": 303.65
+    },
+    {
+      "image": "181303931208_v7L3HiV2_2122.png",
+      "label": {
+        "模糊": "P1",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "P2",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.8134,
+        "纹理损失": 0.9988,
+        "过度生成": 0.0647,
+        "虚化突兀": 0.0486,
+        "过锐": 0.6762,
+        "花屏": 0.0022
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [纹理损失]，严重等级定级为 [P1]。",
+        "primary_defect": "纹理损失",
+        "severity": "P1",
+        "confidence": 0.9988,
+        "affected_regions_3x3": [
+          "左上 (Top-Left)",
+          "右上 (Top-Right)"
+        ],
+        "grid_anomaly_scores": [
+          1.65,
+          -0.07,
+          1.21,
+          -0.56,
+          -0.51,
+          -0.95,
+          -1.0,
+          1.19,
+          -0.97
+        ],
+        "physical_evidence": "主缺陷 [纹理损失] 置信度 1.00；空间异常主要富集于 左上 (Top-Left), 右上 (Top-Right) 区域。",
+        "causal_explanation": "高频小波子带能量（Haar/DWT）异常偏低，局部微观细节被平滑抹除，主要由过度降噪（Denoising）或高压缩比编解码丢弃造成。"
+      },
+      "inference_time_ms": 309.14
+    },
+    {
+      "image": "181401031166_v7L3HiV2_31.59s.png",
+      "label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "P0",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.0808,
+        "纹理损失": 0.994,
+        "过度生成": 0.0245,
+        "虚化突兀": 0.0008,
+        "过锐": 0.9943,
+        "花屏": 0.0006
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [过锐]，严重等级定级为 [P0]。",
+        "primary_defect": "过锐",
+        "severity": "P0",
+        "confidence": 0.9943,
+        "affected_regions_3x3": [
+          "左下 (Bottom-Left)",
+          "中下 (Bottom-Center)"
+        ],
+        "grid_anomaly_scores": [
+          -1.09,
+          -0.65,
+          -1.05,
+          -0.19,
+          -0.55,
+          -0.4,
+          1.91,
+          1.24,
+          0.78
+        ],
+        "physical_evidence": "主缺陷 [过锐] 置信度 0.99；空间异常主要富集于 左下 (Bottom-Left), 中下 (Bottom-Center) 区域。",
+        "causal_explanation": "边缘法向两侧存在异常突出的高亮过冲（Halo Overshoot）与反向欠冲，边界生硬白边明显，主要由锐化算法增益过高或多次重复增强所致。"
+      },
+      "inference_time_ms": 311.98
+    },
+    {
+      "image": "181422473010_v7L3HiV2_3881.png",
+      "label": {
+        "模糊": "P2",
+        "纹理损失": "P1",
+        "过度生成": "P1",
+        "虚化突兀": "无问题",
+        "过锐": "P2",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.436,
+        "纹理损失": 0.9674,
+        "过度生成": 0.9227,
+        "虚化突兀": 0.0033,
+        "过锐": 0.8079,
+        "花屏": 0.0005
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [纹理损失]，严重等级定级为 [P1]。",
+        "primary_defect": "纹理损失",
+        "severity": "P1",
+        "confidence": 0.9674,
+        "affected_regions_3x3": [
+          "中上 (Top-Center)",
+          "右下 (Bottom-Right)"
+        ],
+        "grid_anomaly_scores": [
+          0.63,
+          1.73,
+          0.59,
+          0.11,
+          0.31,
+          -1.11,
+          -1.25,
+          0.45,
+          -1.47
+        ],
+        "physical_evidence": "主缺陷 [纹理损失] 置信度 0.97；空间异常主要富集于 中上 (Top-Center), 右下 (Bottom-Right) 区域。",
+        "causal_explanation": "高频小波子带能量（Haar/DWT）异常偏低，局部微观细节被平滑抹除，主要由过度降噪（Denoising）或高压缩比编解码丢弃造成。"
+      },
+      "inference_time_ms": 321.72
+    },
+    {
+      "image": "181490251728_v7L3HiV2_14216.png",
+      "label": {
+        "模糊": "P0",
+        "纹理损失": "P0",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.9929,
+        "纹理损失": 0.9974,
+        "过度生成": 0.2542,
+        "虚化突兀": 0.1975,
+        "过锐": 0.253,
+        "花屏": 0.0005
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [纹理损失]，严重等级定级为 [P0]。",
+        "primary_defect": "纹理损失",
+        "severity": "P0",
+        "confidence": 0.9974,
+        "affected_regions_3x3": [
+          "右上 (Top-Right)",
+          "中心 (Center)"
+        ],
+        "grid_anomaly_scores": [
+          -0.77,
+          0.43,
+          -1.46,
+          0.87,
+          1.35,
+          -1.05,
+          0.67,
+          0.97,
+          -1.0
+        ],
+        "physical_evidence": "主缺陷 [纹理损失] 置信度 1.00；空间异常主要富集于 右上 (Top-Right), 中心 (Center) 区域。",
+        "causal_explanation": "高频小波子带能量（Haar/DWT）异常偏低，局部微观细节被平滑抹除，主要由过度降噪（Denoising）或高压缩比编解码丢弃造成。"
+      },
+      "inference_time_ms": 306.18
+    },
+    {
+      "image": "181547872968_v7L3HiV2_22831.png",
+      "label": {
+        "模糊": "无问题",
+        "纹理损失": "P2",
+        "过度生成": "P2",
+        "虚化突兀": "无问题",
+        "过锐": "P2",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "P2",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.1371,
+        "纹理损失": 0.8845,
+        "过度生成": 0.6403,
+        "虚化突兀": 0.0758,
+        "过锐": 0.3786,
+        "花屏": 0.0044
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [纹理损失]，严重等级定级为 [P2]。",
+        "primary_defect": "纹理损失",
+        "severity": "P2",
+        "confidence": 0.8845,
+        "affected_regions_3x3": [
+          "中下 (Bottom-Center)",
+          "左中 (Mid-Left)"
+        ],
+        "grid_anomaly_scores": [
+          -0.39,
+          -0.68,
+          -0.44,
+          -0.72,
+          -0.01,
+          0.06,
+          -0.37,
+          2.74,
+          -0.2
+        ],
+        "physical_evidence": "主缺陷 [纹理损失] 置信度 0.88；空间异常主要富集于 中下 (Bottom-Center), 左中 (Mid-Left) 区域。",
+        "causal_explanation": "高频小波子带能量（Haar/DWT）异常偏低，局部微观细节被平滑抹除，主要由过度降噪（Denoising）或高压缩比编解码丢弃造成。"
+      },
+      "inference_time_ms": 309.11
+    },
+    {
+      "image": "181551664084_v7L3HiV2_11316.png",
+      "label": {
+        "模糊": "P2",
+        "纹理损失": "P1",
+        "过度生成": "P2",
+        "虚化突兀": "无问题",
+        "过锐": "P2",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "P1",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "P2",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.4822,
+        "纹理损失": 0.9819,
+        "过度生成": 0.5467,
+        "虚化突兀": 0.0049,
+        "过锐": 0.3877,
+        "花屏": 0.0127
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [纹理损失]，严重等级定级为 [P1]。",
+        "primary_defect": "纹理损失",
+        "severity": "P1",
+        "confidence": 0.9819,
+        "affected_regions_3x3": [
+          "中上 (Top-Center)",
+          "右上 (Top-Right)"
+        ],
+        "grid_anomaly_scores": [
+          -0.8,
+          1.67,
+          -1.4,
+          1.09,
+          -0.61,
+          -0.89,
+          0.4,
+          0.96,
+          -0.43
+        ],
+        "physical_evidence": "主缺陷 [纹理损失] 置信度 0.98；空间异常主要富集于 中上 (Top-Center), 右上 (Top-Right) 区域。",
+        "causal_explanation": "高频小波子带能量（Haar/DWT）异常偏低，局部微观细节被平滑抹除，主要由过度降噪（Denoising）或高压缩比编解码丢弃造成。"
+      },
+      "inference_time_ms": 322.73
+    },
+    {
+      "image": "181950426954_4160.png",
+      "label": {
+        "模糊": "P0",
+        "纹理损失": "P0",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "无问题",
+        "花屏": "无问题"
+      },
+      "aggregated_label": {
+        "模糊": "无问题",
+        "纹理损失": "无问题",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题",
+        "过锐": "P2",
+        "花屏": "无问题"
+      },
+      "probabilities": {
+        "模糊": 0.9979,
+        "纹理损失": 0.991,
+        "过度生成": 0.1113,
+        "虚化突兀": 0.1278,
+        "过锐": 0.0987,
+        "花屏": 0.0014
+      },
+      "semantic_attribution": {
+        "has_badcase": true,
+        "overall_verdict": "检出画质缺陷，首要异常为 [模糊]，严重等级定级为 [P0]。",
+        "primary_defect": "模糊",
+        "severity": "P0",
+        "confidence": 0.9979,
+        "affected_regions_3x3": [
+          "中下 (Bottom-Center)",
+          "中上 (Top-Center)"
+        ],
+        "grid_anomaly_scores": [
+          0.77,
+          -1.33,
+          -0.86,
+          -0.65,
+          -0.83,
+          0.96,
+          0.0,
+          1.96,
+          -0.02
+        ],
+        "physical_evidence": "主缺陷 [模糊] 置信度 1.00；空间异常主要富集于 中下 (Bottom-Center), 中上 (Top-Center) 区域。",
+        "causal_explanation": "画面高频边缘梯度严重衰减（Sobel/Laplacian响应缺失），轮廓发虚，主要由源内容低清采集或强烈运动失真导致。"
+      },
+      "inference_time_ms": 303.1
+    }
+  ]
+}

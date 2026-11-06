@@ -1,24 +1,26 @@
 {
   "best_epoch": 2,
   "test": {
-    "total": 35.72378263510013,
-    "S_pos": 0.5894661870984174,
-    "S_p0": 0.7846505155290433,
-    "p0R": 0.8247943330823765,
-    "p0P": 0.6583660784731955,
-    "S_clean": 0.26470588235294124
+    "total": 51.28435210621559,
+    "S_pos": 0.6114959032619144,
+    "S_p0": 0.7998477262333867,
+    "p0R": 0.8351102249200076,
+    "p0P": 0.6853831878178828,
+    "S_clean": 1.0
   },
   "args": {
     "split": "data/resplits/split_s18.csv",
     "manifest": "data/manifest_combined.csv",
-    "model": "/wanqing-develop/luowenjing/18/models/qwen3vl-8b",
+    "model": "models/qwen3vl-8b",
     "epochs": 2,
+    "eval_only": false,
     "batch": 12,
     "max_pixels": 802816,
     "lr": 0.0002,
     "lr_head": 0.001,
+    "soft_sigma": 0.32,
     "rank": 32,
-    "workers": 6,
+    "workers": 4,
     "grad_ckpt": true,
     "out": "results/v13_vlm_real/vlm_corn_s18.json"
   }
