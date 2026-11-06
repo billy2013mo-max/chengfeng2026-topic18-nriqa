@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 code/finetune/train_v12_abmil_pure_real.py
-Stage C Engine: End-to-End 10-View ViT Trainer with:
-1. Token-Gated ABMIL + Top-5% Anomaly Token Pooling + Spatial Std (via `*_abmil` backbones).
-2. Dual-Layer Tap (Layer 75% high-frequency sharpness/texture + Layer 100% semantic overgen).
-3. Real-to-Real Latent Tile CutMix (recombines genuine defect tiles across real images in latent space).
-4. 100% Pure Real Human-Annotated Images Only + Automatic 2x Flip TTA on test_150.
+Stage B/C Engine: End-to-End 10-View ViT Trainer with:
+1. Token-Gated ABMIL + Learnable-Temperature Saliency Gate (tau in [0.10, 0.25]) + Top-5% Anomaly Pooling.
+2. Three-Layer Pyramid Tap (Layer 67% geometric edge + Layer 83% local texture + Layer 100% semantic).
+3. Asymmetric Truncated Gaussian Soft Labels (sigma=0.32 inside {P2, P1, P0}, strictly 0 leakage to grade 0 Clean,
+   implementing BREAKTHROUGH_SOLUTION_REPORT Sec 3.4.1).
+4. Real-to-Real Latent Tile CutMix + SWA (Stochastic Weight Averaging of Epoch 3 & Best Checkpoint).
+5. Disjoint Holdout Validation when training on full splits (`split_all_full.csv`), + 2x Flip TTA on test_150.
 """
 import argparse, copy, csv, json, os, random, sys, time
 import numpy as np
@@ -21,7 +23,8 @@ try:
 except Exception:
     pass
 
-os.chdir('/wanqing-develop/luowenjing/18')
+if os.path.exists('/wanqing-develop/luowenjing/18'):
+    os.chdir('/wanqing-develop/luowenjing/18')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'decision_eval'))
 from data import IQADataset, CachedIQADataset, load_split, read_manifest, targets_from_grades, CLASSES, FULL
@@ -42,11 +45,42 @@ def set_seed(s):
     torch.cuda.manual_seed_all(s)
 
 
+def compute_asymmetric_truncated_soft_loss(logits_ex: torch.Tensor, g: torch.Tensor, sigma: float = 0.32) -> torch.Tensor:
+    """
+    Implements BREAKTHROUGH_SOLUTION_REPORT Sec 3.4.1:
+    Asymmetric Truncated Gaussian Soft Labels (sigma = 0.32) on the 4-way multinomial heads.
+    - If ground truth g == 0 (Clean): target is strictly [1, 0, 0, 0] (ZERO leakage into defect grades!).
+    - If ground truth g in {1(P2), 2(P1), 3(P0)}: target is truncated to positive grades {1, 2, 3}
+      with Gaussian kernel exp(-(k - g)^2 / (2 * sigma^2)), smoothing P1 <-> P2 subjective boundary noise.
+    """
+    loss_soft = 0.0
+    j_ex = 0
+    ks = torch.tensor([1.0, 2.0, 3.0], device=logits_ex.device).view(1, 3)
+    for ci, c in enumerate(CLASSES):
+        if c in FULL:
+            lg4 = logits_ex[:, j_ex:j_ex + 4]
+            log_p4 = F.log_softmax(lg4, dim=1)
+            tgt = g[:, ci]  # [B] in {0, 1, 2, 3}
+            soft_tgt = torch.zeros_like(lg4)
+            is_zero = (tgt == 0)
+            soft_tgt[is_zero, 0] = 1.0
+            if (~is_zero).any():
+                g_pos = tgt[~is_zero].float().unsqueeze(1)  # [B_pos, 1]
+                w_pos = torch.exp(-0.5 * ((ks - g_pos) / sigma) ** 2)
+                w_pos = w_pos / w_pos.sum(dim=1, keepdim=True)
+                soft_tgt[~is_zero, 1:] = w_pos
+            loss_soft = loss_soft + (-(soft_tgt * log_p4).sum(dim=1)).mean()
+            j_ex += 4
+        else:
+            j_ex += 2
+    return loss_soft / len(FULL)
+
+
 class MultiNetV12_ABMIL(MultiNetV2):
     """
     Extends MultiNetV2 with Real-to-Real Latent Tile CutMix during training.
     """
-    def forward_with_tile_cutmix(self, x, g, p_cutmix: float = 0.35):
+    def forward_with_tile_cutmix(self, x, g, p_cutmix: float = 0.25):
         B, V, C, H, W = x.shape
         feats_per_bb = []
         for i, (m, fwd) in enumerate(zip(self.bs, self.fwds)):
@@ -59,11 +93,10 @@ class MultiNetV12_ABMIL(MultiNetV2):
 
         if self.training and B >= 2 and V >= 5 and random.random() < p_cutmix:
             perm = torch.randperm(B, device=x.device)
-            # Identify top-2 most salient local tiles per image using the first backbone's tile_attn
             with torch.no_grad():
                 tile_scores = self.tile_attn[0](feats_per_bb[0][:, 1:]).squeeze(-1)  # [B, V-1]
                 _, top2_tiles = torch.topk(tile_scores[perm], k=min(2, V - 1), dim=1) # [B, 2]
-            for b_idx in range( len(feats_per_bb) ):
+            for b_idx in range(len(feats_per_bb)):
                 f_b = feats_per_bb[b_idx].clone()
                 f_perm = feats_per_bb[b_idx][perm]
                 for b_row in range(B):
@@ -103,15 +136,15 @@ def infer_150_tta(net, ordered_names, dev, size, tiles, alpha_ex=0.45):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--backbones', default='internvit_abmil:lastk4,pecoreg_abmil:lastk4,dinov3l_abmil:lastk4')
+    ap.add_argument('--backbones', default='internvit_abmil:lastk4,pecoreg_abmil:lastk4,cradio_abmil:lastk4,dinov3l_abmil:lastk4')
     ap.add_argument('--epochs', type=int, default=4)
     ap.add_argument('--batch', type=int, default=4)
     ap.add_argument('--grad-accum', type=int, default=2)
     ap.add_argument('--size', type=int, default=448)
-    ap.add_argument('--tiles', type=int, default=2)
+    ap.add_argument('--tiles', type=int, default=3)
     ap.add_argument('--lr-full', type=float, default=8.875e-5)
     ap.add_argument('--lr-last', type=float, default=1.5e-4)
-    ap.add_argument('--lr-head', type=float, default=1.2e-3)
+    ap.add_argument('--lr-head', type=float, default=1.0e-3)
     ap.add_argument('--wd', type=float, default=0.01)
     ap.add_argument('--workers', type=int, default=6)
     ap.add_argument('--seed', type=int, default=1)
@@ -122,6 +155,8 @@ def main():
     ap.add_argument('--gen-repeat', type=int, default=2)
     ap.add_argument('--emd-weight', type=float, default=0.45)
     ap.add_argument('--p1-ce-weight', type=float, default=1.15)
+    ap.add_argument('--soft-sigma', type=float, default=0.32, help='Asymmetric truncated Gaussian soft label sigma (Sec 3.4.1)')
+    ap.add_argument('--cutmix-prob', type=float, default=0.25)
     ap.add_argument('--split', default='data/resplits/split_s16.csv')
     ap.add_argument('--manifest', default='data/manifest_combined.csv')
     ap.add_argument('--tau', type=float, default=0.02)
@@ -149,6 +184,12 @@ def main():
     te = [r for r in rows if r['split'] == 'test']
     if not te:
         te = va
+
+    va_names_set = set(r['name'] for r in va)
+    tr_disjoint = [r for r in tr if r['name'] not in va_names_set]
+    if len(tr_disjoint) >= 2000 and len(tr_disjoint) < len(tr):
+        print(f'[V12 Guard] Removed {len(tr) - len(tr_disjoint)} val-overlapping images from train to prevent train==val inflation!', flush=True)
+        tr = tr_disjoint
 
     if a.clean_repeat > 1:
         clean = [r for r in tr if all(int(r[c]) == 0 for c in CLASSES)]
@@ -184,7 +225,6 @@ def main():
             for bl in blocks[-k:]:
                 for p in bl.parameters():
                     p.requires_grad = True
-        # Always keep TokenGatedABMILPool & DualLayerTapWrapper trainable at head LR
         abmil_ids = set()
         for attr in ('abmil_pool', 'dual_tap'):
             if hasattr(m, attr):
@@ -209,7 +249,7 @@ def main():
     )
     groups.append({'params': head_params, 'lr': a.lr_head})
     tr_p = [p for g in groups for p in g['params']]
-    print(f'[V12 ABMIL+DualLayer] trainable {sum(p.numel() for p in tr_p)/1e6:.1f}M / {sum(p.numel() for p in net.parameters())/1e6:.1f}M '
+    print(f'[V12 ABMIL+3LayerPyramid+AsymSoft] trainable {sum(p.numel() for p in tr_p)/1e6:.1f}M / {sum(p.numel() for p in net.parameters())/1e6:.1f}M '
           f'(size={a.size}, tiles={a.tiles}, views={1 + a.tiles*a.tiles})', flush=True)
 
     opt = torch.optim.AdamW(groups, weight_decay=a.wd)
@@ -223,19 +263,23 @@ def main():
     sch = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[g['lr'] for g in groups], total_steps=total_steps, pct_start=0.1)
 
     best = None
+    ep3_state = None
     for ep in range(a.epochs):
         net.train()
         t0 = time.time()
         tot = 0.0
         nb = 0
         opt.zero_grad()
+        cur_cutmix = a.cutmix_prob if ep < a.epochs - 1 else 0.0
         for step_idx, (x, g, _) in enumerate(ltr):
             x = x.to(dev)
             g = g.to(dev)
             with torch.autocast('cuda', dtype=torch.bfloat16):
-                lc, le, gl, g_mix = net.forward_with_tile_cutmix(x, g, p_cutmix=0.30)
-            loss = v3_loss_fn(lc.float(), le.float(), gl.float(), g_mix, bce_loss_none,
-                              p0_clean_weight=a.p0_clean_weight, emd_weight=a.emd_weight, p1_ce_weight=a.p1_ce_weight)
+                lc, le, gl, g_mix = net.forward_with_tile_cutmix(x, g, p_cutmix=cur_cutmix)
+            loss_v3 = v3_loss_fn(lc.float(), le.float(), gl.float(), g_mix, bce_loss_none,
+                                 p0_clean_weight=a.p0_clean_weight, emd_weight=a.emd_weight, p1_ce_weight=a.p1_ce_weight)
+            loss_asym_soft = compute_asymmetric_truncated_soft_loss(le.float(), g_mix, sigma=a.soft_sigma)
+            loss = loss_v3 + 0.30 * loss_asym_soft
             (loss / accum).backward()
             tot += loss.item()
             nb += 1
@@ -253,10 +297,28 @@ def main():
               f'S_pos={b_sca["S_pos"]:.3f} P0R={b_sca["p0R"]:.3f} S_clean={b_sca["S_clean"]:.3f} t={time.time()-t0:.0f}s', flush=True)
         score_ep = max(b_cas['total'], b_sca['total'])
         cur_state = copy.deepcopy(net.state_dict())
+        if (ep + 1) == max(1, a.epochs - 1):
+            ep3_state = cur_state
         if best is None or score_ep > best[0]:
             best = (score_ep, th_cas, th_sca, cur_state)
 
-    net.load_state_dict(best[3])
+    # SWA (Stochastic Weight Averaging) between penultimate epoch and best epoch if beneficial
+    if ep3_state is not None:
+        swa_state = {
+            k: (0.5 * ep3_state[k] + 0.5 * best[3][k]) if best[3][k].is_floating_point() else best[3][k]
+            for k in best[3].keys()
+        }
+        net.load_state_dict(swa_state)
+        vp0_s, vp1_s, vp2_s, _, gv_s = predict_v2(net, lva, dev, alpha_ex=a.alpha_ex)
+        b_sca_s, th_sca_s = optimise_scaled(gv_s, vp0_s, vp1_s, vp2_s, a.tau)
+        if b_sca_s['total'] >= best[0] - 0.15:
+            print(f'[V12 SWA] Using SWA state (val_sca={b_sca_s["total"]:.2f} vs best={best[0]:.2f})', flush=True)
+            best = (max(best[0], b_sca_s['total']), best[1], th_sca_s, swa_state)
+        else:
+            net.load_state_dict(best[3])
+    else:
+        net.load_state_dict(best[3])
+
     vp0, vp1, vp2, vgt, gva_n = predict_v2(net, lva, dev, alpha_ex=a.alpha_ex)
     tp0, tp1, tp2, tgt, gte_n = predict_v2(net, lte, dev, alpha_ex=a.alpha_ex)
 
