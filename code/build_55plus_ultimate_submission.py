@@ -50,6 +50,7 @@ KAPPA_P1P2 = np.array([float(x) for x in
                        os.environ.get('PHASEA_KAPPA', '1.2,1.8,1.4,1.3').split(',')],
                       dtype=np.float64)
 SINKHORN_STRENGTH = float(os.environ.get('PHASEA_SINKHORN', '0.2'))
+V12_DIR = os.environ.get('V12_DIR', 'results/v12_abmil')
 
 
 def phaseA_decode(probs, t0, t1, t2, tau, roll_p2=False, base_clean=None):
@@ -452,7 +453,7 @@ def load_quality_filtered_v13_vlm_test150(ordered_names, c14_anchor):
 def load_quality_filtered_v12_abmil_test150(ordered_names, c14_anchor):
     p0_acc, p1_acc, p2_acc, w_sum = 0.0, 0.0, 0.0, 0.0
     used = []
-    for jf in sorted(glob.glob('results/v12_abmil/v12_abmil_*.json')):
+    for jf in sorted(glob.glob(os.path.join(V12_DIR, 'v12_abmil_*.json'))):
         npz_f = jf.replace('.json', '_probs.npz')
         if not os.path.exists(npz_f):
             continue
@@ -475,8 +476,9 @@ def load_quality_filtered_v12_abmil_test150(ordered_names, c14_anchor):
         raw_14 = p012_to_14ch(p0_acc / w_sum, p1_acc / w_sum, p2_acc / w_sum)
         return align_moments_and_quantiles_14ch(raw_14, c14_anchor)
 
-    if os.path.exists('results/v12_abmil/test_150_v12_abmil_probs.npz'):
-        dv12 = np.load('results/v12_abmil/test_150_v12_abmil_probs.npz', allow_pickle=True)
+    _v12_fallback = os.path.join(V12_DIR, 'test_150_v12_abmil_probs.npz')
+    if os.path.exists(_v12_fallback):
+        dv12 = np.load(_v12_fallback, allow_pickle=True)
         ord_12 = [list(dv12['names_150']).index(nm) for nm in ordered_names]
         return align_moments_and_quantiles_14ch(
             p012_to_14ch(dv12['t150_p0'][ord_12], dv12['t150_p1'][ord_12], dv12['t150_p2'][ord_12]),
@@ -503,7 +505,7 @@ def evaluate_s16_s20_blind_benchmark(save_dir: str = None, use_quantile: bool = 
         'Fam5_InternViT6B_448',
     ]
     has_vlm_s = all(os.path.exists(f'results/v13_vlm_real/vlm_corn_{s}_probs.npz') for s in splits)
-    has_v12_s = all(os.path.exists(f'results/v12_abmil/v12_abmil_{s}_probs.npz') for s in splits)
+    has_v12_s = all(os.path.exists(os.path.join(V12_DIR, f'v12_abmil_{s}_probs.npz')) for s in splits)
     if has_vlm_s:
         fam_names.append('Fam6_Qwen3VL8B_ABMIL_CORN')
     if has_v12_s:
@@ -546,7 +548,7 @@ def evaluate_s16_s20_blind_benchmark(save_dir: str = None, use_quantile: bool = 
             dv = np.load(f'results/v13_vlm_real/vlm_corn_{s}_probs.npz')
             fams_s.append(p012_to_14ch(dv['te_p0'], dv['te_p1'], dv['te_p2']))
         if has_v12_s:
-            dv12 = np.load(f'results/v12_abmil/v12_abmil_{s}_probs.npz')
+            dv12 = np.load(os.path.join(V12_DIR, f'v12_abmil_{s}_probs.npz'))
             fams_s.append(p012_to_14ch(dv12['te_p0'], dv12['te_p1'], dv12['te_p2']))
 
         split_data[s] = {

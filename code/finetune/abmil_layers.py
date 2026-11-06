@@ -177,3 +177,143 @@ class DualLayerTapWrapper(nn.Module):
         self._cache_83 = None
         self._mid_cache = None
         return fused
+
+
+class NativePixelPhysicsExtractor(nn.Module):
+    """24-dim zero-parameter spatial-frequency physics descriptor.
+
+    Operates on the 3 zero-resize 1:1 native-pixel patches produced by
+    `data._native_patches` (peak Sobel, peak Laplacian, median texture).
+
+    Groups (8 dims each):
+      1. Signed-Laplacian bipole ringing / overshoot  (1-2 px over-sharpening)
+      2. Log-PSD high-frequency band, spectral slope, edge-to-texture ratio
+         (texture loss vs global blur)
+      3. Foreground/background sharpness transition + tangential sharpness
+         variance (abrupt bokeh / cutout boundary)
+
+    No learnable parameters; features are detached so the backbone is not
+    penalised by this branch.
+    """
+    def __init__(self):
+        super().__init__()
+        lap_k = torch.tensor([[0.0, -1.0, 0.0],
+                              [-1.0, 4.0, -1.0],
+                              [0.0, -1.0, 0.0]]).view(1, 1, 3, 3)
+        sobel_x = torch.tensor([[-1.0, 0.0, 1.0],
+                                [-2.0, 0.0, 2.0],
+                                [-1.0, 0.0, 1.0]]).view(1, 1, 3, 3)
+        sobel_y = sobel_x.transpose(2, 3)
+        self.register_buffer('lap_k', lap_k)
+        self.register_buffer('sobel_x', sobel_x)
+        self.register_buffer('sobel_y', sobel_y)
+
+    @staticmethod
+    def _radial_bins(h, w, nbins=16):
+        fy = torch.fft.fftfreq(h).view(-1, 1)
+        fx = torch.fft.rfftfreq(w).view(1, -1)
+        r = torch.sqrt(fy ** 2 + fx ** 2)
+        r = r / (r.max() + 1e-8)
+        idx = torch.clamp((r * nbins).long(), 0, nbins - 1)
+        return idx, nbins
+
+    @torch.no_grad()
+    def forward(self, native_rgb: torch.Tensor) -> torch.Tensor:
+        """native_rgb: [B, V, 3, H, W] in [0, 1]. Returns [B, 24]."""
+        B, V, C, H, W = native_rgb.shape
+        x = native_rgb.reshape(B * V, C, H, W).float()
+        gray = 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
+        eps = 1e-6
+
+        # ---- 1. signed Laplacian bipole ringing / overshoot (8) ----
+        # Disable autocast for the physics branch: bf16 ops (quantile/FFT) are unstable.
+        gx = F.conv2d(gray, self.sobel_x, padding=1).float()
+        gy = F.conv2d(gray, self.sobel_y, padding=1).float()
+        grad = torch.sqrt(gx * gx + gy * gy + eps)
+        lap1 = F.conv2d(gray, self.lap_k, padding=1).float()
+        lap2 = F.conv2d(gray, self.lap_k, padding=2, dilation=2).float()
+
+        pos = F.relu(lap1)
+        neg = F.relu(-lap1)
+        pos_max3 = F.max_pool2d(pos, 3, 1, 1)
+        neg_max3 = F.max_pool2d(neg, 3, 1, 1)
+        bipole = torch.sqrt(pos_max3 * neg_max3 + eps)
+
+        g_mean = grad.mean(dim=(2, 3), keepdim=True)
+        g_std = grad.std(dim=(2, 3), keepdim=True)
+        edge = (grad > (g_mean + g_std)).float()
+        edge_n = edge.sum(dim=(2, 3)).clamp(min=1.0)
+
+        def _mean(a):
+            return a.mean(dim=(1, 2, 3))
+
+        def _edge_mean(a):
+            return (a * edge).sum(dim=(2, 3)).squeeze(1) / edge_n.squeeze(1)
+
+        f1 = torch.stack([
+            _mean(bipole),
+            bipole.flatten(1).amax(1),
+            _edge_mean(bipole),
+            _mean(pos) / (_mean(grad) + eps),
+            _mean(neg) / (_mean(grad) + eps),
+            _mean(F.relu(lap2)) / (_mean(grad) + eps),
+            _mean(torch.abs(lap1)) / (_mean(grad) + eps),
+            _mean(torch.abs(lap2)) / (_mean(grad) + eps),
+        ], dim=1)
+
+        # ---- 2. log-PSD high-frequency band / slope / edge-texture (8) ----
+        Fp = torch.fft.rfft2(gray, norm='ortho')
+        power = Fp.real ** 2 + Fp.imag ** 2
+        idx, nbins = self._radial_bins(H, W, nbins=16)
+        idx = idx.to(power.device)
+        # [B*V, nbins]
+        band = torch.zeros(power.shape[0], nbins, device=power.device, dtype=power.dtype)
+        band.scatter_add_(1, idx.view(1, -1).expand(power.shape[0], -1), power.flatten(1))
+        counts = torch.zeros(nbins, device=power.device, dtype=power.dtype)
+        counts.scatter_add_(0, idx.view(-1), torch.ones_like(idx.view(-1), dtype=power.dtype))
+        band = band / counts.clamp(min=1.0)[None, :]
+        total = band.sum(1, keepdim=True) + eps
+        # high band corresponds to radial bins 0.20-0.48 of max frequency
+        hi = band[:, 3:8].sum(1) / total.squeeze(1)
+        lo = band[:, 1:3].sum(1) / total.squeeze(1)
+        # spectral slope: linear fit of log(band) vs log(bin index)
+        logb = torch.log(band + eps)
+        k = torch.arange(nbins, device=power.device, dtype=power.dtype)
+        kc = k - k.mean()
+        slope = (logb * kc[None, :]).sum(1) / (kc ** 2).sum()
+        # edge-to-texture ratio and local variance
+        gflat = grad.flatten(1)
+        g_p99 = torch.quantile(gflat, 0.99, dim=1)
+        g_med = torch.quantile(gflat, 0.50, dim=1)
+        edge_tex = g_p99 / (g_med + eps)
+        gvar = grad.var(dim=(1, 2, 3))
+        gvar_edge = ((grad - g_mean) ** 2 * edge).sum(dim=(2, 3)).squeeze(1) / edge_n.squeeze(1)
+        f2 = torch.stack([hi, lo, slope, edge_tex, gvar, gvar_edge, _mean(gray), _mean(gray * gray)], dim=1)
+
+        # ---- 3. foreground/background sharpness transition (8) ----
+        yy = torch.linspace(-1, 1, H, device=gray.device).view(1, 1, H, 1)
+        xx = torch.linspace(-1, 1, W, device=gray.device).view(1, 1, 1, W)
+        r = torch.sqrt(yy * yy + xx * xx)
+        center = (r < 0.5).float()
+        ring_in = ((r >= 0.30) & (r < 0.55)).float()
+        ring_out = ((r >= 0.70) & (r < 0.95)).float()
+        border = (r >= 0.75).float()
+
+        def _mask_mean(a, m):
+            return (a * m).sum(dim=(2, 3)).squeeze(1) / m.sum().clamp(min=1.0)
+
+        lap_abs = torch.abs(lap1)
+        f3 = torch.stack([
+            _mask_mean(lap_abs, center) / (_mask_mean(lap_abs, border) + eps),
+            _mask_mean(grad, center) / (_mask_mean(grad, border) + eps),
+            _mask_mean(lap_abs, ring_in) / (_mask_mean(lap_abs, ring_out) + eps),
+            _mask_mean(grad * grad, center) / (_mask_mean(grad * grad, border) + eps),
+            (ring_in * lap_abs).sum(dim=(2, 3)).squeeze(1) / (ring_in.sum().clamp(min=1.0)),
+            (ring_out * lap_abs).sum(dim=(2, 3)).squeeze(1) / (ring_out.sum().clamp(min=1.0)),
+            (center * grad).sum(dim=(2, 3)).squeeze(1) / (center.sum().clamp(min=1.0)),
+            (border * grad).sum(dim=(2, 3)).squeeze(1) / (border.sum().clamp(min=1.0)),
+        ], dim=1)
+
+        feat = torch.cat([f1, f2, f3], dim=1)  # [B*V, 24]
+        feat = feat.view(B, V, 24).mean(dim=1)  # aggregate the 3 patches
+        return torch.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)

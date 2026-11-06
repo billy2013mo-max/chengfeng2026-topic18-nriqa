@@ -14,15 +14,91 @@ def _bokeh_view(im, r):
     ImageDraw.Draw(mask).ellipse((w * 0.15, h * 0.08, w * 0.85, h * 0.92), fill=255)
     mask = mask.filter(ImageFilter.GaussianBlur(max(1.0, r * 2)))
     return Image.composite(im, im.filter(ImageFilter.GaussianBlur(r)), mask)
+
+
+def _window_sums(energy, ws):
+    """Sum over every ws x ws window (valid positions) using an integral image."""
+    c = np.cumsum(np.cumsum(energy, axis=0), axis=1)
+    c = np.pad(c, ((1, 0), (1, 0)))
+    return c[ws:, ws:] - c[:-ws, ws:] - c[ws:, :-ws] + c[:-ws, :-ws]
+
+
+def _native_patches(im, size=448, n=3):
+    """Zero-resize 1:1 native-pixel microscope patches.
+
+    Returns n crops at native resolution:
+      - peak Sobel-gradient window (sharp edges / 1-2px ringing)
+      - peak Laplacian window (overshoot / halo)
+      - median-texture window (texture-loss / over-smoothing)
+    The search is done on a ~256px copy with an integral image; the crops
+    themselves are taken from the original pixels (no downsampling).
+    """
+    w, h = im.size
+    if w < size or h < size:
+        p = im.resize((size, size), Image.BILINEAR)
+        return [p] * n
+
+    gray = np.asarray(im.convert('L'), dtype=np.float32) / 255.0
+    scale = max(1, int(np.ceil(max(w, h) / 256.0)))
+    small = gray[::scale, ::scale]
+    if small.shape[0] <= 8 or small.shape[1] <= 8:
+        p = im.resize((size, size), Image.BILINEAR)
+        return [p] * n
+
+    gy, gx = np.gradient(small)
+    grad = np.hypot(gx, gy)
+    lap = np.abs(
+        np.gradient(np.gradient(small, axis=0), axis=0)
+        + np.gradient(np.gradient(small, axis=1), axis=1)
+    )
+    ws = max(4, min(int(round(size / scale)), min(small.shape) - 1))
+    Sg = _window_sums(grad, ws)
+    Sl = _window_sums(lap, ws)
+    if Sg.size == 0 or Sl.size == 0:
+        p = im.resize((size, size), Image.BILINEAR)
+        return [p] * n
+
+    taken = []
+
+    def pick(E, taken_):
+        for idx in np.argsort(E.ravel())[::-1]:
+            y, x = divmod(int(idx), E.shape[1])
+            cy, cx = y + ws / 2.0, x + ws / 2.0
+            if all((cy - ty) ** 2 + (cx - tx) ** 2 >= (ws * 0.7) ** 2 for ty, tx in taken_):
+                return y, x, cy, cx
+        y, x = divmod(int(np.argmax(E)), E.shape[1])
+        return y, x, y + ws / 2.0, x + ws / 2.0
+
+    p1 = pick(Sg, taken); taken.append((p1[2], p1[3]))
+    p2 = pick(Sl, taken); taken.append((p2[2], p2[3]))
+
+    med = float(np.median(Sg))
+    p3 = None
+    for idx in np.argsort(np.abs(Sg.ravel() - med)):
+        y, x = divmod(int(idx), Sg.shape[1])
+        cy, cx = y + ws / 2.0, x + ws / 2.0
+        if all((cy - ty) ** 2 + (cx - tx) ** 2 >= (ws * 0.7) ** 2 for ty, tx in taken):
+            p3 = (y, x)
+            break
+    if p3 is None:
+        p3 = p1[:2]
+
+    patches = []
+    for sy, sx in [p1[:2], p2[:2], p3]:
+        x0, y0 = int(sx * scale), int(sy * scale)
+        x1, y1 = min(w, x0 + size), min(h, y0 + size)
+        x0, y0 = max(0, x1 - size), max(0, y1 - size)
+        patches.append(im.crop((x0, y0, x1, y1)).resize((size, size), Image.BILINEAR))
+    return patches
 FULL = ['模糊','纹理损失','过锐','过度生成']
 G2I = {'无问题':0,'P2':1,'P1':2,'P0':3}
 
 class IQADataset(Dataset):
     def __init__(self, rows, imgdir_orig, imgdir_supp, names_orig, size=384, train=False, nviews=5,
-                 bokeh=0.0, bokeh_r=6.0, tiles=2):
+                 bokeh=0.0, bokeh_r=6.0, tiles=2, native=0):
         self.rows = rows; self.o = imgdir_orig; self.s = imgdir_supp
         self.names_orig = names_orig; self.size = size; self.train = train; self.nviews = nviews
-        self.bokeh = bokeh; self.bokeh_r = bokeh_r; self.tiles = tiles
+        self.bokeh = bokeh; self.bokeh_r = bokeh_r; self.tiles = tiles; self.native = native
     def __len__(self): return len(self.rows)
     def _path(self, name):
         return os.path.join(self.o, name) if name in self.names_orig else os.path.join(self.s, name)
@@ -41,6 +117,8 @@ class IQADataset(Dataset):
         for dy in range(T):
             for dx in range(T):
                 views.append(im.crop((dx*w//T, dy*h//T, (dx+1)*w//T, (dy+1)*h//T)).resize((self.size, self.size), Image.BILINEAR))
+        if self.native > 0:
+            views.extend(_native_patches(im, self.size, self.native))
         if self.train and self.bokeh > 0 and random.random() < self.bokeh and all(int(r[c]) == 0 for c in CLASSES):
             views = [_bokeh_view(v, self.bokeh_r) for v in views]
         x = np.transpose(np.stack([np.asarray(v, dtype=np.float32) for v in views]) / 255.0, (0,3,1,2))   # V,3,S,S
@@ -70,9 +148,9 @@ class CachedIQADataset(Dataset):
     """Same view pipeline as IQADataset, but reads native-resolution pixels from a lossless memmap cache."""
     def __init__(self, rows, size=384, train=False,
                  cache_bin='/dev/shm/race18_native/cache.bin', index='/dev/shm/race18_native/index.npz',
-                 bokeh=0.0, bokeh_r=6.0, tiles=2):
+                 bokeh=0.0, bokeh_r=6.0, tiles=2, native=0):
         self.rows = rows; self.size = size; self.train = train
-        self.bokeh = bokeh; self.bokeh_r = bokeh_r; self.tiles = tiles
+        self.bokeh = bokeh; self.bokeh_r = bokeh_r; self.tiles = tiles; self.native = native
         d = np.load(index, allow_pickle=True)
         self.names = list(d['names']); self.offsets = d['offsets']; self.h = d['h']; self.w = d['w']
         self.pos = {n: i for i, n in enumerate(self.names)}
@@ -103,6 +181,8 @@ class CachedIQADataset(Dataset):
         for dy in range(T):
             for dx in range(T):
                 views.append(im.crop((dx*w//T, dy*h//T, (dx+1)*w//T, (dy+1)*h//T)).resize((self.size, self.size), Image.BILINEAR))
+        if self.native > 0:
+            views.extend(_native_patches(im, self.size, self.native))
         if self.train and self.bokeh > 0 and random.random() < self.bokeh and all(int(r[c]) == 0 for c in CLASSES):
             views = [_bokeh_view(v, self.bokeh_r) for v in views]
         x = np.transpose(np.stack([np.asarray(v, dtype=np.float32) for v in views]) / 255.0, (0,3,1,2))

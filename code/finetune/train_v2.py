@@ -88,6 +88,8 @@ class MultiNetV2(nn.Module):
             feat = fwd(z).view(B, V, -1).float()
             out.append(self._agg(feat, attn_mod))
         fused = self.drop(self.norm(torch.cat(out, dim=1)))
+        if hasattr(self, '_apply_physics'):
+            fused = self._apply_physics(fused, x)
         return self.head_cum(fused), self.head_ex(fused), self.gate(fused).squeeze(1)
 
 

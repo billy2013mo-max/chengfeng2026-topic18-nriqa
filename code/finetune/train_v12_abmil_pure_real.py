@@ -76,10 +76,98 @@ def compute_asymmetric_truncated_soft_loss(logits_ex: torch.Tensor, g: torch.Ten
     return loss_soft / len(FULL)
 
 
+def compute_scene_aware_asymmetric_ordinal_loss(
+    logits_cum: torch.Tensor,
+    g: torch.Tensor,
+    scene_emb: torch.Tensor = None,
+    m_p0_p1: float = 0.65,
+    m_p1_p2: float = 0.45,
+    m_pos_clean: float = 0.80,
+    clean_guard_weight: float = 2.5,
+) -> torch.Tensor:
+    """SA-AOR loss (roadmap PDF Sec 4.2).
+
+    Decomposes the ordinal boundaries onto their dedicated cumulative channels:
+      P0 vs P1 -> the P(Y=3|Y>=2) channel
+      P1 vs P2 -> the P(Y>=2|Y>=1) channel
+      Pos vs 0 -> the P(Y>=1) channel
+    Scene-similar pairs get a higher weight (1 + 1.5*exp((cos-1)/0.15)), and
+    Clean images get a 2.5x asymmetric focal penalty on the first channel.
+    """
+    B = logits_cum.shape[0]
+    device = logits_cum.device
+    if scene_emb is not None:
+        e = F.normalize(scene_emb.detach().float(), p=2, dim=-1)
+        sim = e @ e.t()
+        w_scene = 1.0 + 1.5 * torch.exp((sim - 1.0) / 0.15)
+    else:
+        w_scene = torch.ones((B, B), device=device)
+
+    is_clean_img = (g.sum(dim=1) == 0)
+    loss = logits_cum.new_tensor(0.0)
+    col = 0
+    for ci, c in enumerate(CLASSES):
+        y = g[:, ci]
+        if c in FULL:
+            l_ge1 = logits_cum[:, col]
+            l_ge2 = logits_cum[:, col + 1]
+            l_eq3 = logits_cum[:, col + 2]
+            col += 3
+            loss = loss + F.relu(l_eq3 - l_ge2).mean() + F.relu(l_ge2 - l_ge1).mean()
+            if is_clean_img.any():
+                p = torch.sigmoid(l_ge1[is_clean_img])
+                loss = loss + (-(1.0 + clean_guard_weight * p.pow(2)) *
+                               torch.log(1.0 - p + 1e-7)).mean()
+            for yi, yj, lch, margin in ((3, 2, l_eq3, m_p0_p1), (2, 1, l_ge2, m_p1_p2)):
+                pos, neg = (y == yi), (y == yj)
+                if pos.any() and neg.any():
+                    diff = lch[pos].unsqueeze(1) - lch[neg].unsqueeze(0)
+                    w = w_scene[pos][:, neg]
+                    loss = loss + (((-diff * margin).sigmoid() * w).sum() / w.sum().clamp(min=1.0))
+            pos, neg = (y >= 1), (y == 0)
+            if pos.any() and neg.any():
+                diff = l_ge1[pos].unsqueeze(1) - l_ge1[neg].unsqueeze(0)
+                w = w_scene[pos][:, neg]
+                loss = loss + (((-diff * m_pos_clean).sigmoid() * w).sum() / w.sum().clamp(min=1.0))
+        else:
+            l = logits_cum[:, col]
+            col += 1
+            pos, neg = (y == 3), (y == 0)
+            if pos.any() and neg.any():
+                diff = l[pos].unsqueeze(1) - l[neg].unsqueeze(0)
+                w = w_scene[pos][:, neg]
+                loss = loss + (((-diff * m_pos_clean).sigmoid() * w).sum() / w.sum().clamp(min=1.0))
+    return loss / len(CLASSES)
+
+
 class MultiNetV12_ABMIL(MultiNetV2):
     """
-    Extends MultiNetV2 with Real-to-Real Latent Tile CutMix during training.
+    Extends MultiNetV2 with Real-to-Real Latent Tile CutMix during training and
+    a 24-dim native-pixel physics residual (Phase B).
     """
+    def __init__(self, specs, dropout=0.1, n_native=0):
+        super().__init__(specs, dropout)
+        self.n_native = int(n_native)
+        if self.n_native > 0:
+            from abmil_layers import NativePixelPhysicsExtractor
+            self.phys_extractor = NativePixelPhysicsExtractor()
+            d = sum(4 * x[5] for x in specs)
+            self.phys_norm = nn.LayerNorm(24)
+            self.phys_proj = nn.Sequential(
+                nn.Linear(24, d), nn.GELU(), nn.Linear(d, d)
+            )
+            nn.init.zeros_(self.phys_proj[-1].weight)
+            nn.init.zeros_(self.phys_proj[-1].bias)
+            self.phys_gate = nn.Parameter(torch.zeros(1))
+
+    def _apply_physics(self, fused, x):
+        if getattr(self, 'n_native', 0) <= 0:
+            return fused
+        native = x[:, -self.n_native:]
+        with torch.no_grad():
+            phys = self.phys_extractor(native)
+        return fused + torch.tanh(self.phys_gate) * self.phys_proj(self.phys_norm(phys))
+
     def forward_with_tile_cutmix(self, x, g, p_cutmix: float = 0.25):
         B, V, C, H, W = x.shape
         feats_per_bb = []
@@ -90,6 +178,7 @@ class MultiNetV12_ABMIL(MultiNetV2):
             z = ((x.view(B * V, C, H, W) - mu) / sd).to(dt)
             feat = fwd(z).view(B, V, -1).float()
             feats_per_bb.append(feat)
+        self._last_scene_emb = feats_per_bb[0][:, 0].detach() if feats_per_bb else None
 
         if self.training and B >= 2 and V >= 5 and random.random() < p_cutmix:
             perm = torch.randperm(B, device=x.device)
@@ -109,14 +198,16 @@ class MultiNetV12_ABMIL(MultiNetV2):
 
         out = [self._agg(feat, attn_mod) for feat, attn_mod in zip(feats_per_bb, self.tile_attn)]
         fused = self.drop(self.norm(torch.cat(out, dim=1)))
+        fused = self._apply_physics(fused, x)
         return self.head_cum(fused), self.head_ex(fused), self.gate(fused).squeeze(1), g_mixed
 
 
 @torch.no_grad()
-def infer_150_tta(net, ordered_names, dev, size, tiles, alpha_ex=0.45):
+def infer_150_tta(net, ordered_names, dev, size, tiles, alpha_ex=0.45, native=0):
     net.eval()
     test_rows = [{'name': nm, **{c: 0 for c in CLASSES}} for nm in ordered_names]
-    ds_150 = IQADataset(test_rows, TEST_IMG_DIR, TEST_IMG_DIR, set(ordered_names), size=size, train=False, tiles=tiles)
+    ds_150 = IQADataset(test_rows, TEST_IMG_DIR, TEST_IMG_DIR, set(ordered_names), size=size,
+                        train=False, tiles=tiles, native=native)
     dl_150 = DataLoader(ds_150, batch_size=4, shuffle=False, num_workers=4, pin_memory=True)
 
     P0, P1, P2 = [], [], []
@@ -142,6 +233,7 @@ def main():
     ap.add_argument('--grad-accum', type=int, default=2)
     ap.add_argument('--size', type=int, default=448)
     ap.add_argument('--tiles', type=int, default=3)
+    ap.add_argument('--native', type=int, default=3, help='Zero-resize 1:1 native physics patches (Phase B)')
     ap.add_argument('--lr-full', type=float, default=8.875e-5)
     ap.add_argument('--lr-last', type=float, default=1.5e-4)
     ap.add_argument('--lr-head', type=float, default=1.0e-3)
@@ -201,8 +293,9 @@ def main():
 
     orig = set(r['name'] for r in csv.DictReader(open('data/manifest.csv')))
     def mk(rows_, tr_):
-        return (CachedIQADataset(rows_, a.size, tr_, tiles=a.tiles)
-                if CACHE_OK else IQADataset(rows_, 'data/images', 'data/images_supp', orig, a.size, tr_, tiles=a.tiles))
+        return (CachedIQADataset(rows_, a.size, tr_, tiles=a.tiles, native=a.native)
+                if CACHE_OK else IQADataset(rows_, 'data/images', 'data/images_supp', orig, a.size, tr_,
+                                            tiles=a.tiles, native=a.native))
 
     dtr = mk(tr, True)
     dva = mk(va, False)
@@ -212,7 +305,7 @@ def main():
     lva = DataLoader(dva, batch_size=a.batch, shuffle=False, num_workers=a.workers)
     lte = DataLoader(dte, batch_size=a.batch, shuffle=False, num_workers=a.workers)
 
-    net = MultiNetV12_ABMIL([x[0] for x in specs], dropout=a.dropout).to(dev)
+    net = MultiNetV12_ABMIL([x[0] for x in specs], dropout=a.dropout, n_native=a.native).to(dev)
     groups = []
     abmil_params = []
     for (b, name, mode) in specs:
@@ -250,7 +343,7 @@ def main():
     groups.append({'params': head_params, 'lr': a.lr_head})
     tr_p = [p for g in groups for p in g['params']]
     print(f'[V12 ABMIL+3LayerPyramid+AsymSoft] trainable {sum(p.numel() for p in tr_p)/1e6:.1f}M / {sum(p.numel() for p in net.parameters())/1e6:.1f}M '
-          f'(size={a.size}, tiles={a.tiles}, views={1 + a.tiles*a.tiles})', flush=True)
+          f'(size={a.size}, tiles={a.tiles}, native={a.native}, views={1 + a.tiles*a.tiles + a.native})', flush=True)
 
     opt = torch.optim.AdamW(groups, weight_decay=a.wd)
     Y = targets_from_grades(torch.tensor([[int(r[c]) for c in CLASSES] for r in tr]))
@@ -279,7 +372,9 @@ def main():
             loss_v3 = v3_loss_fn(lc.float(), le.float(), gl.float(), g_mix, bce_loss_none,
                                  p0_clean_weight=a.p0_clean_weight, emd_weight=a.emd_weight, p1_ce_weight=a.p1_ce_weight)
             loss_asym_soft = compute_asymmetric_truncated_soft_loss(le.float(), g_mix, sigma=a.soft_sigma)
-            loss = loss_v3 + 0.30 * loss_asym_soft
+            loss_sa_or = compute_scene_aware_asymmetric_ordinal_loss(
+                lc.float(), g_mix, scene_emb=getattr(net, '_last_scene_emb', None))
+            loss = loss_v3 + 0.30 * loss_asym_soft + 0.15 * loss_sa_or
             (loss / accum).backward()
             tot += loss.item()
             nb += 1
@@ -329,7 +424,8 @@ def main():
 
     tpl = json.load(open('results/v2_full/template_150.json'))
     ordered_names_150 = [e['image'] for e in tpl]
-    t150_p0, t150_p1, t150_p2 = infer_150_tta(net, ordered_names_150, dev, a.size, a.tiles, alpha_ex=a.alpha_ex)
+    t150_p0, t150_p1, t150_p2 = infer_150_tta(net, ordered_names_150, dev, a.size, a.tiles,
+                                              alpha_ex=a.alpha_ex, native=a.native)
     print(f'Inferred test_150 (2x Flip TTA): p0_mean={t150_p0.mean():.4f}, p1_mean={t150_p1.mean():.4f}, p2_mean={t150_p2.mean():.4f}', flush=True)
 
     res = {
