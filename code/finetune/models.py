@@ -16,7 +16,18 @@ def _enable_pos_interp(m):
     return m
 
 def build_backbone(name, device='cuda'):
-    """Returns (module, dim, mean, std, block_list_accessor, dtype)."""
+    """Returns (module, dim, mean, std, block_list_accessor, dtype).
+    Supports `_abmil` suffix (e.g. `internvit_abmil`, `pecoreg_abmil`, `dinov3l_abmil`, `cradio_abmil`, `siglip2_abmil`)
+    which upgrades naive `.mean(1)` patch pooling to `DualLayerTapWrapper` (Layer 75% + 100%)
+    + `TokenGatedABMILPool` (Spatial Std + Top-5% Anomaly Token + Gated ABMIL).
+    """
+    use_abmil = False
+    if name.endswith('_abmil'):
+        use_abmil = True
+        name = name[:-6]
+
+    from abmil_layers import TokenGatedABMILPool, DualLayerTapWrapper
+
     if name == 'siglip2':
         from transformers import SiglipVisionModel, AutoImageProcessor
         repo = 'google/siglip2-so400m-patch14-384'
@@ -28,7 +39,15 @@ def build_backbone(name, device='cuda'):
             proc = AutoImageProcessor.from_pretrained(repo)
         mean, std = proc.image_mean, proc.image_std
         _enable_pos_interp(m)
-        def fwd(x): return m(pixel_values=x).last_hidden_state.mean(1)
+        if use_abmil:
+            m.dual_tap = DualLayerTapWrapper(m.encoder.layers, 1152)
+            m.abmil_pool = TokenGatedABMILPool(1152)
+            def fwd(x):
+                t = m(pixel_values=x).last_hidden_state.float()
+                t = m.dual_tap.fuse(t)
+                return m.abmil_pool(t, has_cls=False)
+        else:
+            def fwd(x): return m(pixel_values=x).last_hidden_state.mean(1)
         return m, fwd, mean, std, m.encoder.layers, 1152
     if name == 'siglip2g':
         from transformers import SiglipVisionModel, AutoImageProcessor
@@ -37,7 +56,15 @@ def build_backbone(name, device='cuda'):
         proc = AutoImageProcessor.from_pretrained(repo)
         mean, std = proc.image_mean, proc.image_std
         _enable_pos_interp(m)
-        def fwd(x): return m(pixel_values=x).last_hidden_state.mean(1)
+        if use_abmil:
+            m.dual_tap = DualLayerTapWrapper(m.encoder.layers, 1536)
+            m.abmil_pool = TokenGatedABMILPool(1536)
+            def fwd(x):
+                t = m(pixel_values=x).last_hidden_state.float()
+                t = m.dual_tap.fuse(t)
+                return m.abmil_pool(t, has_cls=False)
+        else:
+            def fwd(x): return m(pixel_values=x).last_hidden_state.mean(1)
         return m, fwd, mean, std, m.encoder.layers, 1536
     if name == 'eupe':
         m = torch.hub.load('/tmp/race18/eupe_repo', 'eupe_vitb16', source='local',
@@ -65,15 +92,15 @@ def build_backbone(name, device='cuda'):
         for f in sorted(glob.glob('models/internvit-6b/model-*.safetensors')): sd.update(load_file(f))
         m.load_state_dict(sd, strict=False)
         del sd
-        # pos-embed is frozen at 448 (32x32+1); resize once at build time, before the optimizer
-        # is created, so the optimizer keeps a reference to the same Parameter object.
         _iv_size = int(os.environ.get('INTERNVIT_SIZE', '384'))
         if _iv_size != cfg.image_size:
             m.resize_pos_embeddings(cfg.image_size, _iv_size, cfg.patch_size)
         _iv_grid = [_iv_size]
         m = m.to(torch.bfloat16)
+        if use_abmil:
+            m.dual_tap = DualLayerTapWrapper(m.encoder.layers, 3200).float()
+            m.abmil_pool = TokenGatedABMILPool(3200).float()
         def _fit_pos(s):
-            # in-place pos-embed interpolation for a non-default input size (keeps param identity)
             if s == _iv_grid[0]: return
             pe = m.embeddings.position_embedding
             p = cfg.patch_size
@@ -84,37 +111,66 @@ def build_backbone(name, device='cuda'):
                 rest = rest.to(pe.dtype).reshape(1, pe.shape[-1], -1).permute(0,2,1)
                 pe.data = torch.cat([cls, rest], 1).contiguous()
             _iv_grid[0] = s
-        def fwd(x):
-            # frozen embeddings => gradient checkpointing severs grad flow (last-k grads all None)
-            m.encoder.gradient_checkpointing = bool(m.embeddings.patch_embedding.weight.requires_grad)
-            _fit_pos(x.shape[-1])
-            t = m(pixel_values=x.to(torch.bfloat16)).last_hidden_state
-            return torch.cat([t[:,0], t[:,1:].mean(1)], 1)
+        if use_abmil:
+            def fwd(x):
+                m.encoder.gradient_checkpointing = bool(m.embeddings.patch_embedding.weight.requires_grad)
+                _fit_pos(x.shape[-1])
+                t = m(pixel_values=x.to(torch.bfloat16)).last_hidden_state.float()
+                if m.dual_tap._mid_cache is not None:
+                    m.dual_tap._mid_cache = m.dual_tap._mid_cache.float()
+                t = m.dual_tap.fuse(t)
+                pooled = m.abmil_pool(t, has_cls=True)
+                return torch.cat([t[:, 0], pooled], 1)
+        else:
+            def fwd(x):
+                m.encoder.gradient_checkpointing = bool(m.embeddings.patch_embedding.weight.requires_grad)
+                _fit_pos(x.shape[-1])
+                t = m(pixel_values=x.to(torch.bfloat16)).last_hidden_state
+                return torch.cat([t[:,0], t[:,1:].mean(1)], 1)
         return m, fwd, (0.485,0.456,0.406), (0.229,0.224,0.225), m.encoder.layers, 6400
     if name == 'cradio':
         from transformers import AutoModel
         m = AutoModel.from_pretrained('models/c-radio-v4-h', trust_remote_code=True)
-        def fwd(x):
-            summ, feat = m(x)
-            return torch.cat([summ, feat.mean(1)], 1)
+        if use_abmil:
+            m.abmil_pool = TokenGatedABMILPool(1280)
+            def fwd(x):
+                summ, feat = m(x)
+                return torch.cat([summ.float(), m.abmil_pool(feat.float(), has_cls=False)], 1)
+        else:
+            def fwd(x):
+                summ, feat = m(x)
+                return torch.cat([summ, feat.mean(1)], 1)
         return m, fwd, (0,0,0), (1,1,1), m.radio_model.model.blocks, 2560+1280
     if name in ('pecorel','pecoreg'):
-        # PE-Core (Meta Perception Encoder). patch14 needs a divisible input; the shared
-        # pipeline runs at 384, so resize to the native 448 here (linear op, commutes with norm).
         import timm
         from safetensors.torch import load_file
         arch,path,size={'pecorel':('vit_pe_core_large_patch14_336','models/pe-core-l14/model.safetensors',448),
                         'pecoreg':('vit_pe_core_gigantic_patch14_448','models/pe-core-g14/model.safetensors',448)}[name]
         m=timm.create_model(arch,pretrained=False,num_classes=0,dynamic_img_size=True)
-        m.load_state_dict(load_file(path),strict=False)   # only the classification head differs
+        m.load_state_dict(load_file(path),strict=False)
         dc=timm.data.resolve_data_config({},model=m)
-        def fwd(x):
-            if x.shape[-1]!=size:
-                x=torch.nn.functional.interpolate(x,size=(size,size),mode='bicubic',align_corners=False)
-            t=m.forward_features(x)
-            if m.num_prefix_tokens:
-                return torch.cat([t[:,0],t[:,m.num_prefix_tokens:].mean(1)],1)
-            return t.mean(1)
+        if use_abmil:
+            m.dual_tap = DualLayerTapWrapper(m.blocks, m.embed_dim)
+            m.abmil_pool = TokenGatedABMILPool(m.embed_dim)
+            def fwd(x):
+                if x.shape[-1]!=size:
+                    x=torch.nn.functional.interpolate(x,size=(size,size),mode='bicubic',align_corners=False)
+                t=m.forward_features(x).float()
+                if m.dual_tap._mid_cache is not None:
+                    m.dual_tap._mid_cache = m.dual_tap._mid_cache.float()
+                t=m.dual_tap.fuse(t)
+                if m.num_prefix_tokens:
+                    pt = torch.cat([t[:, :1], t[:, m.num_prefix_tokens:]], dim=1)
+                    return torch.cat([t[:, 0], m.abmil_pool(pt, has_cls=True)], 1)
+                return m.abmil_pool(t, has_cls=False)
+        else:
+            def fwd(x):
+                if x.shape[-1]!=size:
+                    x=torch.nn.functional.interpolate(x,size=(size,size),mode='bicubic',align_corners=False)
+                t=m.forward_features(x)
+                if m.num_prefix_tokens:
+                    return torch.cat([t[:,0],t[:,m.num_prefix_tokens:].mean(1)],1)
+                return t.mean(1)
         d=2*m.embed_dim if m.num_prefix_tokens else m.embed_dim
         return m, fwd, dc['mean'], dc['std'], m.blocks, d
     if name == 'dinov3l':
@@ -123,9 +179,20 @@ def build_backbone(name, device='cuda'):
         m=timm.create_model('vit_large_patch16_dinov3',pretrained=False,num_classes=0,dynamic_img_size=True)
         m.load_state_dict(load_file('models/dinov3-vitl16/model.safetensors'),strict=True)
         dc=timm.data.resolve_data_config({},model=m)
-        def fwd(x):
-            t=m.forward_features(x)      # CLS + 4 register tokens + patch tokens
-            return torch.cat([t[:,0],t[:,m.num_prefix_tokens:].mean(1)],1)
+        if use_abmil:
+            m.dual_tap = DualLayerTapWrapper(m.blocks, m.embed_dim)
+            m.abmil_pool = TokenGatedABMILPool(m.embed_dim)
+            def fwd(x):
+                t=m.forward_features(x).float()
+                if m.dual_tap._mid_cache is not None:
+                    m.dual_tap._mid_cache = m.dual_tap._mid_cache.float()
+                t=m.dual_tap.fuse(t)
+                pt = torch.cat([t[:, :1], t[:, m.num_prefix_tokens:]], dim=1)
+                return torch.cat([t[:, 0], m.abmil_pool(pt, has_cls=True)], 1)
+        else:
+            def fwd(x):
+                t=m.forward_features(x)
+                return torch.cat([t[:,0],t[:,m.num_prefix_tokens:].mean(1)],1)
         return m, fwd, dc['mean'], dc['std'], m.blocks, 2*m.embed_dim
     raise ValueError(name)
 
