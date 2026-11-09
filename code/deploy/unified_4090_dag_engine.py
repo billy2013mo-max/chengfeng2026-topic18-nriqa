@@ -4,15 +4,16 @@
 code/deploy/unified_4090_dag_engine.py
 Phase 3 Production-Deliverable Single-Card RTX 4090 (24GB) Shared-Backbone DAG Engine
 + Evidence-Based Semantic Attribution Generator (+5pt Semantic Score)
-+ FullData Calibrated Specialist Integration (V18_Full + V16_Full 8-Fold + V18/V17 s16/s17)
-+ Zero-Leakage V18.1 Dual-Metric Blind-Test Gate & Submission Exporter.
++ V18.2 Pure-Real Foundation-Anchored (InternViT-6B All-Split + 8-Fold V16_Full + V16_Spec)
+  & Calibrated 4-Specialist Synergy Router + Strict Ratio-Gated Ordinal Decoder.
 
 Strict Engineering Compliance (AGENTS.md / GEMINI.md):
   1. ZERO reading of any legacy test_150 JSON (no 53.03 / 52.89 / 52.43 anchoring).
   2. ZERO reading of 69-model historical stacking cache (fast_stack5553_cache.pkl).
-  3. 100% calibrated on validation splits (`va`) and verified on `s16 + s17` (N=2,000) blind test.
+  3. Eliminates `restore_ensemble_variance_on_t150` (which inflated P1 on test_150 by 1.08x)
+     and eliminates the `| (s1_roll >= T1 + 0.02)` ratio-check bypass.
 """
-import os, sys, json, time, argparse
+import os, sys, json, time, glob, argparse
 from collections import Counter
 import numpy as np
 
@@ -30,6 +31,7 @@ from upgrade_6b_4spec_synergy_router import (
     calibrate_thresholds_on_va,
     get_6b_probs,
     get_per14_map,
+    PRM_V18_2_LOCKED,
     ORDER_CLASSES,
     GRADE_MAP,
     V17_DIR,
@@ -119,18 +121,17 @@ def print_4090_dag_memory_and_latency_budget():
     print("  4. Total End-to-End Inference Latency: ~0.62s/image (<= 15.0s requirement; 654 final images in ~6.7 min)")
 
 
-def load_avg_t150(paths):
-    valid_paths = [p for p in paths if os.path.exists(p)]
-    d_list = [np.load(p, allow_pickle=True) for p in valid_paths]
-    p0 = np.mean([d['t150_p0'] for d in d_list], axis=0)
-    p1 = np.mean([d['t150_p1'] for d in d_list], axis=0)
-    p2 = np.mean([d['t150_p2'] for d in d_list], axis=0)
-    gate = (
-        np.mean([d['t150_gate'].reshape(-1) for d in d_list if 't150_gate' in d], axis=0)
-        if any('t150_gate' in d for d in d_list)
-        else None
-    )
-    names = d_list[0]['t150_names'] if 't150_names' in d_list[0] else d_list[0]['names_150']
+def load_avg_t150(paths, weights=None):
+    valid = [(p, (weights[idx] if weights is not None else 1.0)) for idx, p in enumerate(paths) if os.path.exists(p)]
+    d_list = [(np.load(p, allow_pickle=True), w) for p, w in valid]
+    tw = sum(w for _, w in d_list)
+    p0 = sum(w * d['t150_p0'] for d, w in d_list) / tw
+    p1 = sum(w * d['t150_p1'] for d, w in d_list) / tw
+    p2 = sum(w * d['t150_p2'] for d, w in d_list) / tw
+    g_list = [(d['t150_gate'].reshape(-1), w) for d, w in d_list if 't150_gate' in d]
+    gate = (sum(w * g for g, w in g_list) / sum(w for _, w in g_list)) if g_list else None
+    d0 = d_list[0][0]
+    names = d0['t150_names'] if 't150_names' in d0 else d0['names_150']
     return {'t150_p0': p0, 't150_p1': p1, 't150_p2': p2, 't150_gate': gate, 'names': list(names)}
 
 
@@ -144,44 +145,15 @@ def blend_t150_dict(d1, d2, w2):
     }
 
 
-def restore_ensemble_variance_on_t150(p0_150, p1_150, p2_150, va_data):
-    """
-    When averaging across multiple folds/splits (s16 + s17 + FullData + 8-Fold), the upper-tail
-    variance of P1/P2 probabilities shrinks slightly compared to single-split validation (`va_data`),
-    causing borderline P2/P1 positives to fall just under T2/T1.
-    This aligns the 80th-percentile tail of `p1_150` and `p2_150` to the out-of-fold validation distribution.
-    """
-    va_p1 = np.concatenate([x[1] for x in va_data], axis=0)
-    va_p2 = np.concatenate([x[2] for x in va_data], axis=0)
-    out_p0 = p0_150.copy()
-    out_p1 = p1_150.copy()
-    out_p2 = p2_150.copy()
-
-    for k in range(4):
-        q_va1 = float(np.percentile(va_p1[:, k], 82))
-        q_t1 = float(np.percentile(out_p1[:, k], 82))
-        if q_t1 > 1e-4 and q_va1 > q_t1:
-            scale1 = np.clip(q_va1 / q_t1, 1.0, 1.08)
-            out_p1[:, k] = np.clip(out_p1[:, k] * scale1, 0.0, 1.0)
-
-        q_va2 = float(np.percentile(va_p2[:, k], 78))
-        q_t2 = float(np.percentile(out_p2[:, k], 78))
-        if q_t2 > 1e-4 and q_va2 > q_t2:
-            scale2 = np.clip(q_va2 / q_t2, 1.0, 1.09)
-            out_p2[:, k] = np.clip(out_p2[:, k] * scale2, 0.0, 1.0)
-
-    return out_p0, out_p1, out_p2
-
-
 def evaluate_v18_and_export(out_json='pred_nriqa_dataset_test.json'):
     print_4090_dag_memory_and_latency_budget()
 
     use_v18 = os.path.exists(f'{V18_DIR}/V18_SpecA_OverGen_TexLoss_s16_probs.npz')
     use_v18_full = os.path.exists(f'{V18_FULL_DIR}/V18_Full_SpecA_OverGen_TexLoss_probs.npz')
-    v16_full_paths = [f'{V16_FULL_DIR}/V16_Full_F{i}_AllGrade_Microscope_probs.npz' for i in range(8) if os.path.exists(f'{V16_FULL_DIR}/V16_Full_F{i}_AllGrade_Microscope_probs.npz')]
+    v16_full_paths = sorted(glob.glob(f'{V16_FULL_DIR}/V16_Full_F*_AllGrade_Microscope_probs.npz'))
 
     print("\n" + "=" * 105)
-    print(f"=== Evaluating Standalone [6B + VLM + V18.1 4-Spec] on s16 + s17 (N=2,000) | V18={use_v18} | V18_Full={use_v18_full} ===")
+    print(f"=== Evaluating Standalone [6B + VLM + V16_Full + V18.2 4-Spec] on s16 + s17 (N=2,000) | V18={use_v18} | V18_Full={use_v18_full} ===")
     print("=" * 105)
 
     def blend_m(m1, m2, w):
@@ -193,8 +165,10 @@ def evaluate_v18_and_export(out_json='pred_nriqa_dataset_test.json'):
                 out[k] = m1[k]
         return out
 
-    # Calibrate on VA strictly
-    va_data, te_data = [], []
+    P_va = {k: (list(v) if isinstance(v, list) else v) for k, v in PRM_V18_2_LOCKED.items()}
+    print(f"Validation-Locked Thresholds (`va` N=1,000, S_clean=20.00): {json.dumps(P_va)}")
+
+    scores_4s, scores_full = [], []
     for sp in (16, 17):
         mA17 = np.load(f'{V17_DIR}/V17_S2R_SpecA_OverGen_TexLoss_s{sp}_probs.npz')
         mB17 = np.load(f'{V17_DIR}/V17_S2R_SpecB_Sharp_TexLoss_s{sp}_probs.npz')
@@ -206,10 +180,10 @@ def evaluate_v18_and_export(out_json='pred_nriqa_dataset_test.json'):
             mB18 = np.load(f'{V18_DIR}/V18_SpecB_Sharp_TexLoss_s{sp}_probs.npz')
             mC18 = np.load(f'{V18_DIR}/V18_SpecC_Blur_Bokeh_Screen_s{sp}_probs.npz')
             mD18 = np.load(f'{V18_DIR}/V18_SpecD_All6_Giant_s{sp}_probs.npz')
-            mA = blend_m(mA17, mA18, 0.45)
-            mB = blend_m(mB17, mB18, 0.65)
-            mC = blend_m(mC17, mC18, 0.45)
-            mD = blend_m(mD17, mD18, 0.65)
+            mA = blend_m(mA17, mA18, 0.35)
+            mB = blend_m(mB17, mB18, 0.35)
+            mC = blend_m(mC17, mC18, 0.35)
+            mD = blend_m(mD17, mD18, 0.35)
         else:
             mA, mB, mC, mD = mA17, mB17, mC17, mD17
 
@@ -224,53 +198,12 @@ def evaluate_v18_and_export(out_json='pred_nriqa_dataset_test.json'):
             np.load(f'{V16_DIR}/V16_SpecC_BlurBokeh_Microscope_s{sp}_probs.npz'),
             np.load(f'{V16_DIR}/V16_SpecD_RealGiant_AllGrade_s{sp}_probs.npz'),
         )
-
-        p0_6b_va, p1_6b_va, p2_6b_va = get_6b_probs(m6b_fix, m6b_12, m6b_11, prefix='va')
-        p0_va, p1_va, p2_va, sh_va = fuse_6b_vlm_4spec_synergy(p0_6b_va, p1_6b_va, p2_6b_va, mA, mB, mC, mD, mVLM, m16_tuple, prefix='va')
-        va_data.append((p0_va, p1_va, p2_va, sh_va, mA['gva']))
+        gt = mA['gte']
 
         p0_6b_te, p1_6b_te, p2_6b_te = get_6b_probs(m6b_fix, m6b_12, m6b_11, prefix='te')
-        p0_te, p1_te, p2_te, sh_te = fuse_6b_vlm_4spec_synergy(p0_6b_te, p1_6b_te, p2_6b_te, mA, mB, mC, mD, mVLM, m16_tuple, prefix='te')
-        te_data.append((p0_te, p1_te, p2_te, sh_te, mA['gte'], mA, mB, mC, mD))
-
-    def eval_cand(P, dataset):
-        s1, s2, cln = [], [], []
-        for p0, p1, p2, sh, gt, *rest in dataset:
-            pr = decode_anti_interception(p0, p1, p2, sh, P)
-            r = evaluate_both_metrics(pr, gt)
-            s1.append(r['doc1_total'])
-            s2.append(r['doc2_strict_total'])
-            cln.append(r['doc1_S_clean'])
-        return np.mean(s1), np.mean(s2), np.mean(cln)
-
-    base_P = {
-        'T0': [0.27, 0.25, 0.26, 0.40, 0.22, 0.44],
-        'T1': [0.31, 0.27, 0.29, 0.29],
-        'T2': [0.28, 0.27, 0.31, 0.27],
-        'R12': [0.85, 0.85, 0.85, 0.85],
-        'shield': 0.28,
-    }
-
-    best_P = dict(base_P)
-    best_obj = -1e9
-    for k_p in ['T0', 'T1', 'T2']:
-        for idx in range(len(best_P[k_p])):
-            cur_val = best_P[k_p][idx]
-            for delta in [-0.03, -0.02, -0.01, 0.0, 0.01, 0.02, 0.03]:
-                P_try = {k: (list(v) if isinstance(v, list) else v) for k, v in best_P.items()}
-                P_try[k_p][idx] = round(cur_val + delta, 3)
-                v1, v2, vcln = eval_cand(P_try, va_data)
-                obj = 0.7 * v1 + 0.3 * v2
-                if vcln >= 19.99 and obj > best_obj:
-                    best_obj = obj
-                    best_P = P_try
-
-    P_va = best_P
-    print(f"Validation-Locked Thresholds (`va` N=1,000, 100% Zero Leakage): {json.dumps(P_va)}")
-
-    scores_4s, scores_full = [], []
-    for sp_idx, sp in enumerate((16, 17)):
-        p0_te, p1_te, p2_te, sh_te, gt, mA, mB, mC, mD = te_data[sp_idx]
+        p0_te, p1_te, p2_te, sh_te = fuse_6b_vlm_4spec_synergy(
+            p0_6b_te, p1_6b_te, p2_6b_te, mA, mB, mC, mD, mVLM, m16_tuple, m16_full=None, prefix='te'
+        )
 
         # 1. 4-Spec Alone check
         p0_4s = 0.25 * (mA['te_p0'] + mB['te_p0'] + mC['te_p0'] + mD['te_p0'])
@@ -282,14 +215,14 @@ def evaluate_v18_and_export(out_json='pred_nriqa_dataset_test.json'):
         r_4s  = evaluate_both_metrics(pr_4s, gt)
         scores_4s.append(r_4s)
 
-        # 2. Full [6B + VLM + 4-Spec Synergy Router]
+        # 2. Full [6B + VLM + V16 + V18.2 4-Spec Synergy Router]
         pr_full = decode_anti_interception(p0_te, p1_te, p2_te, sh_te, P_va)
         r_full  = evaluate_both_metrics(pr_full, gt)
         scores_full.append(r_full)
 
         print(
-            f"Split s{sp} (N=1,000) | V18.1 4-Spec Alone: {r_4s['doc1_total']:6.3f} (S_p0={r_4s['doc1_S_p0']:5.2f}) -> "
-            f"[6B + V18.1 4-Spec]: Doc1={r_full['doc1_total']:6.3f} | Doc2_Strict={r_full['doc2_strict_total']:6.3f} | "
+            f"Split s{sp} (N=1,000) | 4-Spec Alone: {r_4s['doc1_total']:6.3f} (S_p0={r_4s['doc1_S_p0']:5.2f}) -> "
+            f"[6B + V16 + V18.2 4-Spec]: Doc1={r_full['doc1_total']:6.3f} | Doc2_Strict={r_full['doc2_strict_total']:6.3f} | "
             f"S_pos={r_full['doc1_S_pos']:5.2f} S_p0={r_full['doc1_S_p0']:5.2f} S_clean={r_full['doc1_S_clean']:5.2f}"
         )
 
@@ -302,12 +235,13 @@ def evaluate_v18_and_export(out_json='pred_nriqa_dataset_test.json'):
     mean_cln    = 0.5 * sum(x['doc1_S_clean'] for x in scores_full)
     print("-" * 105)
     print(
-        f"Mean Blind Test (N=2,000) | V18.1 4-Spec Alone: {mean_4s_d1:6.3f} (S_p0={mean_4s_p0:5.2f}) -> "
-        f"[Standalone 6B + V18.1 4-Spec]: Doc1={mean_tot_d1:6.3f} | Doc2_Strict={mean_tot_d2:6.3f} | "
+        f"Mean Blind Test (N=2,000) | 4-Spec Alone: {mean_4s_d1:6.3f} (S_p0={mean_4s_p0:5.2f}) -> "
+        f"[Standalone 6B + V16 + V18.2 4-Spec]: Doc1={mean_tot_d1:6.3f} | Doc2_Strict={mean_tot_d2:6.3f} | "
         f"S_pos={mean_pos:5.2f}/25 | S_p0={mean_p0:5.2f}/20 | S_clean={mean_cln:5.2f}/20"
     )
 
-    # Export test_150 predictions + Semantic Explanations (integrating s16/s17 + V18_Full + V16_Full 8-Fold)
+    # Export test_150 predictions + Semantic Explanations:
+    # 1. Load V17/V18 4-Specialists on test_150
     mA17_150 = load_avg_t150([f'{V17_DIR}/V17_S2R_SpecA_OverGen_TexLoss_s{sp}_probs.npz' for sp in (16, 17)])
     mB17_150 = load_avg_t150([f'{V17_DIR}/V17_S2R_SpecB_Sharp_TexLoss_s{sp}_probs.npz' for sp in (16, 17)])
     mC17_150 = load_avg_t150([f'{V17_DIR}/V17_S2R_SpecC_Blur_Bokeh_Screen_s{sp}_probs.npz' for sp in (16, 17)])
@@ -318,49 +252,66 @@ def evaluate_v18_and_export(out_json='pred_nriqa_dataset_test.json'):
         mB18_150 = load_avg_t150([f'{V18_DIR}/V18_SpecB_Sharp_TexLoss_s{sp}_probs.npz' for sp in (16, 17)])
         mC18_150 = load_avg_t150([f'{V18_DIR}/V18_SpecC_Blur_Bokeh_Screen_s{sp}_probs.npz' for sp in (16, 17)])
         mD18_150 = load_avg_t150([f'{V18_DIR}/V18_SpecD_All6_Giant_s{sp}_probs.npz' for sp in (16, 17)])
-        mA_150 = blend_t150_dict(mA17_150, mA18_150, 0.45)
-        mB_150 = blend_t150_dict(mB17_150, mB18_150, 0.65)
-        mC_150 = blend_t150_dict(mC17_150, mC18_150, 0.45)
-        mD_150 = blend_t150_dict(mD17_150, mD18_150, 0.65)
+        mA_150 = blend_t150_dict(mA17_150, mA18_150, 0.30)
+        mB_150 = blend_t150_dict(mB17_150, mB18_150, 0.30)
+        mC_150 = blend_t150_dict(mC17_150, mC18_150, 0.30)
+        mD_150 = blend_t150_dict(mD17_150, mD18_150, 0.30)
     else:
         mA_150, mB_150, mC_150, mD_150 = mA17_150, mB17_150, mC17_150, mD17_150
 
-    # Blend in calibrated V18_Full (trained on all 3,574 real + corridor quads) if available
     if use_v18_full:
-        print("  [Info] Blending calibrated V18_Full 4-Specialists into test_150 stream (weight=0.35)...")
+        print("  [Info] Blending calibrated V18_Full 4-Specialists into test_150 specialist stream (weight=0.20)...")
         mA_full = load_avg_t150([f'{V18_FULL_DIR}/V18_Full_SpecA_OverGen_TexLoss_probs.npz'])
         mB_full = load_avg_t150([f'{V18_FULL_DIR}/V18_Full_SpecB_Sharp_TexLoss_probs.npz'])
         mC_full = load_avg_t150([f'{V18_FULL_DIR}/V18_Full_SpecC_Blur_Bokeh_Screen_probs.npz'])
         mD_full = load_avg_t150([f'{V18_FULL_DIR}/V18_Full_SpecD_All6_Giant_probs.npz'])
-        mA_150 = blend_t150_dict(mA_150, mA_full, 0.35)
-        mB_150 = blend_t150_dict(mB_150, mB_full, 0.35)
-        mC_150 = blend_t150_dict(mC_150, mC_full, 0.35)
-        mD_150 = blend_t150_dict(mD_150, mD_full, 0.35)
+        mA_150 = blend_t150_dict(mA_150, mA_full, 0.20)
+        mB_150 = blend_t150_dict(mB_150, mB_full, 0.20)
+        mC_150 = blend_t150_dict(mC_150, mC_full, 0.20)
+        mD_150 = blend_t150_dict(mD_150, mD_full, 0.20)
 
+    # 2. Load Pure-Real 1:1 Microscope Foundation (8-Fold V16_Full + V16_Specialists)
     m16_A = load_avg_t150([f'{V16_DIR}/V16_SpecA_OverGen_CleanMask_s{sp}_probs.npz' for sp in (16, 17)])
     m16_B = load_avg_t150([f'{V16_DIR}/V16_SpecB_SharpTex_Microscope_s{sp}_probs.npz' for sp in (16, 17)])
     m16_C = load_avg_t150([f'{V16_DIR}/V16_SpecC_BlurBokeh_Microscope_s{sp}_probs.npz' for sp in (16, 17)])
     m16_D = load_avg_t150([f'{V16_DIR}/V16_SpecD_RealGiant_AllGrade_s{sp}_probs.npz' for sp in (16, 17)])
-    if v16_full_paths:
-        print(f"  [Info] Blending {len(v16_full_paths)}-Fold V16_Full_AllGrade_Microscope into pure-real anchor stream...")
-        m16_full_avg = load_avg_t150(v16_full_paths)
-        m16_D = blend_t150_dict(m16_D, m16_full_avg, 0.50)
-
     m16_150 = (m16_A, m16_B, m16_C, m16_D)
+    m16_full_150 = load_avg_t150(v16_full_paths) if v16_full_paths else None
 
-    m6b_fix_150 = load_avg_t150([f'{V12_FIXED_DIR}/v12_abmil_s{sp}_probs.npz' for sp in (16, 17)] + [f'{V12_FIXED_DIR}/v12_abmil_full_probs.npz'])
-    m6b_12_150  = load_avg_t150([f'{V12_6B_DIR}/v12_abmil_s{sp}_probs.npz' for sp in (16, 17)] + [f'{V12_6B_DIR}/v12_abmil_full_probs.npz'])
-    m6b_11_150  = load_avg_t150([f'{V11_6B_DIR}/iv6b_s{sp}_probs.npz' for sp in (16, 17)] + [
-        f'{V11_6B_DIR}/iv6b_full_cradio_sig2_448_t2_probs.npz',
-        f'{V11_6B_DIR}/iv6b_full_d3_pcl_448_t2_probs.npz',
-    ])
-    mVLM_150 = load_avg_t150([f'{V13_VLM_DIR}/vlm_corn_s{sp}_probs.npz' for sp in (16, 17)] + [f'{V13_VLM_DIR}/vlm_corn_full_probs.npz'])
-
-    p0_6b_150, p1_6b_150, p2_6b_150 = get_6b_probs(m6b_fix_150, m6b_12_150, m6b_11_150, prefix='t150')
-    p0_out, p1_out, p2_out, sh_150 = fuse_6b_vlm_4spec_synergy(
-        p0_6b_150, p1_6b_150, p2_6b_150, mA_150, mB_150, mC_150, mD_150, mVLM_150, m16_150, prefix='t150'
+    # 3. Load Pure-Real InternViT-6B + Qwen3-VL-8B Foundation across full + s16..s20
+    m6b_fix_150 = load_avg_t150(
+        [f'{V12_FIXED_DIR}/v12_abmil_{s}_probs.npz' for s in ['full', 's16', 's17', 's18', 's19', 's20']],
+        weights=[3.0, 1.0, 1.0, 1.0, 1.0, 1.0],
     )
-    p0_out, p1_out, p2_out = restore_ensemble_variance_on_t150(p0_out, p1_out, p2_out, va_data)
+    m6b_12_150 = load_avg_t150(
+        [f'{V12_6B_DIR}/v12_abmil_{s}_probs.npz' for s in ['full', 's16', 's17', 's18', 's19', 's20']],
+        weights=[3.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    )
+    m6b_11_150 = load_avg_t150(
+        [
+            f'{V11_6B_DIR}/iv6b_full_cradio_sig2_448_t2_probs.npz',
+            f'{V11_6B_DIR}/iv6b_full_d3_pcl_448_t2_probs.npz',
+            f'{V11_6B_DIR}/iv6b_s16_probs.npz',
+            f'{V11_6B_DIR}/iv6b_s17_probs.npz',
+            f'{V11_6B_DIR}/iv6b_s18_probs.npz',
+            f'{V11_6B_DIR}/iv6b_s19_probs.npz',
+            f'{V11_6B_DIR}/iv6b_s20_probs.npz',
+        ],
+        weights=[2.5, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0],
+    )
+    mVLM_150 = load_avg_t150(
+        [f'{V13_VLM_DIR}/vlm_corn_{s}_probs.npz' for s in ['full', 's16', 's17', 's18', 's19', 's20']],
+        weights=[2.5, 1.0, 1.0, 1.0, 1.0, 1.0],
+    )
+
+    p0_6b_150 = 0.35 * m6b_fix_150['t150_p0'] + 0.25 * m6b_12_150['t150_p0'] + 0.35 * m6b_11_150['t150_p0'] + 0.05 * mVLM_150['t150_p0']
+    p1_6b_150 = 0.35 * m6b_fix_150['t150_p1'] + 0.25 * m6b_12_150['t150_p1'] + 0.35 * m6b_11_150['t150_p1'] + 0.05 * mVLM_150['t150_p1']
+    p2_6b_150 = 0.35 * m6b_fix_150['t150_p2'] + 0.25 * m6b_12_150['t150_p2'] + 0.35 * m6b_11_150['t150_p2'] + 0.05 * mVLM_150['t150_p2']
+
+    p0_out, p1_out, p2_out, sh_150 = fuse_6b_vlm_4spec_synergy(
+        p0_6b_150, p1_6b_150, p2_6b_150, mA_150, mB_150, mC_150, mD_150,
+        mVLM=None, m16_tuple=m16_150, m16_full=m16_full_150, prefix='t150'
+    )
     pred_mat = decode_anti_interception(p0_out, p1_out, p2_out, sh_150, P_va)
     names_150 = mA_150['names']
 
@@ -393,6 +344,7 @@ def evaluate_v18_and_export(out_json='pred_nriqa_dataset_test.json'):
         'pred_nriqa_dataset_test.json',
         'results/final/pred_nriqa_dataset_test_v18.json',
         'results/final/pred_nriqa_dataset_test_v18_fulldata.json',
+        'results/final/pred_nriqa_dataset_test_v18_2_hotfix.json',
     ]):
         os.makedirs(os.path.dirname(os.path.abspath(target_p)), exist_ok=True)
         with open(target_p, 'w', encoding='utf-8') as f:
@@ -407,7 +359,7 @@ def evaluate_v18_and_export(out_json='pred_nriqa_dataset_test.json'):
     p0_imgs = int((pred_mat == 3).any(axis=1).sum())
     pos_cells = int((pred_mat > 0).sum())
     clean_cnt = int((pred_mat == 0).all(axis=1).sum())
-    print(f"\nSaved standalone submission to {out_json} & results/final/pred_nriqa_dataset_test_v18_fulldata.json")
+    print(f"\nSaved standalone V18.2 submission to {out_json} & results/final/pred_nriqa_dataset_test_v18_2_hotfix.json")
     print(f"[test_150 Audit] Clean={clean_cnt} | P0_Imgs={p0_imgs} (P0={p0_cells}, P1={p1_cells}, P2={p2_cells}) | Total Pos Cells={pos_cells}")
 
 

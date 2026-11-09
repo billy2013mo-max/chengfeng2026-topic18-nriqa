@@ -456,12 +456,12 @@ def blend_with_v16_anchor_safe(v16_npz, vp0, vp1, vp2, va_names, tp0, tp1, tp2, 
             vp0[:, c] = w16 * d16['va_p0'][:, c] + (1.0 - w16) * vp0[:, c]
             tp0[:, c] = w16 * d16['te_p0'][:, c] + (1.0 - w16) * tp0[:, c]
             p150_0[:, c] = w16 * d16['t150_p0'][:, c] + (1.0 - w16) * p150_0[:, c]
-        vp1 = 0.82 * vp1 + 0.18 * d16['va_p1']
-        tp1 = 0.82 * tp1 + 0.18 * d16['te_p1']
-        p150_1 = 0.82 * p150_1 + 0.18 * d16['t150_p1']
-        vp2 = 0.82 * vp2 + 0.18 * d16['va_p2']
-        tp2 = 0.82 * tp2 + 0.18 * d16['te_p2']
-        p150_2 = 0.82 * p150_2 + 0.18 * d16['t150_p2']
+        vp1 = 0.55 * vp1 + 0.45 * d16['va_p1']
+        tp1 = 0.55 * tp1 + 0.45 * d16['te_p1']
+        p150_1 = 0.55 * p150_1 + 0.45 * d16['t150_p1']
+        vp2 = 0.55 * vp2 + 0.45 * d16['va_p2']
+        tp2 = 0.55 * tp2 + 0.45 * d16['te_p2']
+        p150_2 = 0.55 * p150_2 + 0.45 * d16['t150_p2']
         return vp0, vp1, vp2, tp0, tp1, tp2, p150_0, p150_1, p150_2
 
     # Name-aligned lookup across s16 and s17 V16 files (for FullData split_full_v18)
@@ -607,8 +607,10 @@ def main():
 
     nat_negs = [r for r in tr_orig if '_d5_NatNeg' in r['name']] if (0 in focus_cis or 5 in focus_cis) else []
     tr_stage2 = list(tr_real) + nat_negs
-    p1_p0_real_s2 = [r for r in tr_real if any(int(r[CLASSES[ci]]) >= 2 for ci in (1, 2, 3, 4, 5))]
-    tr_stage2 = tr_stage2 + p1_p0_real_s2
+    # V18.2 Fix: Only oversample rare P0 (grade == 3) in Stage 2; NEVER oversample P1 (grade == 2)
+    # which previously inflated P1 marginal priors and caused P2 -> P1 grade inflation on test_150!
+    p0_rare_real_s2 = [r for r in tr_real if any(int(r[CLASSES[ci]]) == 3 for ci in (2, 3, 4, 5))]
+    tr_stage2 = tr_stage2 + p0_rare_real_s2
 
     print(f'  Stage 1 Paired Train={len(tr_stage1)} (real={len(tr_real)}, corridor_synth={len(tr_synth_all)}) | Stage 2 PureReal+NatNeg={len(tr_stage2)} | Teacher KD={len(teacher_14_map)}', flush=True)
 
