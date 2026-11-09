@@ -4,21 +4,6 @@
 code/prism/train_prism_vit6b.py
 ===============================
 PRISM Tower 1: `Prism-ViT6B` Full-Spectrum 1:1 Microscope + ABMIL 6B Foundation Trainer.
-
-Why `InternViT-6B` Previously Underperformed on Fine-Grained P1/P2 Grading:
-  1. In `train_v12_abmil_pure_real.py`, `InternViT-6B` never received the explicit 1:1 Native-Pixel
-     Microscope Edge/Texture Contrast Residuals (`r_edge_glob = edge_max - g_view`,
-     `r_edge_tex = edge_max - tex_view`) or the 60D Native Physical Caliper features (`extract_native_phys_feats.py`).
-  2. It used `compute_asymmetric_truncated_soft_loss(sigma=0.32)`, which intentionally blurred ground-truth
-     `P1` and `P2` targets into each other during training!
-  3. It used `exact_probs_from_dual` (`c_p1 = s1 - s0`), squeezing the middle `P1` interval.
-
-How `Prism-ViT6B` Fixes All Three:
-  1. Upgrades `InternViT-6B` (+ complementary `pecoreg_abmil,cradio_abmil,dinov3l_abmil`) with the full
-     8-Vector 1:1 Native-Pixel Edge/Texture Contrast-Residual Microscope + 60D Physical Calipers + 5D Geometry FiLM.
-  2. Replaces `exact_probs_from_dual` and `sigma=0.32` Gaussian label smearing with `ConditionalHazardOrdinalHead`
-     + `PrismExactGradeLoss` (100% hard conditional hazard targets on `Y >= 1` and `Y >= 2`).
-  3. Deep unfreezing (`lastk8` with Layer-Wise LR Decay `0.85`) + 6 Epochs Cosine Annealing + SWA + 2x Flip TTA.
 """
 import argparse
 import csv
@@ -42,7 +27,9 @@ except Exception:
 
 REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 os.chdir(REPO_ROOT)
-sys.path.extend([REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.join(REPO_ROOT, 'code/decision_eval')])
+for p in [REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.join(REPO_ROOT, 'code/decision_eval'), os.path.dirname(os.path.abspath(__file__))]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 from data import load_split, read_manifest, CLASSES
 from models import build_backbone
@@ -56,20 +43,28 @@ from train_v18_paired_kd_specialist import (
 from cv_decoder_calib import decode_pc, HAND
 import comp_metrics as cm
 
-from code.prism.heads_and_losses import (
-    ConditionalHazardOrdinalHead,
-    PrismExactGradeLoss,
-    PrismDifferentialCalibratorLoss,
-)
-from code.prism.train_prism_quad import PrismQuadMicroscopeNet, predict_prism_quad
+try:
+    from code.prism.heads_and_losses import (
+        ConditionalHazardOrdinalHead,
+        PrismExactGradeLoss,
+        PrismDifferentialCalibratorLoss,
+    )
+    from code.prism.train_prism_quad import PrismQuadMicroscopeNet, predict_prism_quad
+except ImportError:
+    from heads_and_losses import (
+        ConditionalHazardOrdinalHead,
+        PrismExactGradeLoss,
+        PrismDifferentialCalibratorLoss,
+    )
+    from train_prism_quad import PrismQuadMicroscopeNet, predict_prism_quad
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--backbones', default='internvit_abmil:lastk8,pecoreg_abmil:lastk6,cradio_abmil:lastk6,dinov3l_abmil:lastk6')
-    ap.add_argument('--epochs', type=int, default=6)
-    ap.add_argument('--batch', type=int, default=4)
-    ap.add_argument('--grad-accum', type=int, default=2)
+    ap.add_argument('--backbones', default='internvit_abmil:lastk6,pecoreg_abmil:lastk6,cradio_abmil:lastk6,dinov3l_abmil:lastk6')
+    ap.add_argument('--epochs', type=int, default=4)
+    ap.add_argument('--batch', type=int, default=2)
+    ap.add_argument('--grad-accum', type=int, default=4)
     ap.add_argument('--size', type=int, default=448)
     ap.add_argument('--tiles', type=int, default=2)
     ap.add_argument('--lr-last', type=float, default=1.2e-4)
@@ -97,15 +92,13 @@ def main():
     roi_map, meta_map, synth_meta = load_roi_and_synth_meta()
     rows = load_split(a.split)
     man = read_manifest(a.manifest)
-    rows = [r for r in rows if r['name'] in man and not is_synth_name(r['name'])]
+    rows = [r for r in rows if r['name'] in man and not is_synth_name(r['name']) and ('_prism_' not in r['name'])]
     for r in rows:
         r.update({k: man[r['name']][k] for k in CLASSES})
 
     tr = [r for r in rows if r['split'] == 'train']
     va = [r for r in rows if r['split'] == 'val']
-    te = [r for r in rows if r['split'] == 'test']
-    if not te:
-        te = va
+    te = [r for r in rows if r['split'] == 'test'] or va
 
     va_names_set = set(r['name'] for r in va)
     tr = [r for r in tr if r['name'] not in va_names_set]
@@ -116,7 +109,6 @@ def main():
     phys_mu = np.mean(phys_tr_mat, axis=0)
     phys_sd = np.std(phys_tr_mat, axis=0) + 1e-5
 
-    # Boost rare P1/P0 real samples and clean guard samples without any P2 inflation
     rare_p1_p0 = [r for r in tr if any(int(r[CLASSES[ci]]) >= 2 for ci in (2, 3, 4, 5))]
     clean_tr = [r for r in tr if all(int(r[c]) == 0 for c in CLASSES)]
     tr_aug = list(tr) + rare_p1_p0 + clean_tr * 2
@@ -153,6 +145,10 @@ def main():
                 for p in subm.parameters():
                     p.requires_grad_(True)
                     abmil_params.append(p)
+        # Pre-cast frozen backbone blocks to bfloat16 while keeping trainable ABMIL/DualTap in fp32
+        for p in m.parameters():
+            if not p.requires_grad and p.is_floating_point():
+                p.data = p.data.to(torch.bfloat16)
 
     net = PrismQuadMicroscopeNet(raw_specs, phys_dim=60, dropout=a.dropout, n_quad=a.tiles * a.tiles).to(dev)
     head_params = (
@@ -255,7 +251,7 @@ def main():
         out_base + '_probs.npz',
         va_p0=vp0, va_p1=vp1, va_p2=vp2, va_gate=vg, gva=gva, va_names=np.array([r['name'] for r in va]),
         te_p0=tp0, te_p1=tp1, te_p2=tp2, te_gate=tg, gte=gte, te_names=np.array([r['name'] for r in te]),
-        t150_p0=p150_0, t150_p1=p150_1, t150_p2=p150_2, t150_gate=p150_g, names_150=np.array(names_150),
+        t150_p0=p150_0, t150_p1=p150_1, t150_p2=p150_2, t150_gate=p150_g, t150_names=np.array(names_150), names_150=np.array(names_150),
     )
     st_hand = cm.score(gte, decode_pc(tp0, tp1, tp2, HAND), a.tau)
     json.dump({'doc1': float(st_hand['total']), 'S_pos': float(st_hand['S_pos']), 'S_p0': float(st_hand['S_p0']), 'S_clean': float(st_hand['S_clean'])}, open(out_base + '.json', 'w'), indent=2)

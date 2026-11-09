@@ -3,20 +3,19 @@
 """
 code/prism/train_prism_vlm8b.py
 ===============================
-PRISM Tower 2: `Prism-VLM8B` Multi-Crop (Global + 1:1 Peak Edge + 1:1 Subject Interior)
+PRISM Tower 2: `Prism-VLM8B` Multi-Scale Composite Canvas
+([Global 640x640 | 1:1 Peak Edge 320x320 / 1:1 Subject Interior 320x320] = 960x640)
 Qwen3-VL-8B Conditional Hazard Trainer.
 
-Why Previous VLM (`train_vlm_pure_real_corn.py`) Missed Fine-Grained Severity Boundaries:
-  1. It only fed a single downscaled image (`max_pixels=896*896`), which destroyed 1-2px oversharpening
-     halos (`过锐`), micro-texture smoothing (`纹理损失`), and small hand/text glitches (`过度生成`).
-  2. It used `soft_sigma=0.32` Gaussian label smearing (`labels_to_corn_targets`), blurring `P1` and `P2`.
-
-How `Prism-VLM8B` Upgrades the 8B Multimodal Tower:
-  1. Multi-Image Interleaved Input (`[Global View, 1:1 Peak Edge Patch (448x448), 1:1 Subject Mid Patch (448x448)]`):
-     Provides `Qwen3-VL-8B` with both holistic scene semantics and zero-resize 1:1 native pixel crops!
-  2. Hard Conditional Hazard Supervision (`soft_sigma = 0.0`):
-     Trains `P(Y >= 1)`, `P(Y >= 2 | Y >= 1)`, and `P(Y == 3 | Y >= 2)` with zero label smearing,
-     plus Direct Exact-Grade Soft-F1 (`P2, P1, P0`) and Q-Align Discrete Grade Token Priors.
+Why `Prism-VLM8B` Uses the 960x640 Composite Diagnostic Canvas:
+  1. Left 640x640 pane provides the holistic scene layout for AIGC anatomy/perspective/bokeh context.
+  2. Top-Right 320x320 pane provides a 1:1 Zero-Resize Native-Pixel Peak Edge Microscope crop (`p_peak`)
+     to expose 1-2px oversharpening halos (`过锐`) and fine hand/text glitches (`过度生成`).
+  3. Bottom-Right 320x320 pane provides a 1:1 Zero-Resize Native-Pixel Subject Interior Texture crop (`p_mid`)
+     to expose waxy denoising and compression smoothing (`纹理损失`).
+  4. Total size is `960 x 640 = 614,400` pixels (both dimensions exact multiples of 32), so `Qwen3VLProcessor`
+     processes a single unified image per sample with ZERO resizing of the 1:1 native patches!
+  5. Uses Hard Conditional Hazard targets (`soft_sigma = 0.0` -> ZERO Gaussian smearing between P1 and P2).
 """
 import os
 import sys
@@ -40,13 +39,14 @@ from peft import LoraConfig, get_peft_model
 
 REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 os.chdir(REPO_ROOT)
-sys.path.extend([REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.join(REPO_ROOT, 'code/decision_eval')])
+for p in [REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.join(REPO_ROOT, 'code/decision_eval'), os.path.dirname(os.path.abspath(__file__))]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 from utils import DIMS, FULL_DIMS, P0_ONLY_DIMS, labels_to_14ch, ch14_to_p012, eval_14ch
 from train_vlm_pure_real_corn import (
     MODEL_PATH,
     find_real_img,
-    resize_cap,
     labels_to_corn_targets,
     corn_logits_to_unconditional_14ch,
     Qwen3VL_ABMIL_CORN,
@@ -54,43 +54,56 @@ from train_vlm_pure_real_corn import (
     predict_corn,
 )
 
-PRISM_MULTI_CROP_PROMPT = (
-    "请作为专业画质与AIGC缺陷检测专家，结合【图1：全局场景】、【图2：1:1高频边缘显微镜切片】与【图3：1:1主体内部纹理切片】，"
-    "精确区分轻度(P2)、中度(P1)与重度(P0)画质缺陷："
-    "1.过度生成与AI结构崩坏（手指肢体畸变、文字乱码、塑料假纹理）；"
-    "2.虚化突兀（抠图边缘断层）；"
-    "3.模糊、纹理涂抹损失、边缘过锐白边(Halo)或花屏："
+PRISM_COMPOSITE_PROMPT = (
+    "请作为专业画质与AIGC缺陷检测专家，结合图像左侧【全局场景】、右上【1:1原生像素高频边缘显微镜切片】"
+    "与右下【1:1原生像素主体纹理切片】，精确区分无问题(0)、轻度(P2)、中度(P1)与重度(P0)画质缺陷："
+    "1.过度生成与AI结构崩坏（多余或残缺手指、肢体粘连、五官扭曲、文字乱码）；"
+    "2.背景虚化突兀（抠图边缘断层、景深过渡不自然）；"
+    "3.模糊、纹理涂抹损失、边缘过锐白边伪影(Halo)或花屏色块："
 )
 
 
-def extract_1to1_peak_and_mid_patches(im: Image.Image, crop_size: int = 384):
-    """Extracts 1:1 native-pixel Peak Edge Patch and Median Subject Texture Patch."""
+def build_prism_composite_canvas(im: Image.Image, glob_size: int = 640, patch_size: int = 320) -> Image.Image:
+    """
+    Constructs a `960 x 640` composite image:
+      - Left `640 x 640`: Global scene view
+      - Top-Right `320 x 320`: 1:1 Native-Pixel Peak High-Frequency Edge Patch
+      - Bottom-Right `320 x 320`: 1:1 Native-Pixel Median-Gradient Interior Texture Patch
+    """
     w, h = im.size
-    S = crop_size
+    S = patch_size
     if w < S or h < S:
-        im = im.resize((max(w, S), max(h, S)), Image.BICUBIC)
-        w, h = im.size
+        im_src = im.resize((max(w, S), max(h, S)), Image.BICUBIC)
+        w, h = im_src.size
+    else:
+        im_src = im
 
     xs = [0, max(0, (w - S) // 2), max(0, w - S)] if w > S else [0]
     ys = [0, max(0, (h - S) // 2), max(0, h - S)] if h > S else [0]
     cands, energies = [], []
     for y0 in ys:
         for x0 in xs:
-            patch = im.crop((x0, y0, x0 + S, y0 + S))
+            patch = im_src.crop((x0, y0, x0 + S, y0 + S))
             arr = np.asarray(patch, dtype=np.uint8)[::4, ::4, 1].astype(np.float32)
             gx = np.abs(arr[:, 1:] - arr[:, :-1]).mean()
             gy = np.abs(arr[1:, :] - arr[:-1, :]).mean()
             cands.append(patch)
             energies.append(float(gx + gy))
     order = np.argsort(energies)
-    return cands[int(order[-1])], cands[int(order[len(order) // 2])]
+    p_peak = cands[int(order[-1])]
+    p_mid = cands[int(order[len(order) // 2])]
+
+    glob_view = im.resize((glob_size, glob_size), Image.BICUBIC)
+    canvas = Image.new("RGB", (glob_size + patch_size, glob_size))
+    canvas.paste(glob_view, (0, 0))
+    canvas.paste(p_peak, (glob_size, 0))
+    canvas.paste(p_mid, (glob_size, patch_size))
+    return canvas
 
 
-class PrismMultiCropVLMDataset(Dataset):
-    def __init__(self, rows, max_pixels: int = 768 * 768, crop_size: int = 384, train: bool = True, flip: bool = False):
+class PrismCompositeVLMDataset(Dataset):
+    def __init__(self, rows, train: bool = True, flip: bool = False):
         self.rows = rows
-        self.mp = max_pixels
-        self.crop_size = crop_size
         self.train = train
         self.flip = flip
 
@@ -102,29 +115,20 @@ class PrismMultiCropVLMDataset(Dataset):
         im = Image.open(find_real_img(r["name"])).convert("RGB")
         if self.flip or (self.train and random.random() < 0.5):
             im = im.transpose(Image.FLIP_LEFT_RIGHT)
-        p_peak, p_mid = extract_1to1_peak_and_mid_patches(im, crop_size=self.crop_size)
-        im_glob = resize_cap(im, self.mp)
+        canvas = build_prism_composite_canvas(im, glob_size=640, patch_size=320)
         g = np.array([int(r[c]) for c in DIMS], dtype=np.int64)
-        return [im_glob, p_peak, p_mid], g, r["name"]
+        return canvas, g, r["name"]
 
 
-class PrismMultiCropCollate:
+class PrismCompositeCollate:
     def __init__(self, processor):
         self.p = processor
-        msg = [{
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "image"},
-                {"type": "image"},
-                {"type": "text", "text": PRISM_MULTI_CROP_PROMPT},
-            ],
-        }]
+        msg = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": PRISM_COMPOSITE_PROMPT}]}]
         self.text = processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
 
     def __call__(self, batch):
-        nested_ims = [b[0] for b in batch]
-        enc = self.p(text=[self.text] * len(nested_ims), images=nested_ims, padding=True, return_tensors="pt")
+        ims = [b[0] for b in batch]
+        enc = self.p(text=[self.text] * len(ims), images=ims, padding=True, return_tensors="pt")
         g_np = np.stack([b[1] for b in batch], axis=0)
         # Hard Conditional Hazard targets (soft_sigma = 0.0 -> ZERO P1/P2 Gaussian smearing!)
         t_corn, m_corn = labels_to_corn_targets(g_np, soft_sigma=0.0)
@@ -138,18 +142,11 @@ class PrismMultiCropCollate:
 
 
 def compute_prism_vlm_exact_hazard_loss(logits: torch.Tensor, t_corn: torch.Tensor, m_corn: torch.Tensor, y_14ch: torch.Tensor, grades: torch.Tensor):
-    """
-    PRISM Conditional Hazard + Exact-Grade F1 Loss for Qwen3-VL-8B:
-      1. Hard Conditional Hazard BCE on valid subsets (zero P1/P2 label smearing).
-      2. Direct Exact-Grade Soft-F1 on P2, P1, and P0 channels.
-      3. In-batch Margin Separation on conditional hazard logits (`P1 vs P2` on `q_ge2`, `P0 vs P1` on `q_ge3`).
-    """
     is_clean = (grades == 0).all(dim=1)
     w_corn = m_corn.clone()
     if is_clean.any():
         w_corn[is_clean, :6] = 4.0
 
-    # Boost P1 conditional hazard channel (6..9) by 1.45x
     w_corn[:, 6:10] = w_corn[:, 6:10] * 1.45
     bce_raw = F.binary_cross_entropy_with_logits(logits, t_corn, reduction="none")
     corn_loss = (bce_raw * w_corn).sum() / w_corn.sum().clamp(min=1.0)
@@ -157,7 +154,6 @@ def compute_prism_vlm_exact_hazard_loss(logits: torch.Tensor, t_corn: torch.Tens
     probs_14 = corn_logits_to_unconditional_14ch(logits)
     emd_loss = F.mse_loss(probs_14, y_14ch)
 
-    # Exact-grade probabilities for P2, P1, P0
     q = torch.sigmoid(logits)
     exact_f1_loss = logits.new_tensor(0.0)
     margin_loss = logits.new_tensor(0.0)
@@ -179,7 +175,6 @@ def compute_prism_vlm_exact_hazard_loss(logits: torch.Tensor, t_corn: torch.Tens
             f1_g = (2.0 * tp + 1e-4) / (2.0 * tp + fp + fn + 1e-4)
             exact_f1_loss = exact_f1_loss + w_g * (1.0 - f1_g)
 
-        # Pairwise separation margin on P1 vs P2 (`logits[:, 6+j]`) and P0 vs P1 (`logits[:, d]`)
         pos_p1, neg_p2 = (yc == 2), (yc == 1)
         if pos_p1.any() and neg_p2.any():
             diff_12 = logits[pos_p1, 6 + j].unsqueeze(1) - logits[neg_p2, 6 + j].unsqueeze(0)
@@ -197,14 +192,12 @@ def main():
     ap.add_argument("--split", default="data/resplits/split_s16.csv")
     ap.add_argument("--manifest", default="data/manifest_combined.csv")
     ap.add_argument("--model", default=MODEL_PATH)
-    ap.add_argument("--epochs", type=int, default=4)
-    ap.add_argument("--batch", type=int, default=4)
-    ap.add_argument("--max-pixels", type=int, default=768 * 768)
-    ap.add_argument("--crop-size", type=int, default=384)
+    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--lr", type=float, default=1.8e-4)
     ap.add_argument("--lr-head", type=float, default=9.0e-4)
     ap.add_argument("--rank", type=int, default=32)
-    ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--grad-ckpt", action="store_true", default=True)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -238,7 +231,7 @@ def main():
     clean_tr = [r for r in tr if all(r[c] == 0 for c in DIMS)]
     tr = tr + rare_p1_p0 + clean_tr
 
-    log(f"=== [PRISM Tower 2: Prism-VLM8B Multi-Crop] train={len(tr)} val={len(va)} test={len(te)} ===")
+    log(f"=== [PRISM Tower 2: Prism-VLM8B Composite 960x640] train={len(tr)} val={len(va)} test={len(te)} ===")
 
     proc = AutoProcessor.from_pretrained(a.model)
     proc.tokenizer.padding_side = "right"
@@ -269,15 +262,15 @@ def main():
         m.float()
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[lr_], find_unused_parameters=False)
-    collate_fn = PrismMultiCropCollate(proc)
-    sampler = DistributedSampler(PrismMultiCropVLMDataset(tr, a.max_pixels, a.crop_size, True), shuffle=True, seed=29)
+    collate_fn = PrismCompositeCollate(proc)
+    sampler = DistributedSampler(PrismCompositeVLMDataset(tr, True), shuffle=True, seed=29)
     ltr = DataLoader(
-        PrismMultiCropVLMDataset(tr, a.max_pixels, a.crop_size, True),
+        PrismCompositeVLMDataset(tr, True),
         batch_size=a.batch, sampler=sampler, num_workers=a.workers,
         collate_fn=collate_fn, pin_memory=True, persistent_workers=(a.workers > 0), drop_last=True,
     )
     mk_eval = lambda rs, flip=False: DataLoader(
-        PrismMultiCropVLMDataset(rs, a.max_pixels, a.crop_size, False, flip=flip),
+        PrismCompositeVLMDataset(rs, False, flip=flip),
         batch_size=a.batch * 2, shuffle=False, num_workers=a.workers, collate_fn=collate_fn, pin_memory=True,
     )
     lva = mk_eval(va, False)
@@ -341,12 +334,13 @@ def main():
         p0_2, p1_2, p2_2, _, _, _ = predict_corn(model.module, mk_eval(rows_150, True), dev)
 
         st = eval_14ch(tp14, gt)
-        json.dump({"test": st, "args": vars(a)}, open(a.out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+        json.dump({"test": {k: float(st[k]) for k in ["total", "S_pos", "S_p0", "p0R", "p0P", "S_clean"]}, "args": vars(a)}, open(a.out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         np.savez_compressed(
             a.out.replace(".json", "_probs.npz"),
             va_p0=vp0, va_p1=vp1, va_p2=vp2, gva=gv, va_names=np.array(vn),
             te_p0=tp0, te_p1=tp1, te_p2=tp2, gte=gt, te_names=np.array(tn),
-            t150_p0=0.5 * (p0_1 + p0_2), t150_p1=0.5 * (p1_1 + p1_2), t150_p2=0.5 * (p2_1 + p2_2), names_150=np.array(ordered_150),
+            t150_p0=0.5 * (p0_1 + p0_2), t150_p1=0.5 * (p1_1 + p1_2), t150_p2=0.5 * (p2_1 + p2_2),
+            t150_names=np.array(ordered_150), names_150=np.array(ordered_150),
         )
         log("Saved PRISM-VLM8B predictions to:", a.out.replace(".json", "_probs.npz"))
 

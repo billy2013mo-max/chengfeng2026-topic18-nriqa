@@ -4,21 +4,6 @@
 code/prism/train_prism_quad.py
 ==============================
 PRISM Tower 3: `Prism-Quad` Full-Spectrum 4-Backbone Deep Native Microscope Trainer.
-
-Key Architectural Upgrades over Legacy 4-Specialist (`SpecA..D`) Pipeline:
-  1. Unified Full-Spectrum 6-Class Supervision (Zero Specialist Blindness):
-     Trains a single unified 4-backbone microscope tower (`dinov3l:lastk6,pecoreg:lastk6,siglip2g:lastk6,convnext:full`)
-     jointly across ALL 6 defect dimensions so physical co-occurrences (`模糊` vs `虚化突兀`, `纹理损失` vs `过度生成`,
-     `过锐` vs `纹理损失`) are learned in a shared representation space.
-  2. Deep Unfreezing (`lastk6`~`lastk8`) with Layer-Wise Learning Rate Decay (`0.85`) + 6~8 Epochs + EMA/SWA:
-     Prioritizes effectiveness over speed shortcuts, allowing middle/deep vision blocks to adapt to
-     1:1 pixel-level quality artifacts.
-  3. Conditional Hazard Ordinal Head (`ConditionalHazardOrdinalHead`) + `PrismExactGradeLoss`:
-     Replaces `exact_probs_from_dual` (`s1 - s0` subtraction) with exact conditional hazards
-     `P(Y>=1) -> P(Y>=2|Y>=1) -> P(Y==3|Y>=2)` and zero Gaussian label smearing.
-  4. Pure Differential Calibration on Quadruplets (`PrismDifferentialCalibratorLoss` + GRL):
-     Synthetic and Real-Defect Poisson quadruplets (`is_real == 0`) NEVER update single-image classification
-     biases; they only train relative severity directions `u_c` and domain-invariant features.
 """
 import argparse
 import copy
@@ -44,36 +29,36 @@ except Exception:
 
 REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 os.chdir(REPO_ROOT)
-sys.path.extend([REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.join(REPO_ROOT, 'code/decision_eval')])
+for p in [REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.join(REPO_ROOT, 'code/decision_eval'), os.path.dirname(os.path.abspath(__file__))]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 from data import load_split, read_manifest, CLASSES, FULL
 from train_v9_specialist import build_v9_backbone, set_seed
 from train_v17_end2end_sim2real_specialist import is_synth_name
 from train_v18_paired_kd_specialist import (
     load_roi_and_synth_meta,
-    load_teacher_14_map,
     V18FastMicroscopeDataset,
     _extract_seed_stem,
 )
 from cv_decoder_calib import decode_pc, HAND
 import comp_metrics as cm
 
-from code.prism.heads_and_losses import (
-    ConditionalHazardOrdinalHead,
-    PrismExactGradeLoss,
-    PrismDifferentialCalibratorLoss,
-)
+try:
+    from code.prism.heads_and_losses import (
+        ConditionalHazardOrdinalHead,
+        PrismExactGradeLoss,
+        PrismDifferentialCalibratorLoss,
+    )
+except ImportError:
+    from heads_and_losses import (
+        ConditionalHazardOrdinalHead,
+        PrismExactGradeLoss,
+        PrismDifferentialCalibratorLoss,
+    )
 
 
 class PrismQuadMicroscopeNet(nn.Module):
-    """
-    PRISM Tower 3 (`Prism-Quad`):
-      - 4 Complementary Vision Backbones (`dinov3l`, `pecoreg`, `siglip2g`, `convnext`)
-      - 8 Microscope Summary Streams per Backbone:
-        `[g_view, quad_mean, edge_max, tex_view, r_edge_glob, r_edge_tex, t_max, t_att]`
-      - 60D Native Physical Caliper MLP + 5D Geometry Meta FiLM Conditioning
-      - `ConditionalHazardOrdinalHead` (Sequential Conditional Hazard Chain + Direct Simplex + GRL Domain Invariance)
-    """
     def __init__(self, specs, phys_dim: int = 60, dropout: float = 0.12, n_quad: int = 4):
         super().__init__()
         self.n_quad = n_quad
@@ -159,7 +144,6 @@ class PrismQuadMicroscopeNet(nn.Module):
 
 
 def build_layerwise_param_groups(specs, lr_full: float, lr_last: float, decay: float = 0.85):
-    """Unfreezes backbone blocks with Layer-Wise Learning Rate Decay so deeper blocks adapt smoothly."""
     pg = []
     for (m, fwd, mu, sd, bl, dim), mode in specs:
         for p in m.parameters():
@@ -178,7 +162,6 @@ def build_layerwise_param_groups(specs, lr_full: float, lr_last: float, decay: f
                 for p in bl[idx_b].parameters():
                     p.requires_grad_(True)
                 pg.append({'params': list(bl[idx_b].parameters()), 'lr': blk_lr})
-        # Pre-cast frozen parameters to bfloat16 for memory/compute efficiency
         for p in m.parameters():
             if not p.requires_grad and p.is_floating_point():
                 p.data = p.data.to(torch.bfloat16)
@@ -207,9 +190,9 @@ def predict_prism_quad(net: PrismQuadMicroscopeNet, loader: DataLoader, dev: str
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--backbones', default='dinov3l:lastk6,pecoreg:lastk6,siglip2g:lastk6,convnext:full')
-    ap.add_argument('--init-ckpt', default='', help='Optional warm-start checkpoint')
-    ap.add_argument('--epochs-s1', type=int, default=4, help='Stage 1 epochs (Real + Differential Quadruplets)')
-    ap.add_argument('--epochs-s2', type=int, default=3, help='Stage 2 epochs (100% Pure-Real Conditional Hazard Alignment)')
+    ap.add_argument('--init-ckpt', default='results/v17_end2end_s16_s17/V17_S2R_SpecD_All6_Giant_s16_ep5.pt')
+    ap.add_argument('--epochs-s1', type=int, default=3)
+    ap.add_argument('--epochs-s2', type=int, default=2)
     ap.add_argument('--batch', type=int, default=8)
     ap.add_argument('--grad-accum', type=int, default=2)
     ap.add_argument('--size', type=int, default=448)
@@ -244,16 +227,14 @@ def main():
 
     rows = load_split(a.split)
     man = read_manifest(a.manifest)
+    rows = [r for r in rows if r['name'] in man]
     for r in rows:
-        if r['name'] in man:
-            r.update({k: man[r['name']][k] for k in CLASSES})
+        r.update({k: man[r['name']][k] for k in CLASSES})
 
     from extract_native_phys_feats import extract_for_names
     tr_orig = [r for r in rows if r['split'] == 'train']
     va = [r for r in rows if r['split'] == 'val']
-    te = [r for r in rows if r['split'] == 'test']
-    if not te:
-        te = va
+    te = [r for r in rows if r['split'] == 'test'] or va
 
     tr_real = [r for r in tr_orig if not is_synth_name(r['name']) and ('_NatNeg' not in r['name']) and ('_prism_' not in r['name'])]
     phys_map = extract_for_names([r['name'] for r in tr_real + va + te], a.phys_cache)
@@ -261,7 +242,6 @@ def main():
     phys_mu = np.mean(phys_tr_mat, axis=0)
     phys_sd = np.std(phys_tr_mat, axis=0) + 1e-5
 
-    # Stage 1: Interleave authentic real samples with differential quadruplets (which only update metric directions, never bias!)
     tr_synth_all = [r for r in tr_orig if is_synth_name(r['name']) or ('_prism_' in r['name'])]
     tr_synth_all.sort(key=lambda r: r['name'])
     rng = random.Random(a.seed)
@@ -275,7 +255,6 @@ def main():
             tr_stage1.extend(tr_synth_all[s_ptr:s_ptr + 3])
             s_ptr += 3
 
-    # Stage 2: 100% Pure-Real Authentic Images with balanced P1/P0 representation
     tr_stage2 = list(tr_real)
     rare_p1_p0 = [r for r in tr_real if any(int(r[CLASSES[ci]]) >= 2 for ci in (2, 3, 4, 5))]
     clean_real = [r for r in tr_real if all(int(r[c]) == 0 for c in CLASSES)]
@@ -310,9 +289,11 @@ def main():
     net = PrismQuadMicroscopeNet(raw_specs, phys_dim=60, dropout=a.dropout, n_quad=a.tiles * a.tiles).to(dev)
 
     if a.init_ckpt and os.path.exists(a.init_ckpt):
-        print(f'  Warm-starting backbone & microscope trunk from {a.init_ckpt}', flush=True)
+        print(f'  Warm-starting compatible backbone & microscope layers from {a.init_ckpt}', flush=True)
         sd = torch.load(a.init_ckpt, map_location='cpu')
-        net.load_state_dict(sd, strict=False)
+        cur_sd = net.state_dict()
+        compat_sd = {k: v for k, v in sd.items() if k in cur_sd and cur_sd[k].shape == v.shape}
+        net.load_state_dict(compat_sd, strict=False)
 
     head_params = (
         list(net.tile_attn.parameters())
@@ -388,9 +369,9 @@ def main():
             for k in s2_ckpts[0].keys()
         }
         net.load_state_dict({k: v.to(dev) for k, v in swa_sd.items()})
-        torch.save(swa_sd, f'{a.out}_swa.pt')
+        out_base_pt = a.out[:-5] if a.out.endswith('.json') else a.out
+        torch.save(swa_sd, f'{out_base_pt}_swa.pt')
 
-    # 2x Flip TTA on val, test, and test_150
     dva_f = V18FastMicroscopeDataset(va, phys_map, phys_mu, phys_sd, roi_map, meta_map, synth_meta, a.size, False, hflip=True, tiles=a.tiles)
     dte_f = V18FastMicroscopeDataset(te, phys_map, phys_mu, phys_sd, roi_map, meta_map, synth_meta, a.size, False, hflip=True, tiles=a.tiles)
     lva_f = DataLoader(dva_f, batch_size=val_batch, shuffle=False, num_workers=a.workers, pin_memory=True)
@@ -421,7 +402,7 @@ def main():
         out_base + '_probs.npz',
         va_p0=vp0, va_p1=vp1, va_p2=vp2, va_gate=vg, gva=gva, va_names=np.array([r['name'] for r in va]),
         te_p0=tp0, te_p1=tp1, te_p2=tp2, te_gate=tg, gte=gte, te_names=np.array([r['name'] for r in te]),
-        t150_p0=p150_0, t150_p1=p150_1, t150_p2=p150_2, t150_gate=p150_g, t150_names=np.array(names_150),
+        t150_p0=p150_0, t150_p1=p150_1, t150_p2=p150_2, t150_gate=p150_g, t150_names=np.array(names_150), names_150=np.array(names_150),
     )
     st_hand = cm.score(gte, decode_pc(tp0, tp1, tp2, HAND), a.tau)
     json.dump({'doc1': float(st_hand['total']), 'S_pos': float(st_hand['S_pos']), 'S_p0': float(st_hand['S_p0']), 'S_clean': float(st_hand['S_clean'])}, open(out_base + '.json', 'w'), indent=2)

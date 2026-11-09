@@ -4,33 +4,17 @@
 code/prism/real_defect_synthesizer.py
 =====================================
 PRISM Core Mathematical Module 3:
-Real-Anchored Hard-Case Multi-Band Poisson Synthesizer & Differential Quadruplet Builder.
+Real-Anchored Hard-Case Multi-Band Poisson Synthesizer & Split-Isolated Manifest Builder.
 
-Why Previous Synthetic Data Failed to Yield Net Gains:
-  1. Synthetic Gaussian blur / USM sharpening / naive FLUX blends had a domain distribution gap
-     relative to authentic real video/ISP/AIGC artifacts.
-  2. Feeding synthetic images directly into single-image BCE/CE classification heads caused the
-     network to learn a "real vs synthetic" shortcut and shifted real-image classification biases.
-
-How `PRISM` Fixes Synthetic Data From First Principles:
-  1. **Authentic Real-Defect Multi-Band Blending (`synthesize_real_defect_poisson_quadruplet`)**:
-     Extracts high-energy localized defect patches directly from authentic real training images
-     annotated with `过度生成 (P0/P1)`, `过锐 (P0/P1)`, `模糊 (P0/P1)`, and `纹理损失 (P0/P1)`
-     (strictly within the active training split `split == 'train'` — zero validation/test leakage!),
-     and blends them onto scene-matched clean training images using 4-level Laplacian Pyramid
-     Multi-Band Blending at calibrated severity alphas:
-       - State 0 (Clean): alpha = 0.00 (Original clean real anchor)
-       - State 1 (P2):    alpha = 0.38 (Mild localized authentic defect transfer)
-       - State 2 (P1):    alpha = 0.68 (Moderate localized authentic defect transfer)
-       - State 3 (P0):    alpha = 1.00 (Full localized authentic defect transfer)
-  2. **Strict Differential-Only Routing (`mask7[6] = 0.0`)**:
-     Every synthesized quadruplet is tagged with `is_real = 0.0` and its shared `seed_stem`.
-     In `ConditionalHazardOrdinalHead` + `PrismDifferentialCalibratorLoss`, samples with `is_real = 0.0`
-     NEVER update single-image classification biases (`hazard_out.bias` / `simplex_out.bias`),
-     and ONLY train the relative severity direction `u_c` and backbone representations under a
-     Domain-Adversarial Gradient Reversal Layer (GRL).
+Generates authentic-donor multi-band Laplacian pyramid blended quadruplets strictly from
+`split == 'train'` images of the given split (`s16` or `s17`), saves them into
+`/dev/shm/v18_synth_quads` (directly compatible with `V18FastMicroscopeDataset`),
+and exports split-isolated training manifests:
+  - `data/v17_splits/split_s{sp}_prism.csv`
+  - `data/v17_splits/manifest_s{sp}_prism.csv`
 """
 import os
+import sys
 import csv
 import json
 import math
@@ -41,10 +25,21 @@ import numpy as np
 import cv2
 from PIL import Image
 
-from .heads_and_losses import CLASSES, FULL_CLASSES
+REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+os.chdir(REPO_ROOT)
+for p in [REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.dirname(os.path.abspath(__file__))]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
-PRISM_SYNTH_DIR = '/dev/shm/prism_real_quads'
+try:
+    from code.prism.heads_and_losses import CLASSES, FULL_CLASSES
+except ImportError:
+    from heads_and_losses import CLASSES, FULL_CLASSES
+
+# Save directly into /dev/shm/v18_synth_quads so V18FastMicroscopeDataset finds all images natively
+PRISM_SYNTH_DIR = '/dev/shm/v18_synth_quads'
 PRISM_META_OUT = 'data/v17_splits/prism_synth_metadata.json'
+V18_META_PATH = 'data/v17_splits/v18_synth_metadata.json'
 
 
 def multi_band_laplacian_blend(fg_rgb: np.ndarray, bg_rgb: np.ndarray, mask_1ch: np.ndarray, levels: int = 4) -> np.ndarray:
@@ -71,8 +66,7 @@ def multi_band_laplacian_blend(fg_rgb: np.ndarray, bg_rgb: np.ndarray, mask_1ch:
 
 
 def color_transfer_lab_local(src_rgb: np.ndarray, dst_rgb: np.ndarray) -> np.ndarray:
-    """Matches low-frequency luminance & chrominance of `src_rgb` to `dst_rgb` before defect transfer
-    so only the structural/high-frequency defect is transferred without artificial color seams."""
+    """Matches low-frequency luminance & chrominance of `src_rgb` to `dst_rgb` before defect transfer."""
     src_lab = cv2.cvtColor(src_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     dst_lab = cv2.cvtColor(dst_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     for ch in range(3):
@@ -89,7 +83,7 @@ def locate_peak_defect_region(im_rgb: np.ndarray, patch_size: int = 448) -> tupl
     S = min(patch_size, h, w)
     gray = cv2.cvtColor(im_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     lap = np.abs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))
-    box = cv2.boxFilter(lap, -1, (S // 2, S // 2))
+    box = cv2.boxFilter(lap, -1, (max(8, S // 2), max(8, S // 2)))
     cy, cx = np.unravel_index(np.argmax(box), box.shape)
     cy = int(np.clip(cy, S // 2, max(S // 2, h - S // 2)))
     cx = int(np.clip(cx, S // 2, max(S // 2, w - S // 2)))
@@ -101,14 +95,6 @@ def synthesize_real_defect_poisson_quadruplet(
     donor_rgb: np.ndarray,
     seed: int = 42,
 ):
-    """
-    Transfers an authentic defect region from `donor_rgb` (a real P0 training image) onto
-    `clean_rgb` (a scene-matched clean real training image) at three continuous severity levels:
-      - P2: alpha = 0.38, smaller soft mask (12%~16% area)
-      - P1: alpha = 0.68, medium soft mask (22%~28% area)
-      - P0: alpha = 1.00, large soft mask (38%~50% area)
-    Returns (clean_rgb, img_p2, img_p1, img_p0, focus_yx).
-    """
     rng = np.random.default_rng(seed)
     h, w = clean_rgb.shape[:2]
     donor_res = cv2.resize(donor_rgb, (w, h), interpolation=cv2.INTER_CUBIC) if donor_rgb.shape[:2] != (h, w) else donor_rgb
@@ -132,14 +118,10 @@ def build_split_isolated_real_defect_quadruplets(
     split_csv: str = 'data/resplits/split_s16.csv',
     manifest_csv: str = 'data/manifest_combined.csv',
     phys_cache: str = 'results/v8_experts/native_phys_feats.npz',
-    max_quads_per_dim: int = 80,
+    max_quads_per_dim: int = 60,
     out_dir: str = PRISM_SYNTH_DIR,
     meta_out: str = PRISM_META_OUT,
 ):
-    """
-    Generates split-isolated Real-Defect Multi-Band Poisson Quadruplets strictly from `split == 'train'`
-    images of `split_csv` (zero validation or test seed/donor leakage!).
-    """
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(os.path.dirname(meta_out), exist_ok=True)
 
@@ -188,7 +170,6 @@ def build_split_isolated_real_defect_quadruplets(
         except Exception:
             meta_records = {}
 
-    # Priority focus on OverGen (4), Oversharp (2), Blur (0), TexLoss (1)
     for dim_c in (4, 2, 0, 1):
         cname = CLASSES[dim_c]
         donors = [
@@ -233,10 +214,61 @@ def build_split_isolated_real_defect_quadruplets(
                     'is_real': 0,
                 }
             created += 1
-        print(f'[PRISM Real-Defect Synthesizer] Dim {cname:6s}: generated {created} authentic-donor Poisson quadruplets', flush=True)
+        print(f'[PRISM Real-Defect Synthesizer] ({os.path.basename(split_csv)}) Dim {cname:6s}: generated {created} authentic-donor Poisson quadruplets', flush=True)
 
     with open(meta_out, 'w', encoding='utf-8') as f:
         json.dump(meta_records, f, indent=2, ensure_ascii=False)
+
+    # Also build split-isolated PRISM split & manifest CSVs combining real rows + verified quadruplets
+    sp_tag = 's16' if 's16' in split_csv else ('s17' if 's17' in split_csv else 'custom')
+    combined_meta = {}
+    if os.path.exists(V18_META_PATH):
+        try:
+            combined_meta.update(json.load(open(V18_META_PATH, encoding='utf-8')))
+        except Exception:
+            pass
+    combined_meta.update(meta_records)
+
+    split_map = {r['name'].strip(): r['split'].strip() for r in split_rows}
+    out_split_rows = []
+    out_man_rows = []
+    for r in split_rows:
+        nm = r['name'].strip()
+        if nm in man:
+            out_split_rows.append({'name': nm, 'split': r['split'].strip(), 'source': 'real'})
+            out_man_rows.append({'name': nm, **{c: man[nm][c] for c in CLASSES}})
+
+    grade_to_int = {'P2': 1, 'P1': 2, 'P0': 3, 'NatNeg': 0}
+    n_added = 0
+    for fname, info in sorted(combined_meta.items()):
+        if not os.path.exists(os.path.join(out_dir, fname)):
+            continue
+        seed_nm = info.get('seed_name', '')
+        donor_nm = info.get('donor_name', seed_nm)
+        # Strict zero-leakage check: BOTH seed and donor (if any) must belong to 'train' split!
+        if split_map.get(seed_nm) == 'train' and split_map.get(donor_nm, 'train') == 'train':
+            g_str = info.get('grade', '')
+            if g_str not in grade_to_int:
+                continue
+            dim_c = int(info['dim_c'])
+            row_m = {'name': fname, **{c: '0' for c in CLASSES}}
+            row_m[CLASSES[dim_c]] = str(grade_to_int[g_str])
+            out_split_rows.append({'name': fname, 'split': 'train', 'source': f'prism_d{dim_c}'})
+            out_man_rows.append(row_m)
+            n_added += 1
+
+    out_split_p = f'data/v17_splits/split_{sp_tag}_prism.csv'
+    out_man_p = f'data/v17_splits/manifest_{sp_tag}_prism.csv'
+    with open(out_split_p, 'w', newline='', encoding='utf-8') as f:
+        w = csv.DictWriter(f, fieldnames=['name', 'split', 'source'])
+        w.writeheader()
+        w.writerows(out_split_rows)
+    with open(out_man_p, 'w', newline='', encoding='utf-8') as f:
+        w = csv.DictWriter(f, fieldnames=['name'] + list(CLASSES))
+        w.writeheader()
+        w.writerows(out_man_rows)
+
+    print(f'[PRISM Manifest] Saved {out_split_p} ({len(split_rows)} real + {n_added} split-isolated differential quadruplets)', flush=True)
     return meta_records
 
 
@@ -244,6 +276,6 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--split', default='data/resplits/split_s16.csv')
     ap.add_argument('--manifest', default='data/manifest_combined.csv')
-    ap.add_argument('--max-quads', type=int, default=80)
+    ap.add_argument('--max-quads', type=int, default=60)
     args = ap.parse_args()
     build_split_isolated_real_defect_quadruplets(args.split, args.manifest, max_quads_per_dim=args.max_quads)

@@ -10,6 +10,7 @@ import numpy as np
 from utils import competition_score as score_doc1
 import comp_metrics as cm
 
+
 def evaluate_both_metrics(pred_6d: np.ndarray, gold_6d: np.ndarray, tau: float = 0.02) -> dict:
     s1 = score_doc1(pred_6d, gold_6d, tau=tau)
     s2 = cm.score(gold_6d, pred_6d, tau=tau)
@@ -27,4 +28,17 @@ def evaluate_both_metrics(pred_6d: np.ndarray, gold_6d: np.ndarray, tau: float =
         'doc2_S_p0': float(20.0 * s2['S_p0']),
         'doc2_Clean2': float(20.0 * clean2_strict),
         'per_14': s2['per'],
+        'doc1': {
+            'total': float(s1['total']),
+            'S_pos': float(s1['S_pos']),
+            'S_p0': float(s1['S_p0']),
+            'S_clean': float(s1['S_clean']),
+        },
+        'doc2': {
+            'total': float(doc2_strict_total),
+            'cliff_total': float(s2['total']),
+            'S_pos': float(s2['S_pos']),
+            'S_p0': float(s2['S_p0']),
+            'Clean2': float(clean2_strict),
+        },
     }
