@@ -1,0 +1,18 @@
+{
+  "total_candidates": 1600,
+  "gate1_tool_iqa_passed": 1306,
+  "gate2_qwen3vl_checked": 48,
+  "gate2_qwen3vl_passed": 0,
+  "gate3_golden_anchor_passed": 1093,
+  "per_dimension_verified_quadruplets": {
+    "模糊": 208,
+    "纹理损失": 19,
+    "过锐": 242,
+    "花屏": 200,
+    "过度生成": 226,
+    "虚化突兀": 198
+  },
+  "min_teacher_severity_margin_delta_s": 0.25,
+  "vlm_pairwise_monotonicity_rate": 1.0,
+  "elapsed_sec": 206.78
+}

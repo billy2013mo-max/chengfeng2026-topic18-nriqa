@@ -123,12 +123,16 @@ def compute_scene_aware_asymmetric_ordinal_loss(
                 if pos.any() and neg.any():
                     diff = lch[pos].unsqueeze(1) - lch[neg].unsqueeze(0)
                     w = w_scene[pos][:, neg]
-                    loss = loss + (((-diff * margin).sigmoid() * w).sum() / w.sum().clamp(min=1.0))
+                    # True asymmetric margin hinge/softplus loss (z_i - z_j >= margin)
+                    # Divide by w.numel() rather than w.sum() so w_scene is never canceled out when 1x1!
+                    pair_loss = F.softplus(4.0 * (margin - diff)) / 4.0
+                    loss = loss + (pair_loss * w).mean()
             pos, neg = (y >= 1), (y == 0)
             if pos.any() and neg.any():
                 diff = l_ge1[pos].unsqueeze(1) - l_ge1[neg].unsqueeze(0)
                 w = w_scene[pos][:, neg]
-                loss = loss + (((-diff * m_pos_clean).sigmoid() * w).sum() / w.sum().clamp(min=1.0))
+                pair_loss = F.softplus(4.0 * (m_pos_clean - diff)) / 4.0
+                loss = loss + (pair_loss * w).mean()
         else:
             l = logits_cum[:, col]
             col += 1
@@ -136,7 +140,8 @@ def compute_scene_aware_asymmetric_ordinal_loss(
             if pos.any() and neg.any():
                 diff = l[pos].unsqueeze(1) - l[neg].unsqueeze(0)
                 w = w_scene[pos][:, neg]
-                loss = loss + (((-diff * m_pos_clean).sigmoid() * w).sum() / w.sum().clamp(min=1.0))
+                pair_loss = F.softplus(4.0 * (m_pos_clean - diff)) / 4.0
+                loss = loss + (pair_loss * w).mean()
     return loss / len(CLASSES)
 
 
@@ -158,14 +163,27 @@ class MultiNetV12_ABMIL(MultiNetV2):
             )
             nn.init.zeros_(self.phys_proj[-1].weight)
             nn.init.zeros_(self.phys_proj[-1].bias)
-            self.phys_gate = nn.Parameter(torch.zeros(1))
+            # Initialize gate to 0.25 (not 0.0!) so step-0 residual is 0 via phys_proj[-1]=0
+            # while gradients flow immediately to phys_proj from step 1.
+            self.phys_gate = nn.Parameter(torch.tensor(0.25))
 
     def _apply_physics(self, fused, x):
         if getattr(self, 'n_native', 0) <= 0:
             return fused
+        B, V, C, H, W = x.shape
         native = x[:, -self.n_native:]
+        global_rgb = x[:, :1]
+        sal_map = None
+        if len(self.bs) > 0 and hasattr(self.bs[0], 'abmil_pool'):
+            sw = getattr(self.bs[0].abmil_pool, 'last_sal_weights', None)
+            if sw is not None and sw.shape[0] == B * V:
+                sw_2d = sw.reshape(B * V, -1)
+                n_tok = sw_2d.shape[1]
+                gs = int(round(n_tok ** 0.5))
+                if gs * gs == n_tok:
+                    sal_map = sw_2d.view(B, V, 1, gs, gs)[:, 0]  # [B, 1, gs, gs] global view saliency
         with torch.no_grad():
-            phys = self.phys_extractor(native)
+            phys = self.phys_extractor(native, global_rgb=global_rgb, saliency_map=sal_map)
         return fused + torch.tanh(self.phys_gate) * self.phys_proj(self.phys_norm(phys))
 
     def forward_with_tile_cutmix(self, x, g, p_cutmix: float = 0.25):
@@ -332,8 +350,14 @@ def main():
         if bb_params:
             groups.append({'params': bb_params, 'lr': lr})
 
+    phys_params = (
+        list(net.phys_norm.parameters()) +
+        list(net.phys_proj.parameters()) +
+        [net.phys_gate]
+    ) if getattr(net, 'n_native', 0) > 0 else []
     head_params = (
         abmil_params +
+        phys_params +
         list(net.tile_attn.parameters()) +
         list(net.norm.parameters()) +
         list(net.head_cum.parameters()) +
@@ -391,7 +415,7 @@ def main():
         print(f'ep{ep+1} loss={tot/max(1,nb):.3f} val_cas={b_cas["total"]:.2f} val_sca={b_sca["total"]:.2f} '
               f'S_pos={b_sca["S_pos"]:.3f} P0R={b_sca["p0R"]:.3f} S_clean={b_sca["S_clean"]:.3f} t={time.time()-t0:.0f}s', flush=True)
         score_ep = max(b_cas['total'], b_sca['total'])
-        cur_state = copy.deepcopy(net.state_dict())
+        cur_state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
         if (ep + 1) == max(1, a.epochs - 1):
             ep3_state = cur_state
         if best is None or score_ep > best[0]:

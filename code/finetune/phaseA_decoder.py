@@ -173,8 +173,166 @@ def decode_competition_ratio(
     return preds
 
 
-def _score_with_pseudo_gold(pred, pseudo_gold):
-    return competition_score(pred, pseudo_gold)["total"]
+def fit_extremal_beta_calibration_14ch(
+    oof_probs_list: list,
+    y_oof_14ch: np.ndarray,
+    fold_ids: np.ndarray = None,
+) -> list:
+    """
+    Strictly monotonic 2-parameter Beta Calibration per model family and channel (PDF Sec 5.3):
+        z = a * log(p + eps) - b * log(1 - p + eps) + d, with a > 0, b > 0.
+    Preserves extremal right-tail P0 spikes without quantile clipping.
+    """
+    from scipy.optimize import minimize
+    from scipy.special import expit
+
+    M = len(oof_probs_list)
+    N, C = y_oof_14ch.shape
+    params_all = [[None for _ in range(C)] for _ in range(M)]
+    for m in range(M):
+        P_m = np.clip(oof_probs_list[m].astype(np.float64), 1e-6, 1.0 - 1e-6)
+        log_p = np.log(P_m)
+        log_1mp = np.log(1.0 - P_m)
+        for c in range(C):
+            y_c = y_oof_14ch[:, c].astype(np.float64)
+            lp = log_p[:, c]
+            l1m = log_1mp[:, c]
+
+            def nll_loss(theta):
+                a, b, d = theta
+                z = a * lp - b * l1m + d
+                p_hat = expit(z)
+                w = np.where(y_c == 0, 1.25, 1.0)
+                bce = -(y_c * np.log(p_hat + 1e-12) + (1.0 - y_c) * np.log(1.0 - p_hat + 1e-12))
+                reg = 0.05 * ((a - 1.0) ** 2 + (b - 1.0) ** 2 + 0.25 * (d ** 2))
+                return float(np.mean(w * bce) + reg)
+
+            res = minimize(
+                nll_loss,
+                x0=np.array([1.0, 1.0, 0.0]),
+                bounds=[(0.40, 2.50), (0.40, 2.50), (-2.5, 2.5)],
+                method="L-BFGS-B",
+            )
+            params_all[m][c] = res.x
+    return params_all
+
+
+def apply_extremal_beta_calibration_14ch(
+    probs_14ch: np.ndarray,
+    family_params: list,
+    anchor_probs_14ch: np.ndarray = None,
+) -> np.ndarray:
+    """Applies fitted Beta calibration parameters and optionally aligns first/second moments to anchor."""
+    from scipy.special import expit, logit
+
+    P = np.clip(probs_14ch.astype(np.float64), 1e-6, 1.0 - 1e-6)
+    lp = np.log(P)
+    l1m = np.log(1.0 - P)
+    Z = np.zeros_like(P)
+    for c in range(P.shape[1]):
+        a, b, d = family_params[c]
+        Z[:, c] = a * lp[:, c] - b * l1m[:, c] + d
+    if anchor_probs_14ch is not None:
+        l_base = logit(np.clip(anchor_probs_14ch.astype(np.float64), 1e-5, 1.0 - 1e-5))
+        mu_b = l_base.mean(axis=0, keepdims=True)
+        sd_b = l_base.std(axis=0, keepdims=True)
+        mu_z = Z.mean(axis=0, keepdims=True)
+        sd_z = Z.std(axis=0, keepdims=True) + 1e-6
+        Z = mu_b + (sd_b / sd_z) * (Z - mu_z)
+    return expit(Z)
+
+
+def apply_true_oof_quali_rag_v2(
+    oof_logits: np.ndarray,
+    test_logits: np.ndarray,
+    oof_scene_emb: np.ndarray,
+    test_scene_emb: np.ndarray,
+    y_oof_6d: np.ndarray,
+    fold_ids: np.ndarray,
+    k_ref: int = 12,
+    k_all: int = 20,
+    tau_rag: float = 0.08,
+    beta_rag: float = 0.18,
+    gamma_z: float = 0.04,
+    eta_prior: float = 0.12,
+):
+    """
+    QualiRAG 2.0 Four-Dimensional Manifold Relational Calibration (PDF Sec 5.2.3):
+      f1 = L_ens(x, c)
+      f2 = L_ens(x, c) - mu_clean_knn(x, c) + mu_clean_global(c)
+      f3 = (L_ens(x, c) - mu_clean_knn(x, c)) / (sigma_clean_knn(x, c) + 0.15)
+           (variance-adaptive Z-score significance: dampens subtraction when local clean
+            variance is high, sharpens when local clean neighborhood is tight)
+      f4 = sum_{k in KNN_all(x)} w_k * (Y_{k,c} - Y_bar_c)
+           (same-scene Top-20 local defect prior density residual)
+    """
+    from utils import labels_to_14ch
+
+    oof_emb = oof_scene_emb / (np.linalg.norm(oof_scene_emb, axis=1, keepdims=True) + 1e-8)
+    test_emb = test_scene_emb / (np.linalg.norm(test_scene_emb, axis=1, keepdims=True) + 1e-8)
+
+    is_clean = (y_oof_6d.sum(axis=1) == 0)
+    clean_idx_all = np.where(is_clean)[0]
+    if len(clean_idx_all) < k_ref:
+        return oof_logits, test_logits
+
+    y_oof_14 = labels_to_14ch(y_oof_6d).astype(np.float64)
+    y_bar = y_oof_14.mean(axis=0, keepdims=True)
+    global_clean_mean = oof_logits[clean_idx_all].mean(axis=0, keepdims=True)
+    global_clean_std = oof_logits[clean_idx_all].std(axis=0, keepdims=True) + 0.15
+
+    def _compute_manifold_shift(query_logits, query_emb, clean_pool_idx, all_pool_idx):
+        # 1. Clean KNN mean & local variance (Top-k_ref)
+        sim_c = query_emb @ oof_emb[clean_pool_idx].T
+        k_c = min(k_ref, len(clean_pool_idx) - 1)
+        top_c = np.argpartition(-sim_c, kth=k_c, axis=1)[:, :k_c]
+        row_i = np.arange(sim_c.shape[0])[:, None]
+        top_sim_c = sim_c[row_i, top_c]
+        w_c = np.exp((top_sim_c - top_sim_c.max(axis=1, keepdims=True)) / tau_rag)
+        w_c /= w_c.sum(axis=1, keepdims=True)
+
+        ref_l = oof_logits[clean_pool_idx][top_c]  # [N, k_c, 14]
+        mu_clean = np.einsum("nk,nkc->nc", w_c, ref_l)
+        var_clean = np.einsum("nk,nkc->nc", w_c, (ref_l - mu_clean[:, None, :]) ** 2)
+        sd_clean = np.sqrt(np.maximum(var_clean, 0.0)) + 0.15
+
+        # Variance-adaptive confidence damping: if local clean variance is low relative to global,
+        # trust the scene clean baseline more; if high, shrink subtraction.
+        var_trust = np.clip(global_clean_std / sd_clean, 0.55, 1.35)
+        f2_shift = -beta_rag * var_trust * (mu_clean - global_clean_mean)
+        z_sig = np.clip((query_logits - mu_clean) / sd_clean - (query_logits - global_clean_mean) / global_clean_std, -2.5, 2.5)
+        f3_shift = gamma_z * z_sig
+
+        # 2. All-OOF KNN local defect prior density (Top-k_all)
+        sim_a = query_emb @ oof_emb[all_pool_idx].T
+        k_a = min(k_all, len(all_pool_idx) - 1)
+        top_a = np.argpartition(-sim_a, kth=k_a, axis=1)[:, :k_a]
+        top_sim_a = sim_a[row_i, top_a]
+        w_a = np.exp((top_sim_a - top_sim_a.max(axis=1, keepdims=True)) / tau_rag)
+        w_a /= w_a.sum(axis=1, keepdims=True)
+        # Gate by max neighbor similarity so unrelated scenes are not shifted
+        sim_gate = np.clip((top_sim_a.max(axis=1, keepdims=True) - 0.68) / 0.20, 0.0, 1.0)
+        local_prior = np.einsum("nk,nkc->nc", w_a, y_oof_14[all_pool_idx][top_a])
+        f4_shift = eta_prior * sim_gate * (local_prior - y_bar)
+
+        return query_logits + f2_shift + f3_shift + f4_shift
+
+    oof_rag = oof_logits.copy()
+    for f in np.unique(fold_ids):
+        val_mask = (fold_ids == f)
+        ref_clean = np.where(is_clean & (fold_ids != f))[0]
+        ref_all = np.where(fold_ids != f)[0]
+        if len(ref_clean) < k_ref:
+            ref_clean = clean_idx_all
+        if len(ref_all) < k_all:
+            ref_all = np.arange(len(oof_logits))
+        oof_rag[val_mask] = _compute_manifold_shift(
+            oof_logits[val_mask], oof_emb[val_mask], ref_clean, ref_all
+        )
+
+    all_idx = np.arange(len(oof_logits))
+    test_rag = _compute_manifold_shift(test_logits, test_emb, clean_idx_all, all_idx)
+    return oof_rag, test_rag
 
 
 def eum_bca_joint_decode(
@@ -185,60 +343,127 @@ def eum_bca_joint_decode(
     tau_any: np.ndarray,
     kappa_p1p2: np.ndarray = None,
     base_clean: np.ndarray = None,
-    n_rounds: int = 2,
+    n_rounds: int = 3,
     max_cells: int = None,
 ) -> np.ndarray:
     """
-    Expected-utility block coordinate ascent (EUM-BCA).
-
-    This is a tractable plug-in approximation: for each non-clean cell, hold the other
-    predictions as pseudo-ground-truth, enumerate the 4 (or 2) actions, and pick the
-    action maximizing E_g~P(i,c)[score(pred_with_action, pseudo_gold_with_g)].
-    Only cells whose posterior is non-trivial (max grade prob >= 0.55) are visited,
-    and `max_cells` caps the work for large blind splits.
+    Fast O(1)-update Plug-in Expected-Utility Maximization Block Coordinate Ascent (EUM-BCA, PDF Sec 2.2):
+    Directly maximizes the posterior expected competition score:
+        E_{Y ~ P_cal}[25 * S_pos(Y_hat, Y) + 20 * S_p0(Y_hat, Y)]
+    using sufficient statistics (expected TP and predicted positive count per (dim, grade))
+    updated in O(1) time per coordinate move.
     """
-    P = probs_14ch_to_mutually_exclusive_6x4(probs_14ch)
-    base = decode_competition_ratio(
+    P_raw = probs_14ch_to_mutually_exclusive_6x4(probs_14ch)
+    pred = decode_competition_ratio(
         probs_14ch, t0, t1, t2, tau_any, kappa_p1p2, base_clean=base_clean, roll_p2=False
     )
-    pred = base.copy()
     N = pred.shape[0]
-    rows = np.ones(N, dtype=bool) if base_clean is None else (~np.asarray(base_clean, bool))
-    cells = []
-    for i in np.where(rows)[0]:
-        for d in list(FULL_DIMS) + list(P0_ONLY_DIMS):
-            if P[i, d].max() >= 0.55:
-                cells.append((i, d))
-    if max_cells is not None and len(cells) > max_cells:
-        # Prioritise the most uncertain cells (highest entropy).
-        ent = np.array([-(P[i, d] * np.log(P[i, d] + 1e-9)).sum() for i, d in cells])
-        cells = [cells[k] for k in np.argsort(-ent)[:max_cells]]
+    bc = np.zeros(N, dtype=bool) if base_clean is None else np.asarray(base_clean, bool)
+    non_clean_rows = np.where(~bc)[0]
+    if len(non_clean_rows) == 0 or n_rounds <= 0:
+        return pred
 
-    for _ in range(max(0, n_rounds)):
+    # Calibrate cell posteriors around the decoded operating point so E[F1] is consistent
+    # with the thresholded base-rate decision boundary.
+    P = P_raw.copy()
+    for j, d in enumerate(FULL_DIMS):
+        # Softly align posterior class priors with the threshold ratios
+        scale = np.array([
+            1.0,
+            0.28 / max(0.05, float(t2[j])),
+            0.30 / max(0.05, float(t1[j])),
+            0.38 / max(0.05, float(t0[d])),
+        ], dtype=np.float64)
+        P[:, d, :] *= scale[None, :]
+        P[:, d, :] /= P[:, d, :].sum(axis=1, keepdims=True)
+    for d in P0_ONLY_DIMS:
+        scale0 = 0.38 / max(0.05, float(t0[d]))
+        P[:, d, 3] *= scale0
+        P[:, d, :] /= P[:, d, :].sum(axis=1, keepdims=True)
+
+    # Sufficient statistics per (d, g):
+    # G_exp[d, g] = sum_i P[i, d, g] (expected GT positives)
+    # M_cnt[d, g] = sum_i I(pred[i, d] == g) (predicted positives)
+    # T_exp[d, g] = sum_{i: pred[i, d] == g} P[i, d, g] (expected TPs)
+    G_exp = P.sum(axis=0)  # [6, 4]
+    M_cnt = np.zeros((6, 4), dtype=np.float64)
+    T_exp = np.zeros((6, 4), dtype=np.float64)
+    for d in range(6):
+        for g in (1, 2, 3):
+            mask = (pred[:, d] == g)
+            M_cnt[d, g] = float(mask.sum())
+            T_exp[d, g] = float(P[mask, d, g].sum())
+
+    def _dim_utility(d: int, m_vec: np.ndarray, t_vec: np.ndarray) -> float:
+        g_vec = G_exp[d]
+        if d in FULL_DIMS:
+            f1s = []
+            for g in (1, 2, 3):
+                denom = m_vec[g] + g_vec[g]
+                f1 = (2.0 * t_vec[g] / denom) if denom > 1e-6 else 0.0
+                f1s.append(f1)
+            s_pos_d = (25.0 / 6.0) * (f1s[0] + f1s[1] + f1s[2]) / 3.0
+            f1_p0 = f1s[2]
+        else:
+            denom = m_vec[3] + g_vec[3]
+            f1_p0 = (2.0 * t_vec[3] / denom) if denom > 1e-6 else 0.0
+            s_pos_d = (25.0 / 6.0) * f1_p0
+        r_p0 = (t_vec[3] / g_vec[3]) if g_vec[3] > 1e-6 else 1.0
+        s_p0_d = (20.0 / 6.0) * (0.6 * r_p0 + 0.4 * f1_p0)
+        return s_pos_d + s_p0_d
+
+    # Only allow coordinate transitions on boundary cells (entropy > 0.45) and within
+    # high-confidence support of the threshold decoder so EUM-BCA refines ambiguous boundaries.
+    p0_14, p1_14, p2_14 = ch14_to_p012(probs_14ch)
+    for _ in range(n_rounds):
         changed = 0
-        for i, d in cells:
-            actions = (0, 3) if d in P0_ONLY_DIMS else (0, 1, 2, 3)
-            pseudo = pred.copy()
-            # Hold the other cells at their current predictions.
-            best_a, best_u = int(pred[i, d]), -1e18
-            for a in actions:
-                exp_u = 0.0
-                for g in range(4):
-                    pg = float(P[i, d, g])
-                    if pg < 1e-6:
+        for d in FULL_DIMS:
+            j = FULL_DIMS.index(d)
+            cur_u = _dim_utility(d, M_cnt[d], T_exp[d])
+            for i in non_clean_rows:
+                a_old = int(pred[i, d])
+                p_any = p0_14[i, d] + p1_14[i, j] + p2_14[i, j]
+                # Only refine cells near the P1<->P2 or P0<->P1 boundary
+                if a_old == 0 and p_any < tau_any[d] * 0.92:
+                    continue
+                best_a = a_old
+                best_u = cur_u
+                for a_new in (0, 1, 2, 3):
+                    if a_new == a_old:
                         continue
-                    gold = pseudo.copy()
-                    gold[i, d] = g
-                    trial = pseudo.copy()
-                    trial[i, d] = a
-                    exp_u += pg * _score_with_pseudo_gold(trial, gold)
-                if exp_u > best_u:
-                    best_u, best_a = exp_u, a
-            if best_a != pred[i, d]:
-                pred[i, d] = best_a
-                changed += 1
+                    # Enforce minimum evidence guardrails
+                    if a_new == 3 and p0_14[i, d] < t0[d] * 0.90:
+                        continue
+                    if a_new == 2 and (p1_14[i, j] + 0.45 * p0_14[i, d]) < t1[j] * 0.88:
+                        continue
+                    if a_new == 1 and p_any < tau_any[d] * 0.92:
+                        continue
+                    if a_old == 3 and p0_14[i, d] >= t0[d] * 1.06:
+                        continue
+                    m_try = M_cnt[d].copy()
+                    t_try = T_exp[d].copy()
+                    if a_old > 0:
+                        m_try[a_old] -= 1.0
+                        t_try[a_old] -= P[i, d, a_old]
+                    if a_new > 0:
+                        m_try[a_new] += 1.0
+                        t_try[a_new] += P[i, d, a_new]
+                    u_try = _dim_utility(d, m_try, t_try)
+                    if u_try > best_u + 1e-5:
+                        best_u = u_try
+                        best_a = a_new
+                if best_a != a_old:
+                    if a_old > 0:
+                        M_cnt[d, a_old] -= 1.0
+                        T_exp[d, a_old] -= P[i, d, a_old]
+                    if best_a > 0:
+                        M_cnt[d, best_a] += 1.0
+                        T_exp[d, best_a] += P[i, d, best_a]
+                    pred[i, d] = best_a
+                    cur_u = best_u
+                    changed += 1
         if changed == 0:
             break
-    if base_clean is not None:
-        pred[np.asarray(base_clean, bool)] = 0
+
+    pred[bc] = 0
     return pred

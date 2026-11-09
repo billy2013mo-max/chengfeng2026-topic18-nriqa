@@ -21,6 +21,7 @@ import numpy as np
 os.chdir('/wanqing-develop/luowenjing/18')
 
 IMG_DIRS = [
+    '/dev/shm/v17_synth_quads',
     'data/images',
     'data/images_supp',
     'data/train',
