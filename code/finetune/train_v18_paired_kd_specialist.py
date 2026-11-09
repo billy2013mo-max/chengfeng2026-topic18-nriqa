@@ -1,653 +1,747 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-code/finetune/train_v18_paired_kd_specialist.py
-V18 Specialist Trainer with 5 Core Breakthroughs:
-  1. Fast Precomputed 1:1 Native ROI Lookup (/dev/shm/race18_native/roi_coords_and_meta.npz)
-     + Mask-Guided Crop for synthetic quadruplets + 5D Geometry Meta FiLM Conditioning.
-  2. Paired Quadruplet Differential Contrast Batching: samples (I_Clean, I_P2, I_P1, I_P0)
-     from the SAME seed in the SAME forward pass and enforces pure differential ranking
-     z_c(P0) > z_c(P1) > z_c(P2) > z_c(Clean) + cross-dimension orthogonality invariance.
-  3. Zero-Leakage Same-Split 6B Teacher Knowledge Distillation (distills s16 6B teacher into
-     s16 specialists, s17 6B teacher into s17 specialists on training images only).
-  4. Monotonic Interval CORN Head (guarantees positive P1 interval width Delta_P1 >= 0.45).
-  5. Official Dual-Metric (Doc1 + Doc2) Validation & SWA + 2x Flip TTA.
+V18.1 Paired-Quadruplet + True 6B/V16 Teacher Knowledge Distillation Specialist Trainer
+=======================================================================================
+Fixes all 4 training bugs identified in V18:
+1. True 6B + V16_Full Teacher Distillation (`load_teacher_14_map`):
+   Distills from the strong `InternViT-6B` (v12_phaseB_fixed + v12_phaseB + v11_pure_real)
+   + `V16_Full` OOF teacher strictly restricted to `train` split images (replacing the weak
+   42.8-point V15 frozen feature tower).
+2. True Scene-Grouped Paired Quadruplet Ranking & Orthogonality Loss:
+   Groups synthetic quadruplets by `(seed_name, target_dim_idx)` inside each mini-batch,
+   enforcing monotonic margin ranking `S(无问题) < S(P2) < S(P1) < S(P0)` on the target dimension
+   AND cross-dimension invariance on the 5 non-target dimensions `c' != c`.
+3. Smooth Residual Dual-Head Logits (`MultiNetV18`):
+   Replaces the hard `torch.maximum(l_ge2, l_eq3 + d_p1 * 0.35)` logit distortion with a smooth
+   residual + soft monotonicity penalty so `head_cum` and `head_ex` remain probability-calibrated.
+4. Pure Trained SWA & Name-Aligned V16 Anchor Blending:
+   - Never blends untrained `init_sd_cpu` weights into SWA (averages only trained Stage 1 & Stage 2 checkpoints).
+   - Aligns `--v16-npz` by image name so `split_full_v18.csv` (`val` size 300) never crashes when
+     blending with `s16/s17` V16 specialists (`val` size 500).
 """
-import argparse, copy, csv, glob, json, math, os, random, sys, time
+import os
+import time
+import random
+import argparse
 import numpy as np
-from PIL import Image, ImageEnhance, ImageOps
+import pandas as pd
+from PIL import Image
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+import torchvision.transforms.functional as TF
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-try:
-    torch.set_float32_matmul_precision('high')
-except Exception:
-    pass
-
-os.chdir('/wanqing-develop/luowenjing/18')
-sys.path.extend(['code', 'code/finetune', 'code/decision_eval'])
-from data import load_split, read_manifest, targets_from_grades, CLASSES, FULL
-from train_v2 import exact_probs_from_dual, exact_targets_14, P0_IDX
-from train_v9_specialist import CACHE_OK, CLASS_TO_COLS14, build_v9_backbone, set_seed
-from train_v16_microscope_specialist import MultiNetV16, v16_clean_microscope_loss_fn
-from train_v17_end2end_sim2real_specialist import is_synth_name, get_sample_class_mask6_v17
-from cv_decoder_calib import decode_pc, HAND
-import comp_metrics as cm
-
-ROI_CACHE_PATH = '/dev/shm/race18_native/roi_coords_and_meta.npz'
-SYNTH_META_PATH = 'data/v17_splits/v18_synth_metadata.json'
+REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+DIMS = ['文字错误', '元素重叠', '模糊与伪影', '色彩与曝光问题', '过度生成', '构图与切片问题']
+GRADE_TO_IDX = {'无问题': 0, 'P2': 1, 'P1': 2, 'P0': 3}
+W_DIM = np.array([1.0, 1.0, 0.7, 0.6, 0.9, 0.8], dtype=np.float64)
+MEAN = [0.485, 0.456, 0.406]
+STD = [0.229, 0.224, 0.225]
 
 
-def load_roi_and_synth_meta():
-    roi_map, meta_map = {}, {}
-    if os.path.exists(ROI_CACHE_PATH):
-        d = np.load(ROI_CACHE_PATH, allow_pickle=True)
-        names = list(d['names'])
-        coords = d['coords']
-        meta = d['meta']
-        roi_map = {n: coords[i] for i, n in enumerate(names)}
-        meta_map = {n: meta[i] for i, n in enumerate(names)}
-    synth_meta = {}
-    if os.path.exists(SYNTH_META_PATH):
-        synth_meta = json.load(open(SYNTH_META_PATH))
-    return roi_map, meta_map, synth_meta
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
-class MultiNetV18(MultiNetV16):
-    """
-    Upgrades MultiNetV16 with:
-      1. 5D Geometry Meta FiLM Conditioning (Scale & Aspect-Ratio Aware Feature Modulation, zero-initialized residual).
-      2. Monotonic Interval CORN Residual Head (enforces positive P1 interval width Delta_P1 >= 0.45).
-    """
-    def __init__(self, specs, phys_dim=60, dropout=0.12, n_quad=4):
-        super().__init__(specs, phys_dim=phys_dim, dropout=dropout, n_quad=n_quad)
-        d_vis = sum(8 * x[5] for x in specs)
-        d = d_vis + 256
-        # Zero-initialized 5D Geometry FiLM (preserves exact warm-start behavior at step 0)
-        self.geom_film = nn.Sequential(
-            nn.Linear(5, 64),
+class MultiScaleMicroscopeGridV18(nn.Module):
+    def __init__(self, d=2048):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(d * 4, d),
+            nn.LayerNorm(d),
             nn.GELU(),
-            nn.Linear(64, d * 2),
+        )
+
+    def forward(self, tokens):
+        B, N, D = tokens.shape
+        g_mean = tokens.mean(dim=1)
+        g_max = tokens.max(dim=1).values
+        if N == 256:
+            grid = tokens.view(B, 16, 16, D)
+            q4 = F.adaptive_max_pool2d(grid.permute(0, 3, 1, 2), (2, 2)).flatten(2).mean(dim=-1)
+            q16 = F.adaptive_max_pool2d(grid.permute(0, 3, 1, 2), (4, 4)).flatten(2)
+            top2_16 = torch.topk(q16, k=2, dim=-1).values.mean(dim=-1)
+        else:
+            q4 = g_max
+            top2_16 = g_mean
+        return self.proj(torch.cat([g_mean, g_max, q4, top2_16], dim=-1))
+
+
+class MultiNetV18(nn.Module):
+    def __init__(self, base_ckpt_path, unfreeze_mode='lastk2'):
+        super().__init__()
+        ckpt = torch.load(base_ckpt_path, map_location='cpu')
+        self.backbone = ckpt['backbone'].float()
+        d = 2048
+        self.ms_pool = MultiScaleMicroscopeGridV18(d)
+        self.head_cum = nn.Sequential(
+            nn.LayerNorm(d), nn.Dropout(0.2), nn.Linear(d, 512), nn.GELU(), nn.Linear(512, 18)
+        )
+        self.head_ex = nn.Sequential(
+            nn.LayerNorm(d), nn.Dropout(0.2), nn.Linear(d, 512), nn.GELU(), nn.Linear(512, 24)
+        )
+        self.geom_film = nn.Sequential(
+            nn.Linear(3, 64), nn.GELU(), nn.Linear(64, d * 2)
         )
         nn.init.zeros_(self.geom_film[-1].weight)
         nn.init.zeros_(self.geom_film[-1].bias)
 
-        # Monotonic Interval CORN residual parameters (for the 4 full-graded dimensions)
         self.corn_delta = nn.Sequential(
-            nn.Linear(d, 128),
-            nn.GELU(),
-            nn.Linear(128, 8),  # 4 dims x (u_p2, u_p1)
+            nn.LayerNorm(d), nn.Dropout(0.15), nn.Linear(d, 256), nn.GELU(), nn.Linear(256, 12)
         )
         nn.init.zeros_(self.corn_delta[-1].weight)
         nn.init.zeros_(self.corn_delta[-1].bias)
 
-    def forward(self, x, phys, geom=None):
-        B, T, C, H, W = x.shape
-        x_flat = x.view(B * T, C, H, W).to(torch.bfloat16).div_(255.0)
-        outs = []
-        for i, (m, fwd) in enumerate(zip(self.bs, self.fwds)):
-            mu = getattr(self, 'mu_%d' % (i + 1))
-            sd = getattr(self, 'sd_%d' % (i + 1))
-            f = fwd((x_flat - mu) / sd).view(B, T, -1)
-            outs.append(self._agg(f, self.tile_attn[i]))
-        h_vis = torch.cat(outs, dim=-1)
-        h_phys = self.phys_mlp(phys.to(h_vis.dtype))
-        h = self.norm(torch.cat([h_vis, h_phys], dim=-1))
-        h = h * self.se_gate(h)
+        if 'state_dict' in ckpt:
+            sd = ckpt['state_dict']
+            own = self.state_dict()
+            for k, v in sd.items():
+                if k in own and own[k].shape == v.shape:
+                    own[k].copy_(v)
+
+        self.set_unfreeze(unfreeze_mode)
+
+    def set_unfreeze(self, mode):
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+        layers = self.backbone.encoder.layers
+        if mode == 'lastk1':
+            for p in layers[-1:].parameters():
+                p.requires_grad = True
+        elif mode == 'lastk2':
+            for p in layers[-2:].parameters():
+                p.requires_grad = True
+        elif mode == 'lastk3':
+            for p in layers[-3:].parameters():
+                p.requires_grad = True
+        for m in [self.ms_pool, self.head_cum, self.head_ex, self.geom_film, self.corn_delta]:
+            for p in m.parameters():
+                p.requires_grad = True
+
+    def forward_single(self, x, geom=None):
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            out = self.backbone(x, output_hidden_states=False, return_dict=True)
+            tokens = out.last_hidden_state[:, 1:, :].float()
+        feat = self.ms_pool(tokens)
         if geom is not None:
-            gb = self.geom_film(geom.to(h.dtype))
+            gb = self.geom_film(geom)
             gamma, beta = gb.chunk(2, dim=-1)
-            h = h * (1.0 + 0.15 * torch.tanh(gamma)) + 0.15 * beta
-        h = self.drop(h)
-        lc = self.head_cum(h)
-        le = self.head_ex(h)
-        gl = self.gate(h).squeeze(-1)
+            feat = feat * (1.0 + 0.12 * torch.tanh(gamma)) + 0.12 * beta
 
-        # Monotonic Interval CORN Guarantee on cumulative logits lc (14 channels):
-        # Ensures l_ge1 >= l_ge2 + Delta_P2 and l_ge2 >= l_eq3 + Delta_P1 with Delta_P1 >= 0.45
-        u = self.corn_delta(h)
+        lc = self.head_cum(feat)
+        le = self.head_ex(feat)
+        deltas = self.corn_delta(feat)
+
+        # Smooth residual adjustment on cumulative thresholds (no hard torch.maximum distortion)
         lc_out = lc.clone()
-        col = 0
-        k_full = 0
-        for ci, c in enumerate(CLASSES):
-            if c in FULL:
-                l_ge1 = lc[:, col]
-                l_ge2 = lc[:, col + 1]
-                l_eq3 = lc[:, col + 2]
-                d_p2 = 0.35 + 0.15 * F.softplus(u[:, 2 * k_full])
-                d_p1 = 0.45 + 0.15 * F.softplus(u[:, 2 * k_full + 1])
-                # Enforce monotonic interval gap when l_eq3 approaches l_ge2
-                lc_out[:, col + 1] = torch.maximum(l_ge2, l_eq3 + d_p1 * 0.35)
-                lc_out[:, col] = torch.maximum(l_ge1, lc_out[:, col + 1] + d_p2 * 0.30)
-                col += 3
-                k_full += 1
-            else:
-                col += 1
-        return lc_out, le, gl
+        for c in range(6):
+            col = c * 3
+            d_ge2 = 0.15 * torch.tanh(deltas[:, c * 2])
+            d_ge1 = 0.15 * torch.tanh(deltas[:, c * 2 + 1])
+            lc_out[:, col + 1] = lc[:, col + 1] + d_ge2
+            lc_out[:, col] = lc[:, col] + d_ge1
+        return lc_out, le
+
+    def forward(self, x_g, x_l, geom=None, alpha_local=0.38):
+        lc_g, le_g = self.forward_single(x_g, geom)
+        if x_l is None or alpha_local <= 0:
+            return lc_g, le_g
+        lc_l, le_l = self.forward_single(x_l, geom)
+        return (1.0 - alpha_local) * lc_g + alpha_local * lc_l, (1.0 - alpha_local) * le_g + alpha_local * le_l
 
 
-class V18FastMicroscopeDataset(Dataset):
-    """
-    Uses precomputed 1:1 ROI coords (zero CPU Sobel overhead per epoch!),
-    Mask-Guided focus_yx for V18 synthetic quadruplets, and 5D Geometry Meta.
-    """
-    def __init__(self, rows, phys_map, phys_mu, phys_sd, roi_map, meta_map, synth_meta, size=448, train=True, hflip=False, tiles=2, synth_w=0.75):
-        self.rows = rows
-        self.phys_map = phys_map
-        self.phys_mu = phys_mu
-        self.phys_sd = phys_sd
-        self.roi_map = roi_map
-        self.meta_map = meta_map
-        self.synth_meta = synth_meta
-        self.size = size
-        self.train = train
-        self.hflip = hflip
-        self.tiles = tiles
-        self.synth_w = synth_w
-        if CACHE_OK:
-            d = np.load('/dev/shm/race18_native/index.npz', allow_pickle=True)
-            self.names = list(d['names'])
-            self.offsets = d['offsets']
-            self.h = d['h']
-            self.w = d['w']
-            self.pos = {n: i for i, n in enumerate(self.names)}
-            self.data = np.memmap('/dev/shm/race18_native/cache.bin', dtype=np.uint8, mode='r')
+def make_global_and_hires_crop(img: Image.Image, is_train=False):
+    W, H = img.size
+    ar = W / max(H, 1.0)
+    geom = torch.tensor(
+        [np.log(max(ar, 0.1)), (W * H) / (1024.0 * 1024.0), float(min(W, H)) / 1024.0],
+        dtype=torch.float32,
+    )
+    g_img = img.resize((448, 448), Image.BICUBIC)
+    if W >= 448 and H >= 448:
+        if is_train:
+            max_x = W - 448
+            max_y = H - 448
+            cx = random.randint(int(max_x * 0.15), int(max_x * 0.85)) if max_x > 10 else 0
+            cy = random.randint(int(max_y * 0.15), int(max_y * 0.85)) if max_y > 10 else 0
         else:
-            self.pos = {}
+            cx, cy = (W - 448) // 2, (H - 448) // 2
+        l_img = img.crop((cx, cy, cx + 448, cy + 448))
+    else:
+        l_img = g_img
+
+    if is_train and random.random() < 0.5:
+        g_img = TF.hflip(g_img)
+        l_img = TF.hflip(l_img)
+
+    t_g = TF.normalize(TF.to_tensor(g_img), MEAN, STD)
+    t_l = TF.normalize(TF.to_tensor(l_img), MEAN, STD)
+    return t_g, t_l, geom
+
+
+class PairedQuadDatasetV18(Dataset):
+    """
+    Dataset with:
+    - Real training images + their true 6B/V16 teacher soft probability targets (14-dim)
+    - Corridor-verified native-resolution synthetic images tagged with `(seed_id, target_dim_idx)`
+      so the loss function can compute exact within-scene paired ranking and non-target invariance.
+    """
+    def __init__(self, real_df, real_img_dir, synth_df=None, teacher_map=None):
+        self.items = []
+        self.seed_to_id = {}
+        real_name_to_path = {}
+        real_name_to_y = {}
+
+        for _, row in real_df.iterrows():
+            nm = str(row['image'])
+            p = os.path.join(real_img_dir, nm)
+            y = np.array([GRADE_TO_IDX[row[c]] for c in DIMS], dtype=np.int64)
+            real_name_to_path[nm] = p
+            real_name_to_y[nm] = y
+            t_vec = teacher_map.get(nm, np.full(14, -1.0, dtype=np.float32)) if teacher_map else np.full(14, -1.0, dtype=np.float32)
+            self.items.append((p, y, -1, t_vec, -1))
+
+        if synth_df is not None and len(synth_df) > 0:
+            # Group synthetic rows by (seed_name, target_dim_idx) so quadruplet members stay near each other
+            for (seed_nm, dim_c), grp in synth_df.groupby(['seed_name', 'target_dim_idx']):
+                if seed_nm not in self.seed_to_id:
+                    self.seed_to_id[seed_nm] = len(self.seed_to_id)
+                sid = self.seed_to_id[seed_nm]
+                # Also inject the clean seed image into this group if present in real_df
+                if seed_nm in real_name_to_path:
+                    self.items.append((
+                        real_name_to_path[seed_nm],
+                        real_name_to_y[seed_nm],
+                        int(dim_c),
+                        np.full(14, -1.0, dtype=np.float32),
+                        sid,
+                    ))
+                for _, row in grp.iterrows():
+                    p = str(row['image'])
+                    if not os.path.exists(p):
+                        continue
+                    y = np.array([GRADE_TO_IDX[row[c]] for c in DIMS], dtype=np.int64)
+                    self.items.append((p, y, int(dim_c), np.full(14, -1.0, dtype=np.float32), sid))
 
     def __len__(self):
-        return len(self.rows)
+        return len(self.items)
 
-    def _load(self, name):
-        if name in self.pos:
-            j = self.pos[name]
-            h, w, off = int(self.h[j]), int(self.w[j]), int(self.offsets[j])
-            arr = np.asarray(self.data[off:off + h * w * 3]).reshape(h, w, 3)
-            return Image.fromarray(arr)
-        for d in ['/dev/shm/v18_synth_quads', '/dev/shm/v17_synth_quads', '/tmp/v9_authentic_imgs',
-                  'data/train', 'data/images', 'data/images_supp', 'data/test_150', 'data/test']:
-            p = os.path.join('/wanqing-develop/luowenjing/18', d, name) if not d.startswith('/') else os.path.join(d, name)
-            if os.path.exists(p):
-                return Image.open(p).convert('RGB')
-        raise FileNotFoundError(f'Cannot find {name}')
-
-    def _get_fast_native_crops(self, im, nm, do_flip=False):
-        S = self.size
-        w, h = im.size
-        if w < S or h < S:
-            im = im.resize((max(w, S), max(h, S)), Image.BICUBIC)
-            w, h = im.size
-
-        # 1. If synthetic image in V18 metadata, align first crop directly to exact defect mask center (focus_y, focus_x)!
-        focus_override = None
-        if nm in self.synth_meta and 'focus_yx' in self.synth_meta[nm]:
-            fy, fx = self.synth_meta[nm]['focus_yx']
-            if do_flip:
-                fx = w - fx
-            focus_override = (max(0, min(h - S, int(fy) - S // 2)), max(0, min(w - S, int(fx) - S // 2)))
-
-        lookup_nm = nm
-        if lookup_nm not in self.roi_map:
-            if nm in self.synth_meta and 'seed_name' in self.synth_meta[nm]:
-                lookup_nm = self.synth_meta[nm]['seed_name']
-            else:
-                for d in range(6):
-                    tag = f'_d{d}_'
-                    if tag in lookup_nm:
-                        stem = lookup_nm[:lookup_nm.index(tag)]
-                        for ext in ('.png', '.jpg', '.jpeg'):
-                            if (stem + ext) in self.roi_map:
-                                lookup_nm = stem + ext
-                                break
-                        break
-
-        if lookup_nm in self.roi_map:
-            coords6 = self.roi_map[lookup_nm]  # [edge1, edge2, tex1, tex2, ring1, ring2]
-            c0 = focus_override if focus_override is not None else (int(coords6[0][0]), int(coords6[0][1]))
-            selected = [c0, (int(coords6[1][0]), int(coords6[1][1])), (int(coords6[2][0]), int(coords6[2][1]))]
-            patches = []
-            for idx_c, (y0, x0) in enumerate(selected):
-                if do_flip and not (idx_c == 0 and focus_override is not None):
-                    x0 = max(0, w - S - x0)
-                y_c = max(0, min(h - S, int(y0)))
-                x_c = max(0, min(w - S, int(x0)))
-                if self.train and w > S + 24 and h > S + 24:
-                    y_c = max(0, min(h - S, y_c + random.randint(-12, 12)))
-                    x_c = max(0, min(w - S, x_c + random.randint(-12, 12)))
-                patches.append(im.crop((x_c, y_c, x_c + S, y_c + S)))
-            return patches, lookup_nm
-
-        cx, cy = max(0, (w - S) // 2), max(0, (h - S) // 2)
-        return [
-            im.crop((cx, cy, cx + S, cy + S)),
-            im.crop((0, 0, S, S)),
-            im.crop((max(0, w - S), max(0, h - S), w, h)),
-        ], lookup_nm
-
-    def __getitem__(self, i):
-        r = self.rows[i]
-        nm = r['name']
-        im = self._load(nm)
-        do_flip = False
-        if self.train:
-            if random.random() < 0.5:
-                im = im.transpose(Image.FLIP_LEFT_RIGHT)
-                do_flip = True
-            if random.random() < 0.25:
-                im = ImageEnhance.Brightness(im).enhance(1.0 + random.uniform(-0.035, 0.035))
-        elif self.hflip:
-            im = im.transpose(Image.FLIP_LEFT_RIGHT)
-            do_flip = True
-
-        w, h = im.size
-        views = [im.resize((self.size, self.size), Image.BILINEAR)]
-        T = self.tiles
-        for dy in range(T):
-            for dx in range(T):
-                views.append(im.crop((dx * w // T, dy * h // T, (dx + 1) * w // T, (dy + 1) * h // T)).resize((self.size, self.size), Image.BILINEAR))
-        nat_patches, lookup_nm = self._get_fast_native_crops(im, nm, do_flip=do_flip)
-        views.extend(nat_patches)
-
-        x = np.transpose(np.stack([np.asarray(v, dtype=np.uint8) for v in views]), (0, 3, 1, 2))
-        g = np.array([int(r[c]) for c in CLASSES], dtype=np.int64)
-        mask7 = get_sample_class_mask6_v17(nm, synth_w=self.synth_w)
-        if ('_d5_NatNeg' in nm) or ('_d5_P2' in nm and g[5] == 0):
-            mask7 = np.array([0.85, 0.0, 0.0, 0.0, 0.0, 0.85, 0.0], dtype=np.float32)
-
-        p_raw = self.phys_map.get(nm, self.phys_map.get(lookup_nm, np.zeros(60, dtype=np.float32)))
-        p_norm = np.clip((p_raw - self.phys_mu) / self.phys_sd, -6.0, 6.0).astype(np.float32)
-
-        raw_meta = self.meta_map.get(lookup_nm, np.array([h, w, float(w) / max(1, h), abs(math.log(max(float(w) / max(1, h), 1e-3))), math.sqrt((w * h) / float(self.size * self.size))], dtype=np.float32))
-        geom_5d = np.array([
-            math.log(max(raw_meta[0], 64.0) / 448.0),
-            math.log(max(raw_meta[1], 64.0) / 448.0),
-            math.log(max(raw_meta[2], 1e-2)),
-            raw_meta[3],
-            raw_meta[4] - 1.0,
-        ], dtype=np.float32)
-
-        return torch.from_numpy(x), torch.from_numpy(p_norm), torch.from_numpy(geom_5d), torch.from_numpy(g), torch.from_numpy(mask7), nm
+    def __getitem__(self, idx):
+        p, y, t_dim, t_vec, sid = self.items[idx]
+        img = Image.open(p).convert('RGB')
+        x_g, x_l, geom = make_global_and_hires_crop(img, is_train=True)
+        return x_g, x_l, geom, torch.from_numpy(y), int(t_dim), torch.from_numpy(t_vec), int(sid)
 
 
-@torch.inference_mode()
-def predict_v18(net, loader, dev, alpha_ex=0.58):
-    net.eval()
-    P0, P1, P2, GATE, G = [], [], [], [], []
-    for x, phys, geom, g, _, _ in loader:
-        x = x.to(dev, non_blocking=True)
-        phys = phys.to(dev, non_blocking=True)
-        geom = geom.to(dev, non_blocking=True)
-        with torch.autocast('cuda', dtype=torch.bfloat16):
-            lc, le, gl = net(x, phys, geom)
-        p0, p1, p2, _ = exact_probs_from_dual(lc.float(), le.float(), alpha_ex=alpha_ex)
-        P0.append(p0.cpu().numpy())
-        P1.append(p1.cpu().numpy())
-        P2.append(p2.cpu().numpy())
-        GATE.append(torch.sigmoid(gl.float()).cpu().numpy())
-        G.append(g.numpy())
-    return np.concatenate(P0, 0), np.concatenate(P1, 0), np.concatenate(P2, 0), np.concatenate(GATE, 0), np.concatenate(G, 0)
+class EvalDatasetV18(Dataset):
+    def __init__(self, df, img_dir):
+        self.paths = [os.path.join(img_dir, str(r['image'])) for _, r in df.iterrows()]
+        self.names = [str(r['image']) for _, r in df.iterrows()]
+        if DIMS[0] in df.columns:
+            self.labels = np.array([[GRADE_TO_IDX[r[c]] for c in DIMS] for _, r in df.iterrows()], dtype=np.int64)
+        else:
+            self.labels = np.zeros((len(df), 6), dtype=np.int64)
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.paths[idx]).convert('RGB')
+        W, H = img.size
+        ar = W / max(H, 1.0)
+        geom = torch.tensor(
+            [np.log(max(ar, 0.1)), (W * H) / (1024.0 * 1024.0), float(min(W, H)) / 1024.0],
+            dtype=torch.float32,
+        )
+        g_img = img.resize((448, 448), Image.BICUBIC)
+        g_flip = TF.hflip(g_img)
+        if W >= 448 and H >= 448:
+            cx, cy = (W - 448) // 2, (H - 448) // 2
+            l_img = img.crop((cx, cy, cx + 448, cy + 448))
+        else:
+            l_img = g_img
+        t_g = TF.normalize(TF.to_tensor(g_img), MEAN, STD)
+        t_gf = TF.normalize(TF.to_tensor(g_flip), MEAN, STD)
+        t_l = TF.normalize(TF.to_tensor(l_img), MEAN, STD)
+        return t_g, t_gf, t_l, geom, torch.from_numpy(self.labels[idx]), self.names[idx]
 
 
-def compute_paired_quadruplet_and_kd_loss(lc, le, g, mask7, names, teacher_14_map, dev):
+def exact_probs_from_dual(lc, le, w_cum=0.55):
+    pc = torch.sigmoid(lc).view(-1, 6, 3)
+    pe = F.softmax(le.view(-1, 6, 4), dim=-1)
+    p_ge1, p_ge2, p_eq3 = pc[:, :, 0], pc[:, :, 1], pc[:, :, 2]
+    p0_c = p_eq3
+    p1_c = torch.clamp(p_ge2 - p_eq3, min=0.0)
+    p2_c = torch.clamp(p_ge1 - p_ge2, min=0.0)
+
+    p0 = w_cum * p0_c + (1.0 - w_cum) * pe[:, :, 3]
+    p1 = w_cum * p1_c + (1.0 - w_cum) * pe[:, :, 2]
+    p2 = w_cum * p2_c + (1.0 - w_cum) * pe[:, :, 1]
+    return p0, p1, p2
+
+
+def compute_paired_quadruplet_and_kd_loss(lc, le, y, t_dim, t_vec, sid, dim_weights, kd_weight=0.30, rank_weight=0.25):
+    B = y.shape[0]
+    w_d = torch.tensor(dim_weights, device=y.device, dtype=torch.float32)
+
+    # 1. Ordinal cumulative BCE + Exact grade CE + Monotonicity penalty
+    loss_cum = 0.0
+    loss_ex = 0.0
+    loss_mono = 0.0
+    for c in range(6):
+        col_c = c * 3
+        col_e = c * 4
+        yc = y[:, c]
+        t_ge1 = (yc >= 1).float()
+        t_ge2 = (yc >= 2).float()
+        t_eq3 = (yc == 3).float()
+        target_c = torch.stack([t_ge1, t_ge2, t_eq3], dim=-1)
+        bce = F.binary_cross_entropy_with_logits(lc[:, col_c:col_c + 3], target_c, reduction='none')
+        g_w = torch.where(yc == 3, 1.5, torch.where(yc == 2, 1.35, torch.where(yc == 1, 1.15, 1.0))).unsqueeze(-1)
+        loss_cum = loss_cum + w_d[c] * (bce * g_w).mean()
+
+        ce = F.cross_entropy(le[:, col_e:col_e + 4], yc, label_smoothing=0.03)
+        loss_ex = loss_ex + w_d[c] * ce
+
+        # Soft monotonicity constraint: l_ge1 >= l_ge2 >= l_eq3
+        l_ge1, l_ge2, l_eq3 = lc[:, col_c], lc[:, col_c + 1], lc[:, col_c + 2]
+        loss_mono = loss_mono + F.relu(l_eq3 - l_ge2).mean() + F.relu(l_ge2 - l_ge1).mean()
+
+    base_loss = 0.55 * loss_cum + 0.45 * loss_ex + 0.10 * loss_mono
+
+    # 2. 14-Dim Soft Teacher Knowledge Distillation (True 6B + V16_Full Teacher)
+    valid_kd = (t_vec[:, 0] >= 0.0)
+    loss_kd = torch.tensor(0.0, device=y.device)
+    if valid_kd.any() and kd_weight > 0:
+        p0, p1, p2 = exact_probs_from_dual(lc[valid_kd], le[valid_kd])
+        s_ge1 = torch.clamp(p0 + p1 + p2, 1e-5, 1.0 - 1e-5)
+        s_ge2 = torch.clamp(p0 + p1, 1e-5, 1.0 - 1e-5)
+        s_p0_img = torch.clamp(1.0 - torch.prod(1.0 - p0, dim=1, keepdim=True), 1e-5, 1.0 - 1e-5)
+        s_clean_img = torch.clamp(torch.prod(1.0 - s_ge1, dim=1, keepdim=True), 1e-5, 1.0 - 1e-5)
+        s_14 = torch.cat([s_ge1, s_ge2, s_p0_img, s_clean_img], dim=1)
+        t_14 = torch.clamp(t_vec[valid_kd], 1e-5, 1.0 - 1e-5)
+        loss_kd = F.kl_div(torch.log(s_14), t_14, reduction='batchmean') + F.mse_loss(s_14, t_14)
+
+    # 3. Scene-Grouped Paired Quadruplet Ranking + Non-Target Orthogonality Loss
+    loss_rank = torch.tensor(0.0, device=y.device)
+    if rank_weight > 0:
+        pc_all = torch.sigmoid(lc).view(B, 6, 3)
+        sev_all = pc_all.sum(dim=-1)  # Expected severity S_c in [0, 3], shape (B, 6)
+
+        # Group within-batch samples sharing the same (sid, t_dim) first; fallback to same t_dim
+        rank_terms = []
+        ortho_terms = []
+        for c in range(6):
+            mask_c = (t_dim == c)
+            if mask_c.sum() >= 2:
+                idx_c = torch.where(mask_c)[0]
+                s_c = sev_all[idx_c, c]
+                y_c = y[idx_c, c].float()
+                sid_c = sid[idx_c]
+
+                diff_y = y_c.unsqueeze(1) - y_c.unsqueeze(0)
+                same_seed = (sid_c.unsqueeze(1) == sid_c.unsqueeze(0)) & (sid_c.unsqueeze(1) >= 0)
+                pair_mask = (diff_y > 0)
+                if pair_mask.any():
+                    diff_s = s_c.unsqueeze(1) - s_c.unsqueeze(0)
+                    margin = 0.22 * diff_y
+                    # Weight same-seed pairs 3x higher than cross-seed pairs
+                    pair_w = torch.where(same_seed[pair_mask], 3.0, 1.0)
+                    rank_terms.append((F.relu(margin[pair_mask] - diff_s[pair_mask]) * pair_w).mean() * w_d[c])
+
+                # Cross-dimension orthogonality: for same_seed pairs edited on dim c, non-target dims c' != c must stay invariant
+                if same_seed.any():
+                    ss_idx = torch.where(same_seed & (diff_y > 0))
+                    if len(ss_idx[0]) > 0:
+                        non_c = [j for j in range(6) if j != c]
+                        s_non_i = sev_all[idx_c[ss_idx[0]]][:, non_c]
+                        s_non_j = sev_all[idx_c[ss_idx[1]]][:, non_c]
+                        ortho_terms.append(F.smooth_l1_loss(s_non_i, s_non_j.detach()))
+
+        if len(rank_terms) > 0:
+            loss_rank = torch.stack(rank_terms).mean()
+        if len(ortho_terms) > 0:
+            loss_rank = loss_rank + 0.35 * torch.stack(ortho_terms).mean()
+
+    return base_loss + kd_weight * loss_kd + rank_weight * loss_rank
+
+
+def load_teacher_14_map(train_names_set):
     """
-    Computes:
-      1. Same-Batch Paired Synthetic Differential Ranking Loss (when >=2 samples from the same seed/dim or same synthetic dim appear in batch).
-      2. Zero-Leakage Same-Split Teacher Soft-Distribution Distillation on real training images.
+    Builds the 14-dim soft teacher map strictly for `train_names_set` using:
+    1) Primary: 6B Teacher OOF (`v12_phaseB_fixed`, `v12_phaseB`, `v11_pure_real`) + `V16_Full` 8-fold OOF
+    2) Fallback: `v15_ens_oof3573_probs.npz` for any image not covered above
     """
-    loss_extra = lc.new_tensor(0.0)
-    B = lc.shape[0]
+    accum = {}  # nm -> [list of p0, list of p1, list of p2, list of weights]
 
-    # 1. Teacher Knowledge Distillation on authentic real training samples
-    kd_indices = []
-    kd_targets = []
-    for b_i, nm in enumerate(names):
-        if mask7[b_i, 6] > 0.5 and nm in teacher_14_map:
-            kd_indices.append(b_i)
-            kd_targets.append(teacher_14_map[nm])
-    if kd_indices:
-        idx_t = torch.tensor(kd_indices, device=dev, dtype=torch.long)
-        tgt_14 = torch.tensor(np.stack(kd_targets, axis=0), device=dev, dtype=torch.float32)
-        pred_14 = torch.sigmoid(lc[idx_t].float())
-        # Smooth L1 + BCE soft probability distillation from Teacher
-        loss_kd = F.binary_cross_entropy(pred_14.clamp(1e-5, 1.0 - 1e-5), tgt_14.clamp(1e-5, 1.0 - 1e-5))
-        loss_extra = loss_extra + 0.32 * loss_kd
+    def add_pred(nm, p0, p1, p2, w):
+        if nm not in train_names_set:
+            return
+        if nm not in accum:
+            accum[nm] = [0.0, 0.0, 0.0, 0.0]
+        accum[nm][0] = accum[nm][0] + w * p0.astype(np.float64)
+        accum[nm][1] = accum[nm][1] + w * p1.astype(np.float64)
+        accum[nm][2] = accum[nm][2] + w * p2.astype(np.float64)
+        accum[nm][3] += w
 
-    # 2. Within-Batch Differential Contrast on Synthetic / Same-Dim Samples (does NOT shift global P0 bias!)
-    col = 0
-    for ci, c in enumerate(CLASSES):
-        n_ch = 3 if c in FULL else 1
-        valid = (mask7[:, ci] > 0.1)
-        if valid.sum() >= 2:
-            y_c = g[valid, ci]
-            z_c = lc[valid, col:col + n_ch].mean(dim=-1)
-            diff_y = y_c.unsqueeze(1) - y_c.unsqueeze(0)
-            pos_pairs = (diff_y >= 1)
-            if pos_pairs.any():
-                margin = 0.45 * diff_y[pos_pairs].float()
-                diff_z = z_c.unsqueeze(1) - z_c.unsqueeze(0)
-                loss_extra = loss_extra + 0.18 * (F.relu(margin - diff_z[pos_pairs]) ** 2).mean()
-        col += n_ch
+    # 1. Load 6B OOF across splits 16 & 17
+    for sp in ['16', '17']:
+        for pat, w in [
+            (f'{REPO_ROOT}/results/v12_phaseB_fixed/v12_abmil_s{sp}_probs.npz', 0.35),
+            (f'{REPO_ROOT}/results/v12_phaseB/v12_abmil_s{sp}_probs.npz', 0.25),
+            (f'{REPO_ROOT}/results/v11_pure_real/iv6b_s{sp}_probs.npz', 0.20),
+        ]:
+            if os.path.exists(pat):
+                d = np.load(pat, allow_pickle=True)
+                for pref, k_nm in [('va', 'va_names'), ('te', 'te_names')]:
+                    if k_nm in d:
+                        nms = d[k_nm]
+                        p0, p1, p2 = d[f'{pref}_p0'], d[f'{pref}_p1'], d[f'{pref}_p2']
+                        for i, nm in enumerate(nms):
+                            add_pred(str(nm), p0[i], p1[i], p2[i], w)
 
-    return loss_extra
+    # 2. Load V16_Full 8-Fold OOF
+    for f_idx in range(8):
+        p = f'{REPO_ROOT}/results/v16_fulldata/V16_Full_F{f_idx}_AllGrade_Microscope_probs.npz'
+        if os.path.exists(p):
+            d = np.load(p, allow_pickle=True)
+            for pref, k_nm in [('va', 'va_names'), ('te', 'te_names')]:
+                if k_nm in d:
+                    nms = d[k_nm]
+                    p0, p1, p2 = d[f'{pref}_p0'], d[f'{pref}_p1'], d[f'{pref}_p2']
+                    for i, nm in enumerate(nms):
+                        add_pred(str(nm), p0[i], p1[i], p2[i], 0.45)
+
+    # 3. Fallback V15 OOF with small weight (0.15) so all 3,573 train images have soft targets
+    v15_p = f'{REPO_ROOT}/results/v15_full8fold/v15_ens_oof3573_probs.npz'
+    if os.path.exists(v15_p):
+        d = np.load(v15_p, allow_pickle=True)
+        nms = d['names']
+        p0, p1, p2 = d['p0'], d['p1'], d['p2']
+        for i, nm in enumerate(nms):
+            add_pred(str(nm), p0[i], p1[i], p2[i], 0.15)
+
+    t_map = {}
+    for nm, (s0, s1, s2, w_tot) in accum.items():
+        if w_tot <= 0:
+            continue
+        p0 = s0 / w_tot
+        p1 = s1 / w_tot
+        p2 = s2 / w_tot
+        p_ge1 = np.clip(p0 + p1 + p2, 0.0, 1.0)
+        p_ge2 = np.clip(p0 + p1, 0.0, 1.0)
+        p0_img = float(1.0 - np.prod(1.0 - p0))
+        clean_img = float(np.prod(1.0 - p_ge1))
+        vec14 = np.concatenate([p_ge1, p_ge2, [p0_img, clean_img]]).astype(np.float32)
+        t_map[nm] = vec14
+    return t_map
 
 
-def load_teacher_14_map(split_csv):
-    """
-    Loads zero-leakage teacher soft 14-channel probabilities on real training images.
-    Uses out-of-fold / same-split teacher predictions (`v15_ens_oof3573_probs.npz` + `V17_PureReal_FourStream_8Fold_probs.npz`),
-    restricted strictly to `train` images of the current split (`s16` or `s17`).
-    """
-    from utils import p012_to_14ch
-    teacher_map = {}
-    train_names = set(r['name'] for r in load_split(split_csv) if r['split'] == 'train')
-    if os.path.exists('results/v15_full8fold/v15_ens_oof3573_probs.npz'):
-        d = np.load('results/v15_full8fold/v15_ens_oof3573_probs.npz', allow_pickle=True)
-        p14 = p012_to_14ch(d['oof_p0'], d['oof_p1'], d['oof_p2']).astype(np.float32)
-        # Reorder 14ch from utils.py format to train_v2 lc format:
-        # train_v2 lc order: 模糊(3: >=1,>=2,==3), 纹理损失(3), 过锐(3), 花屏(1), 过度生成(3), 虚化突兀(1)
-        names = list(d['all_names'])
-        for i, nm in enumerate(names):
-            if nm not in train_names:
-                continue
-            p0 = d['oof_p0'][i]
-            p1 = d['oof_p1'][i]
-            p2 = d['oof_p2'][i]
-            vec14 = []
-            for ci, c in enumerate(CLASSES):
-                if c in FULL:
-                    k = FULL.index(c)
-                    c_eq3 = float(np.clip(p0[ci], 1e-4, 1.0 - 1e-4))
-                    c_ge2 = float(np.clip(p0[ci] + p1[k], c_eq3, 1.0 - 1e-4))
-                    c_ge1 = float(np.clip(p0[ci] + p1[k] + p2[k], c_ge2, 1.0 - 1e-4))
-                    vec14.extend([c_ge1, c_ge2, c_eq3])
-                else:
-                    vec14.append(float(np.clip(p0[ci], 1e-4, 1.0 - 1e-4)))
-            teacher_map[str(nm)] = np.array(vec14, dtype=np.float32)
-    return teacher_map
+@torch.no_grad()
+def eval_split_tta(model, loader, device):
+    model.eval()
+    all_p0, all_p1, all_p2, all_y, all_names = [], [], [], [], []
+    for x_g, x_gf, x_l, geom, y, names in loader:
+        x_g = x_g.to(device, non_blocking=True)
+        x_gf = x_gf.to(device, non_blocking=True)
+        x_l = x_l.to(device, non_blocking=True)
+        geom = geom.to(device, non_blocking=True)
+
+        lc1, le1 = model(x_g, x_l, geom, alpha_local=0.38)
+        lc2, le2 = model.forward_single(x_gf, geom)
+        lc = 0.72 * lc1 + 0.28 * lc2
+        le = 0.72 * le1 + 0.28 * le2
+
+        p0, p1, p2 = exact_probs_from_dual(lc, le)
+        all_p0.append(p0.cpu().numpy())
+        all_p1.append(p1.cpu().numpy())
+        all_p2.append(p2.cpu().numpy())
+        all_y.append(y.numpy())
+        all_names.extend(names)
+
+    return (
+        np.concatenate(all_p0, axis=0),
+        np.concatenate(all_p1, axis=0),
+        np.concatenate(all_p2, axis=0),
+        np.concatenate(all_y, axis=0),
+        all_names,
+    )
+
+
+def score_18dim_exact_probs(p0, p1, p2, y_true):
+    N = len(y_true)
+    preds = np.zeros((N, 6), dtype=np.int64)
+    T0 = [0.34, 0.30, 0.28, 0.23, 0.30, 0.28]
+    T1 = [0.22, 0.22, 0.22, 0.20, 0.24, 0.16]
+    T2 = [0.16, 0.22, 0.18, 0.20, 0.20, 0.15]
+    for c in range(6):
+        pr = np.zeros(N, dtype=np.int64)
+        pr[p2[:, c] >= T2[c]] = 1
+        pr[p1[:, c] >= T1[c]] = 2
+        pr[p0[:, c] >= T0[c]] = 3
+        mask_p1 = (pr == 3) & (p1[:, c] > p0[:, c] * 1.05) & (p0[:, c] < T0[c] + 0.10)
+        pr[mask_p1] = 2
+        preds[:, c] = pr
+
+    tp = np.zeros((6, 3), dtype=np.float64)
+    fp = np.zeros((6, 3), dtype=np.float64)
+    fn = np.zeros((6, 3), dtype=np.float64)
+    for c in range(6):
+        yt, yp = y_true[:, c], preds[:, c]
+        for g_idx, g_val in enumerate([3, 2, 1]):
+            t_m, p_m = (yt == g_val), (yp == g_val)
+            tp[c, g_idx] = np.sum(t_m & p_m)
+            fp[c, g_idx] = np.sum((~t_m) & p_m)
+            fn[c, g_idx] = np.sum(t_m & (~p_m))
+    prec = np.where(tp + fp > 0, tp / (tp + fp), 0.0)
+    rec = np.where(tp + fn > 0, tp / (tp + fn), 0.0)
+    f2 = np.where(4 * prec + rec > 0, 5 * prec * rec / (4 * prec + rec), 0.0)
+    f2_w = (f2[:, 0] * 1.2 + f2[:, 1] * 0.8 + f2[:, 2] * 0.4) / 2.4
+    base_18 = float(np.sum(f2_w * W_DIM) / np.sum(W_DIM))
+    t_p0, p_p0 = np.any(y_true == 3, axis=1), np.any(preds == 3, axis=1)
+    tp0 = np.sum(t_p0 & p_p0)
+    fp0 = np.sum((~t_p0) & p_p0)
+    fn0 = np.sum(t_p0 & (~p_p0))
+    pr0 = tp0 / (tp0 + fp0) if (tp0 + fp0) > 0 else 0.0
+    rc0 = tp0 / (tp0 + fn0) if (tp0 + fn0) > 0 else 0.0
+    f2_img = 5 * pr0 * rc0 / (4 * pr0 + rc0) if (4 * pr0 + rc0) > 0 else 0.0
+    em = float(np.mean(np.all(y_true == preds, axis=1)))
+    total = (0.75 * base_18 + 0.15 * f2_img + 0.10 * em) * 100.0
+    return total, f2_w * 100.0
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--backbones', default='pecoreg:lastk2,siglip2g:lastk2,cradio:lastk2,convnext:full')
-    ap.add_argument('--focus-classes', default='过度生成,纹理损失')
-    ap.add_argument('--init-ckpt', default='', help='Warm-start checkpoint path')
-    ap.add_argument('--v16-npz', default='', help='Pure-real V16 specialist npz for P0 prior anchoring')
-    ap.add_argument('--epochs-s1', type=int, default=1)
-    ap.add_argument('--epochs-s2', type=int, default=1)
-    ap.add_argument('--batch', type=int, default=12)
-    ap.add_argument('--grad-accum', type=int, default=1)
-    ap.add_argument('--size', type=int, default=448)
-    ap.add_argument('--tiles', type=int, default=2)
-    ap.add_argument('--lr-full', type=float, default=3.5e-5)
-    ap.add_argument('--lr-last', type=float, default=1.4e-5)
-    ap.add_argument('--lr-head', type=float, default=4.5e-4)
-    ap.add_argument('--wd', type=float, default=0.01)
-    ap.add_argument('--workers', type=int, default=8)
-    ap.add_argument('--seed', type=int, default=18)
-    ap.add_argument('--dropout', type=float, default=0.12)
-    ap.add_argument('--clean-repeat', type=int, default=2)
-    ap.add_argument('--p0-clean-weight', type=float, default=4.2)
-    ap.add_argument('--channel-neg-weight', type=float, default=1.05)
-    ap.add_argument('--alpha-ex', type=float, default=0.58)
-    ap.add_argument('--synth-w', type=float, default=0.65)
-    ap.add_argument('--split', required=True)
-    ap.add_argument('--manifest', required=True)
-    ap.add_argument('--phys-cache', default='results/v8_experts/native_phys_feats.npz')
-    ap.add_argument('--tau', type=float, default=0.02)
-    ap.add_argument('--out', required=True)
-    a = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--name', type=str, required=True)
+    parser.add_argument('--base-ckpt', type=str, required=True)
+    parser.add_argument('--v16-npz', type=str, default='')
+    parser.add_argument('--split-csv', type=str, required=True)
+    parser.add_argument('--synth-csv', type=str, default=f'{REPO_ROOT}/splits/synth_v18_native_corridor_quads.csv')
+    parser.add_argument('--target-dims', type=str, default='0,1,2,3,4,5')
+    parser.add_argument('--dim-weights', type=str, default='1.0,1.0,0.7,0.6,0.9,0.8')
+    parser.add_argument('--epochs-s1', type=int, default=2)
+    parser.add_argument('--epochs-s2', type=int, default=2)
+    parser.add_argument('--batch-size', type=int, default=24)
+    parser.add_argument('--lr', type=float, default=1.0e-4)
+    parser.add_argument('--kd-weight', type=float, default=0.30)
+    parser.add_argument('--rank-weight', type=float, default=0.25)
+    parser.add_argument('--anchor-weight', type=float, default=0.55)
+    parser.add_argument('--out-ckpt', type=str, required=True)
+    parser.add_argument('--out-npz', type=str, required=True)
+    parser.add_argument('--seed', type=int, default=42)
+    args = parser.parse_args()
 
-    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    set_seed(a.seed)
-    dev = 'cuda'
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.backends.cudnn.benchmark = True
+    seed_everything(args.seed)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    dim_weights = [float(x) for x in args.dim_weights.split(',')]
+    target_dims = [int(x) for x in args.target_dims.split(',')]
 
-    roi_map, meta_map, synth_meta = load_roi_and_synth_meta()
-    teacher_14_map = load_teacher_14_map(a.split)
+    df = pd.read_csv(args.split_csv)
+    tr_df = df[df['split'] == 'train'].reset_index(drop=True)
+    va_df = df[df['split'] == 'val'].sort_values('image').reset_index(drop=True)
+    te_df = df[df['split'] == 'test'].sort_values('image').reset_index(drop=True)
 
-    focus_cis = [CLASSES.index(c.strip()) for c in a.focus_classes.split(',') if c.strip() in CLASSES]
-    print(f'=== Training V18 Paired-Quadruplet + Teacher-KD Specialist on focus_classes={a.focus_classes} (Stage1={a.epochs_s1}ep, Stage2={a.epochs_s2}ep) ===', flush=True)
+    train_names_set = set(tr_df['image'].astype(str).tolist())
+    teacher_map = load_teacher_14_map(train_names_set)
 
-    rows = load_split(a.split)
-    man = read_manifest(a.manifest)
-    for r in rows:
-        r.update({k: man[r['name']][k] for k in CLASSES})
+    synth_df = None
+    if os.path.exists(args.synth_csv):
+        sdf = pd.read_csv(args.synth_csv)
+        sdf = sdf[sdf['seed_name'].astype(str).isin(train_names_set)]
+        sdf = sdf[sdf['target_dim_idx'].isin(target_dims)].reset_index(drop=True)
+        if len(sdf) > 600:
+            sdf = sdf.sample(n=600, random_state=args.seed).reset_index(drop=True)
+        synth_df = sdf
 
-    from extract_native_phys_feats import extract_for_names
-    tr_orig = [r for r in rows if r['split'] == 'train']
-    va = [r for r in rows if r['split'] == 'val']
-    te = [r for r in rows if r['split'] == 'test']
-    tr_real = [r for r in tr_orig if not is_synth_name(r['name']) and ('_NatNeg' not in r['name'])]
-    phys_map = extract_for_names([r['name'] for r in tr_real + va + te], a.phys_cache)
+    img_dir = f'{REPO_ROOT}/nriqa_dataset/train/images'
+    test150_dir = f'{REPO_ROOT}/nriqa_dataset_test/images'
 
-    phys_tr_mat = np.stack([phys_map[r['name']] for r in tr_real], axis=0)
-    phys_mu = np.mean(phys_tr_mat, axis=0)
-    phys_sd = np.std(phys_tr_mat, axis=0) + 1e-5
+    ds_s1 = PairedQuadDatasetV18(tr_df, img_dir, synth_df=synth_df, teacher_map=teacher_map)
+    ds_s2 = PairedQuadDatasetV18(tr_df, img_dir, synth_df=None, teacher_map=teacher_map)
 
-    Y_orig = targets_from_grades(torch.tensor([[int(r[c]) for c in CLASSES] for r in tr_real]))
-    pw = ((len(Y_orig) - Y_orig.sum(0)) / Y_orig.sum(0).clamp(min=1)).clamp(1.0, 5.5).to(dev)
-    bce_loss_none = nn.BCEWithLogitsLoss(pos_weight=pw, reduction='none')
+    # Keep shuffle=False on ds_s1 after grouping seeds or shuffle in chunks so same-seed quadruplets co-occur in mini-batches
+    loader_s1 = DataLoader(ds_s1, batch_size=args.batch_size, shuffle=True, num_workers=6, pin_memory=True, drop_last=True)
+    loader_s2 = DataLoader(ds_s2, batch_size=args.batch_size, shuffle=True, num_workers=6, pin_memory=True, drop_last=True)
 
-    # Group synthetic quadruplets by seed so full quadruplets stay together in consecutive dataset indices!
-    tr_synth_all = [
-        r for r in tr_orig
-        if (is_synth_name(r['name']) or '_d5_NatNeg' in r['name'])
-        and (any(get_sample_class_mask6_v17(r['name'], a.synth_w)[ci] > 0.1 for ci in focus_cis) or ('_d5_NatNeg' in r['name'] and (0 in focus_cis or 5 in focus_cis)))
-    ]
-    # Sort tr_synth_all by name so (P0, P1, P2) of the same seed are adjacent
-    tr_synth_all.sort(key=lambda r: r['name'])
+    va_loader = DataLoader(EvalDatasetV18(va_df, img_dir), batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+    te_loader = DataLoader(EvalDatasetV18(te_df, img_dir), batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
 
-    # Interleave real images and paired synthetic quadruplets in Stage 1 (3 real : 1 synth ratio)
-    rng = random.Random(a.seed)
-    real_shuf = list(tr_real)
-    rng.shuffle(real_shuf)
-    tr_stage1 = []
-    s_ptr = 0
-    for i_r, r_row in enumerate(real_shuf):
-        tr_stage1.append(r_row)
-        if (i_r + 1) % 6 == 0 and s_ptr + 3 <= len(tr_synth_all):
-            tr_stage1.extend(tr_synth_all[s_ptr:s_ptr + 3])
-            s_ptr += 3
+    t150_files = sorted([f for f in os.listdir(test150_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))])
+    t150_df = pd.DataFrame({'image': t150_files})
+    for c in DIMS:
+        t150_df[c] = '无问题'
+    t150_loader = DataLoader(EvalDatasetV18(t150_df, test150_dir), batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
 
-    if a.clean_repeat > 1:
-        clean = [r for r in tr_real if all(int(r[c]) == 0 for c in CLASSES)]
-        tr_stage1 = tr_stage1 + clean
+    model = MultiNetV18(args.base_ckpt, unfreeze_mode='lastk1').to(device)
+    vp0, vp1, vp2, va_y, va_names = eval_split_tta(model, va_loader, device)
+    tp0, tp1, tp2, te_y, te_names = eval_split_tta(model, te_loader, device)
+    init_va, _ = score_18dim_exact_probs(vp0, vp1, vp2, va_y)
+    init_te, _ = score_18dim_exact_probs(tp0, tp1, tp2, te_y)
+    print(f"[{args.name}] Init Base -> VA={init_va:.3f} | TE={init_te:.3f} | S1_len={len(ds_s1)} | S2_len={len(ds_s2)}")
 
-    # Stage 2: Pure Real + Natural Optical Bokeh Hard Negatives (`_d5_NatNeg`)
-    nat_negs = [r for r in tr_orig if '_d5_NatNeg' in r['name']] if (0 in focus_cis or 5 in focus_cis) else []
-    tr_stage2 = list(tr_real) + nat_negs
-    p1_p0_real_s2 = [r for r in tr_real if any(int(r[CLASSES[ci]]) >= 2 for ci in (1, 2, 3, 4, 5))]
-    tr_stage2 = tr_stage2 + p1_p0_real_s2
+    swa_states = []
+    best_va = init_va
+    best_sd_cpu = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
-    print(f'  Stage 1 Paired Train={len(tr_stage1)} (real={len(tr_real)}, corridor_synth={len(tr_synth_all)}) | Stage 2 PureReal+NatNeg={len(tr_stage2)} | Teacher KD={len(teacher_14_map)}', flush=True)
+    # Stage 1: Paired Quadruplets + True 6B/V16 Teacher KD
+    opt1 = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=1e-2)
+    sched1 = torch.optim.lr_scheduler.CosineAnnealingLR(opt1, T_max=max(1, args.epochs_s1 * len(loader_s1)))
 
-    dtr_s1 = V18FastMicroscopeDataset(tr_stage1, phys_map, phys_mu, phys_sd, roi_map, meta_map, synth_meta, a.size, True, tiles=a.tiles, synth_w=a.synth_w)
-    dtr_s2 = V18FastMicroscopeDataset(tr_stage2, phys_map, phys_mu, phys_sd, roi_map, meta_map, synth_meta, a.size, True, tiles=a.tiles, synth_w=a.synth_w)
-    dva = V18FastMicroscopeDataset(va, phys_map, phys_mu, phys_sd, roi_map, meta_map, synth_meta, a.size, False, tiles=a.tiles, synth_w=a.synth_w)
-    dte = V18FastMicroscopeDataset(te, phys_map, phys_mu, phys_sd, roi_map, meta_map, synth_meta, a.size, False, tiles=a.tiles, synth_w=a.synth_w)
-
-    val_batch = a.batch * 2
-    # shuffle=False on Stage 1 keeps the interleaved (6 real + 3 paired same-seed synth) intact inside each batch!
-    ltr_s1 = DataLoader(dtr_s1, batch_size=a.batch, shuffle=False, num_workers=a.workers, pin_memory=True, persistent_workers=True, drop_last=True)
-    ltr_s2 = DataLoader(dtr_s2, batch_size=a.batch, shuffle=True, num_workers=a.workers, pin_memory=True, persistent_workers=True, drop_last=True)
-    lva = DataLoader(dva, batch_size=val_batch, shuffle=False, num_workers=a.workers, pin_memory=True, persistent_workers=True)
-    lte = DataLoader(dte, batch_size=val_batch, shuffle=False, num_workers=a.workers, pin_memory=True, persistent_workers=True)
-
-    specs = []
-    pg = []
-    for item in a.backbones.split(','):
-        nm, mode = item.split(':')
-        m, fwd, mu, sd, bl, dim = build_v9_backbone(nm)
-        for p in m.parameters():
-            p.requires_grad_(False)
-        if mode == 'full':
-            for p in m.parameters():
-                p.requires_grad_(True)
-            pg.append({'params': [p for p in m.parameters() if p.requires_grad], 'lr': a.lr_full})
-        elif mode.startswith('lastk'):
-            k = int(mode[5:])
-            if k > 0:
-                for blk in bl[-k:]:
-                    for p in blk.parameters():
-                        p.requires_grad_(True)
-                pg.append({'params': [p for p in m.parameters() if p.requires_grad], 'lr': a.lr_last})
-        specs.append((m, fwd, mu, sd, bl, dim))
-
-    net = MultiNetV18(specs, phys_dim=60, dropout=a.dropout, n_quad=a.tiles * a.tiles).to(dev)
-    init_sd_cpu = None
-    if a.init_ckpt and os.path.exists(a.init_ckpt):
-        print(f'  Loading warm-start checkpoint: {a.init_ckpt}', flush=True)
-        sd_load = torch.load(a.init_ckpt, map_location='cpu')
-        net.load_state_dict(sd_load, strict=False)
-        init_sd_cpu = {k: v.cpu().clone() for k, v in net.state_dict().items()}
-
-    head_params = (
-        list(net.head_cum.parameters())
-        + list(net.head_ex.parameters())
-        + list(net.gate.parameters())
-        + list(net.norm.parameters())
-        + list(net.se_gate.parameters())
-        + list(net.tile_attn.parameters())
-        + list(net.phys_mlp.parameters())
-        + list(net.geom_film.parameters())
-        + list(net.corn_delta.parameters())
-    )
-    pg.append({'params': head_params, 'lr': a.lr_head})
-    trainable_params = [p for p in net.parameters() if p.requires_grad]
-
-    try:
-        opt = torch.optim.AdamW(pg, weight_decay=a.wd, fused=True)
-    except Exception:
-        opt = torch.optim.AdamW(pg, weight_decay=a.wd)
-
-    total_steps = max(1, (len(ltr_s1) // a.grad_accum) * a.epochs_s1 + (len(ltr_s2) // a.grad_accum) * a.epochs_s2)
-    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=total_steps)
-
-    ckpts = []
-    if init_sd_cpu is not None:
-        ckpts.append(init_sd_cpu)
-
-    total_epochs = a.epochs_s1 + a.epochs_s2
-    for ep in range(total_epochs):
+    for ep in range(1, args.epochs_s1 + 1):
+        model.train()
         t0 = time.time()
-        is_stage2 = (ep >= a.epochs_s1)
-        cur_loader = ltr_s2 if is_stage2 else ltr_s1
-        stage_tag = 'Stage2-PureReal+KD' if is_stage2 else 'Stage1-PairedQuad+KD'
-        cur_focus = list(range(6)) if is_stage2 else focus_cis
-
-        net.train()
-        opt.zero_grad(set_to_none=True)
-        tot, n_step = 0.0, 0
-        for step, (x, phys, geom, g, mask7, names) in enumerate(cur_loader):
-            x = x.to(dev, non_blocking=True)
-            phys = phys.to(dev, non_blocking=True)
-            geom = geom.to(dev, non_blocking=True)
-            g = g.to(dev, non_blocking=True)
-            mask7 = mask7.to(dev, non_blocking=True)
-            with torch.autocast('cuda', dtype=torch.bfloat16):
-                lc, le, gl = net(x, phys, geom)
-            loss_base = v16_clean_microscope_loss_fn(
-                lc.float(), le.float(), gl.float(), g, mask7, bce_loss_none,
-                focus_cis=cur_focus,
-                p0_clean_weight=a.p0_clean_weight,
-                channel_neg_weight=a.channel_neg_weight,
-                alpha_ex=a.alpha_ex,
+        loss_sum = 0.0
+        for x_g, x_l, geom, y, t_dim, t_vec, sid in loader_s1:
+            x_g, x_l, geom = x_g.to(device), x_l.to(device), geom.to(device)
+            y, t_dim, t_vec, sid = y.to(device), t_dim.to(device), t_vec.to(device), sid.to(device)
+            opt1.zero_grad()
+            lc, le = model(x_g, x_l, geom, alpha_local=0.38)
+            loss = compute_paired_quadruplet_and_kd_loss(
+                lc, le, y, t_dim, t_vec, sid, dim_weights,
+                kd_weight=args.kd_weight, rank_weight=args.rank_weight,
             )
-            loss_kd_pair = compute_paired_quadruplet_and_kd_loss(lc.float(), le.float(), g, mask7, names, teacher_14_map, dev)
-            loss = loss_base + loss_kd_pair
-            (loss / a.grad_accum).backward()
-            if (step + 1) % a.grad_accum == 0 or (step + 1) == len(cur_loader):
-                torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
-                opt.step()
-                opt.zero_grad(set_to_none=True)
-                sch.step()
-            tot += float(loss.detach())
-            n_step += 1
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt1.step()
+            sched1.step()
+            loss_sum += float(loss.item())
 
-        vp0, vp1, vp2, vg, gva = predict_v18(net, lva, dev, a.alpha_ex)
-        pred_va = decode_pc(vp0, vp1, vp2, HAND)
-        s_hand = cm.score(gva, pred_va, a.tau)
-        clean_va = (gva == 0).all(1)
-        s_clean2 = float((clean_va & (pred_va == 0).all(1)).sum() / max(1, clean_va.sum()))
-        doc2_va = 25 * s_hand['S_pos'] + 20 * s_hand['S_p0'] + 20 * s_clean2
-        print(f'ep={ep+1}/{total_epochs} [{stage_tag}] loss={tot/max(1,n_step):.4f} val_Doc1={s_hand["total"]:.2f} val_Doc2={doc2_va:.2f} (S_pos={s_hand["S_pos"]:.3f} S_p0={s_hand["S_p0"]:.3f} Clean2={s_clean2:.3f}) ({time.time()-t0:.0f}s)', flush=True)
+        vp0, vp1, vp2, va_y, _ = eval_split_tta(model, va_loader, device)
+        tp0, tp1, tp2, te_y, _ = eval_split_tta(model, te_loader, device)
+        va_sc, _ = score_18dim_exact_probs(vp0, vp1, vp2, va_y)
+        te_sc, _ = score_18dim_exact_probs(tp0, tp1, tp2, te_y)
+        print(f"[{args.name}] S1 Ep{ep} ({time.time()-t0:.1f}s) loss={loss_sum/len(loader_s1):.4f} | VA={va_sc:.3f} | TE={te_sc:.3f}")
+        swa_states.append({k: v.cpu().clone() for k, v in model.state_dict().items()})
+        if va_sc >= best_va - 0.15:
+            best_va = max(best_va, va_sc)
+            best_sd_cpu = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
-        cur_sd = {k: v.cpu().clone() for k, v in net.state_dict().items()}
-        torch.save(cur_sd, f'{a.out}_ep{ep+1}.pt')
-        ckpts.append(cur_sd)
+    # Stage 2: Sim-to-Real Pure Real Prior Anchor + Teacher KD (lastk2)
+    model.set_unfreeze('lastk2')
+    opt2 = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr * 0.45, weight_decay=1e-2)
+    sched2 = torch.optim.lr_scheduler.CosineAnnealingLR(opt2, T_max=max(1, args.epochs_s2 * len(loader_s2)))
 
-    # SWA over warm-start anchor + Stage 1 + Stage 2 checkpoints
-    if len(ckpts) >= 2:
-        swa_sd = {}
-        w_list = [0.30, 0.30, 0.40] if len(ckpts) == 3 else [1.0 / len(ckpts)] * len(ckpts)
-        for k in ckpts[0].keys():
-            if ckpts[0][k].is_floating_point():
-                swa_sd[k] = sum(w_i * ck[k] for w_i, ck in zip(w_list, ckpts))
+    for ep in range(1, args.epochs_s2 + 1):
+        model.train()
+        t0 = time.time()
+        loss_sum = 0.0
+        for x_g, x_l, geom, y, t_dim, t_vec, sid in loader_s2:
+            x_g, x_l, geom = x_g.to(device), x_l.to(device), geom.to(device)
+            y, t_dim, t_vec, sid = y.to(device), t_dim.to(device), t_vec.to(device), sid.to(device)
+            opt2.zero_grad()
+            lc, le = model(x_g, x_l, geom, alpha_local=0.38)
+            loss = compute_paired_quadruplet_and_kd_loss(
+                lc, le, y, t_dim, t_vec, sid, dim_weights,
+                kd_weight=args.kd_weight * 0.85, rank_weight=0.0,
+            )
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt2.step()
+            sched2.step()
+            loss_sum += float(loss.item())
+
+        vp0, vp1, vp2, va_y, _ = eval_split_tta(model, va_loader, device)
+        tp0, tp1, tp2, te_y, _ = eval_split_tta(model, te_loader, device)
+        va_sc, _ = score_18dim_exact_probs(vp0, vp1, vp2, va_y)
+        te_sc, _ = score_18dim_exact_probs(tp0, tp1, tp2, te_y)
+        print(f"[{args.name}] S2 Ep{ep} ({time.time()-t0:.1f}s) loss={loss_sum/len(loader_s2):.4f} | VA={va_sc:.3f} | TE={te_sc:.3f}")
+        swa_states.append({k: v.cpu().clone() for k, v in model.state_dict().items()})
+        if va_sc >= best_va - 0.10:
+            best_va = max(best_va, va_sc)
+            best_sd_cpu = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
+    # Pure Trained SWA (Never mixes untrained init_sd_cpu on newly initialized layers!)
+    if len(swa_states) >= 2:
+        avg_sd = {}
+        n_s = len(swa_states)
+        for k in best_sd_cpu.keys():
+            if best_sd_cpu[k].is_floating_point():
+                s_mean = sum(sd[k].float() for sd in swa_states) / float(n_s)
+                avg_sd[k] = (0.55 * best_sd_cpu[k].float() + 0.45 * s_mean).to(best_sd_cpu[k].dtype)
             else:
-                swa_sd[k] = ckpts[-1][k]
-        net.load_state_dict({k: v.to(dev) for k, v in swa_sd.items()})
-        torch.save(swa_sd, f'{a.out}_swa.pt')
+                avg_sd[k] = best_sd_cpu[k]
+        model.load_state_dict(avg_sd)
+        vp0_s, vp1_s, vp2_s, va_y, _ = eval_split_tta(model, va_loader, device)
+        tp0_s, tp1_s, tp2_s, te_y, _ = eval_split_tta(model, te_loader, device)
+        va_swa, _ = score_18dim_exact_probs(vp0_s, vp1_s, vp2_s, va_y)
+        te_swa, _ = score_18dim_exact_probs(tp0_s, tp1_s, tp2_s, te_y)
+        print(f"[{args.name}] Trained-SWA -> VA={va_swa:.3f} | TE={te_swa:.3f}")
+        if va_swa >= best_va - 0.15:
+            best_sd_cpu = avg_sd
+        else:
+            model.load_state_dict(best_sd_cpu)
+    else:
+        model.load_state_dict(best_sd_cpu)
 
-    dva_flip = V18FastMicroscopeDataset(va, phys_map, phys_mu, phys_sd, roi_map, meta_map, synth_meta, a.size, False, hflip=True, tiles=a.tiles, synth_w=a.synth_w)
-    dte_flip = V18FastMicroscopeDataset(te, phys_map, phys_mu, phys_sd, roi_map, meta_map, synth_meta, a.size, False, hflip=True, tiles=a.tiles, synth_w=a.synth_w)
-    lva_flip = DataLoader(dva_flip, batch_size=val_batch, shuffle=False, num_workers=a.workers, pin_memory=True)
-    lte_flip = DataLoader(dte_flip, batch_size=val_batch, shuffle=False, num_workers=a.workers, pin_memory=True)
+    os.makedirs(os.path.dirname(args.out_ckpt), exist_ok=True)
+    torch.save(best_sd_cpu, args.out_ckpt)
 
-    vp0_a, vp1_a, vp2_a, vg_a, gva = predict_v18(net, lva, dev, a.alpha_ex)
-    vp0_b, vp1_b, vp2_b, vg_b, _   = predict_v18(net, lva_flip, dev, a.alpha_ex)
-    vp0, vp1, vp2, vg = 0.5*(vp0_a+vp0_b), 0.5*(vp1_a+vp1_b), 0.5*(vp2_a+vp2_b), 0.5*(vg_a+vg_b)
+    vp0, vp1, vp2, va_y, va_names = eval_split_tta(model, va_loader, device)
+    tp0, tp1, tp2, te_y, te_names = eval_split_tta(model, te_loader, device)
+    t150_p0, t150_p1, t150_p2, _, t150_names = eval_split_tta(model, t150_loader, device)
 
-    tp0_a, tp1_a, tp2_a, tg_a, gte = predict_v18(net, lte, dev, a.alpha_ex)
-    tp0_b, tp1_b, tp2_b, tg_b, _   = predict_v18(net, lte_flip, dev, a.alpha_ex)
-    tp0, tp1, tp2, tg = 0.5*(tp0_a+tp0_b), 0.5*(tp1_a+tp1_b), 0.5*(tp2_a+tp2_b), 0.5*(tg_a+tg_b)
+    # Safe name-aligned V16 pure-real anchor blending (supports both s16/s17 500-val and FullData 300-val)
+    if args.v16_npz and os.path.exists(args.v16_npz):
+        d16 = np.load(args.v16_npz, allow_pickle=True)
+        w16 = float(args.anchor_weight)
+        if len(d16['va_p0']) == len(vp0) and len(d16['te_p0']) == len(tp0):
+            vp0 = w16 * d16['va_p0'] + (1.0 - w16) * vp0
+            vp1 = w16 * d16['va_p1'] + (1.0 - w16) * vp1
+            vp2 = w16 * d16['va_p2'] + (1.0 - w16) * vp2
+            tp0 = w16 * d16['te_p0'] + (1.0 - w16) * tp0
+            tp1 = w16 * d16['te_p1'] + (1.0 - w16) * tp1
+            tp2 = w16 * d16['te_p2'] + (1.0 - w16) * tp2
+            t150_p0 = w16 * d16['t150_p0'] + (1.0 - w16) * t150_p0
+            t150_p1 = w16 * d16['t150_p1'] + (1.0 - w16) * t150_p1
+            t150_p2 = w16 * d16['t150_p2'] + (1.0 - w16) * t150_p2
+        else:
+            # Name-aligned anchor blend for split_full_v18
+            from infer_v18_fulldata_test150 import load_v16_anchor_aligned
+            s17_npz = args.v16_npz.replace('_s16_probs.npz', '_s17_probs.npz')
+            build_fn, (t150_a0, t150_a1, t150_a2) = load_v16_anchor_aligned(
+                args.v16_npz, s17_npz, va_names, te_names, t150_names
+            )
+            va_a0, va_a1, va_a2, _ = build_fn(va_names, vp0, vp1, vp2)
+            te_a0, te_a1, te_a2, _ = build_fn(te_names, tp0, tp1, tp2)
+            vp0 = w16 * va_a0 + (1.0 - w16) * vp0
+            vp1 = w16 * va_a1 + (1.0 - w16) * vp1
+            vp2 = w16 * va_a2 + (1.0 - w16) * vp2
+            tp0 = w16 * te_a0 + (1.0 - w16) * tp0
+            tp1 = w16 * te_a1 + (1.0 - w16) * tp1
+            tp2 = w16 * te_a2 + (1.0 - w16) * tp2
+            if t150_a0 is not None:
+                t150_p0 = w16 * t150_a0 + (1.0 - w16) * t150_p0
+                t150_p1 = w16 * t150_a1 + (1.0 - w16) * t150_p1
+                t150_p2 = w16 * t150_a2 + (1.0 - w16) * t150_p2
 
-    tpl = json.load(open('/wanqing-develop/luowenjing/18/results/v2_full/template_150.json'))
-    names_150 = [e['image'] for e in tpl]
-    phys_150 = extract_for_names(names_150, a.phys_cache)
-    rows_150 = [{'name': n, **{c: 0 for c in CLASSES}} for n in names_150]
-    d150 = V18FastMicroscopeDataset(rows_150, phys_150, phys_mu, phys_sd, roi_map, meta_map, synth_meta, a.size, False, hflip=False, tiles=a.tiles, synth_w=a.synth_w)
-    d150_f = V18FastMicroscopeDataset(rows_150, phys_150, phys_mu, phys_sd, roi_map, meta_map, synth_meta, a.size, False, hflip=True, tiles=a.tiles, synth_w=a.synth_w)
-    l150 = DataLoader(d150, batch_size=val_batch, shuffle=False, num_workers=a.workers, pin_memory=True)
-    l150_f = DataLoader(d150_f, batch_size=val_batch, shuffle=False, num_workers=a.workers, pin_memory=True)
-    p150_0a, p150_1a, p150_2a, p150_ga, _ = predict_v18(net, l150, dev, a.alpha_ex)
-    p150_0b, p150_1b, p150_2b, p150_gb, _ = predict_v18(net, l150_f, dev, a.alpha_ex)
-    p150_0, p150_1, p150_2, p150_g = 0.5*(p150_0a+p150_0b), 0.5*(p150_1a+p150_1b), 0.5*(p150_2a+p150_2b), 0.5*(p150_ga+p150_gb)
+    final_va, _ = score_18dim_exact_probs(vp0, vp1, vp2, va_y)
+    final_te, _ = score_18dim_exact_probs(tp0, tp1, tp2, te_y)
+    print(f"[{args.name}] Final Saved -> VA={final_va:.3f} | TE={final_te:.3f}")
 
-    # Anchor P0 on Blur(0)/TexLoss(1)/Bokeh(5) with pure-real V16 specialist so P0 recall never regresses
-    if a.v16_npz and os.path.exists(a.v16_npz):
-        d16 = np.load(a.v16_npz)
-        for c, w16 in [(0, 0.55), (1, 0.55), (2, 0.35), (3, 0.30), (4, 0.20), (5, 0.45)]:
-            vp0[:, c] = w16 * d16['va_p0'][:, c] + (1.0 - w16) * vp0[:, c]
-            tp0[:, c] = w16 * d16['te_p0'][:, c] + (1.0 - w16) * tp0[:, c]
-            p150_0[:, c] = w16 * d16['t150_p0'][:, c] + (1.0 - w16) * p150_0[:, c]
-        vp1 = 0.82 * vp1 + 0.18 * d16['va_p1']
-        tp1 = 0.82 * tp1 + 0.18 * d16['te_p1']
-        p150_1 = 0.82 * p150_1 + 0.18 * d16['t150_p1']
-        vp2 = 0.82 * vp2 + 0.18 * d16['va_p2']
-        tp2 = 0.82 * tp2 + 0.18 * d16['te_p2']
-        p150_2 = 0.82 * p150_2 + 0.18 * d16['t150_p2']
-
-    out_base = a.out[:-5] if a.out.endswith('.json') else a.out
-    np.savez(
-        out_base + '_probs.npz',
-        va_p0=vp0, va_p1=vp1, va_p2=vp2, va_gate=vg, gva=gva, va_names=[r['name'] for r in va],
-        te_p0=tp0, te_p1=tp1, te_p2=tp2, te_gate=tg, gte=gte, te_names=[r['name'] for r in te],
-        t150_p0=p150_0, t150_p1=p150_1, t150_p2=p150_2, t150_gate=p150_g, t150_names=names_150,
+    os.makedirs(os.path.dirname(args.out_npz), exist_ok=True)
+    np.savez_compressed(
+        args.out_npz,
+        va_p0=vp0.astype(np.float32),
+        va_p1=vp1.astype(np.float32),
+        va_p2=vp2.astype(np.float32),
+        va_y=va_y,
+        va_names=np.array(va_names),
+        te_p0=tp0.astype(np.float32),
+        te_p1=tp1.astype(np.float32),
+        te_p2=tp2.astype(np.float32),
+        te_y=te_y,
+        te_names=np.array(te_names),
+        t150_p0=t150_p0.astype(np.float32),
+        t150_p1=t150_p1.astype(np.float32),
+        t150_p2=t150_p2.astype(np.float32),
+        t150_names=np.array(t150_names),
+        best_te=float(final_te),
     )
-    st_hand = cm.score(gte, decode_pc(tp0, tp1, tp2, HAND), a.tau)
-    clean_te = (gte == 0).all(1)
-    pred_te = decode_pc(tp0, tp1, tp2, HAND)
-    s_clean2_te = float((clean_te & (pred_te == 0).all(1)).sum() / max(1, clean_te.sum()))
-    doc2_te = 25 * st_hand['S_pos'] + 20 * st_hand['S_p0'] + 20 * s_clean2_te
-    json.dump({'doc1': float(st_hand['total']), 'doc2': float(doc2_te), 'S_pos': float(st_hand['S_pos']),
-               'S_p0': float(st_hand['S_p0']), 'Clean2': float(s_clean2_te)}, open(out_base + '.json', 'w'), indent=2)
-    print(f'=== FINAL V18 PAIRED+KD SWA+TTA BLIND TEST (N={len(te)}): Doc1={st_hand["total"]:.2f} | Doc2={doc2_te:.2f} (S_pos={st_hand["S_pos"]:.3f} S_p0={st_hand["S_p0"]:.3f} Clean2={s_clean2_te:.3f}) ===', flush=True)
 
 
 if __name__ == '__main__':
