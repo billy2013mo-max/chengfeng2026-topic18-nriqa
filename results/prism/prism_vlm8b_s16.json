@@ -1,0 +1,25 @@
+{
+  "test": {
+    "total": 43.108522634419145,
+    "S_pos": 0.6205162828273196,
+    "S_p0": 0.7294311278371575,
+    "p0R": 0.723996824981248,
+    "p0P": 0.7529565039691389,
+    "S_clean": 0.6503496503496504
+  },
+  "args": {
+    "split": "data/resplits/split_s16.csv",
+    "manifest": "data/manifest_combined.csv",
+    "model": "/wanqing-develop/luowenjing/18/models/qwen3vl-8b",
+    "epochs": 3,
+    "batch": 4,
+    "max_pixels": 1048576,
+    "soft_sigma": 0.22,
+    "lr": 0.0002,
+    "lr_head": 0.001,
+    "rank": 32,
+    "workers": 4,
+    "grad_ckpt": true,
+    "out": "results/prism/prism_vlm8b_s16.json"
+  }
+}
