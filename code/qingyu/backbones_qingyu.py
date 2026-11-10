@@ -3,21 +3,21 @@
 """
 code/qingyu/backbones_qingyu.py
 ===============================
-Pillar 2 (Section 3.5) & Pillar 5 (25.22B Pool) Vision Backbone Builders:
+Pillar 2 (Section 3.5) & Pillar 5 (25.28B Pool) Vision Backbone Builders:
   - Tier-1 Lightweight & Native-Aspect Specialists (5 Backbones, 1.96B total):
       1. `convnextv2_base` (`0.089B`): Global `448x448` + 4 deterministic 1:1 `448x448` physics crops
          (`focus_fg`, `meor_non_ui`, `cutout_boundary`, `fg_micro_tex`) with multi-stage feature tap + Gated MIL.
       2. `pe_core_large` (`0.350B`): Global `448x448` + 4 deterministic 1:1 `448x448` crops with
-         **Intermediate Multi-Layer Gated Readout at 0-indexed blocks `[15, 19, 22]`** (layers 16, 20, 23,
-         i.e. 67%/83%/96% depth — bypassing contrastive top-layer texture smoothing!).
-      3. `dinov3_vitl16` (`0.330B`): **Native-Aspect 2D-RoPE Dynamic Grid** (`patch_mult=16`, ~784 patches,
-         e.g. `352x576` for 9:16 portrait, zero square warping!) + 2 key 1:1 `448x448` boundary/focus crops,
+         Intermediate Multi-Layer Gated Readout at 0-indexed blocks `[15, 19, 22]` (layers 16, 20, 23,
+         i.e. 67%/83%/96% depth — bypassing contrastive top-layer texture smoothing).
+      3. `dinov3_vitl16` (`0.330B`): Native-Aspect 2D-RoPE Dynamic Grid (`patch_mult=16`, ~784 patches,
+         e.g. `352x576` for 9:16 portrait, zero square warping) + 3 key 1:1 `448x448` boundary/focus/halo crops,
          with 3-layer intermediate tap + `TokenGatedABMILPool`.
-      4. `siglip2_so400m_naflex` (`0.430B`): **Native Variable-Aspect NaFlex Sequence** (`max_num_patches=784`
+      4. `siglip2_so400m_naflex` (`0.430B`): Native Variable-Aspect NaFlex Sequence (`max_num_patches=784`
          with `pixel_attention_mask`-aware `MaskedTokenGatedABMILPool` + intermediate tap; seamlessly supports
          both `Siglip2VisionModel` NaFlex and interpolated `SiglipVisionModel` local checkpoints).
-      5. `cradio_v4_h` (`0.670B`): **Native-Aspect Multi-Teacher Aggregator** (`patch_mult=16`, input `[0, 1]`,
-         SAM + DINO + CLIP/SigLIP teacher representations) + 2 key 1:1 `448x448` halo/texture crops.
+      5. `cradio_v4_h` (`0.670B`): Native-Aspect Multi-Teacher Aggregator (`patch_mult=16`, input `[0, 1]`,
+         SAM + DINO + CLIP/SigLIP teacher representations) + 3 key 1:1 `448x448` crops.
   - Tier-2 Visual Foundation Bridge (`6.08B`):
       6. `internvit_6b` (`InternViT-6B-448px-V2.5`): Global `448x448` + 4 deterministic 1:1 `448x448` physics crops,
          3-Layer Pyramid Tap (layers 32/40/48) + `TokenGatedABMILPool` + LoRA (`r=32`) / last-k unfreezing.
@@ -26,7 +26,7 @@ import os
 import sys
 import glob
 import math
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -37,7 +37,7 @@ _CODE_DIR = os.path.dirname(_THIS_DIR)
 if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
-from qingyu.config_and_paths import REPO_ROOT, resolve_model_path, setup_sys_path_and_cwd
+from qingyu.config_and_paths import resolve_model_path, setup_sys_path_and_cwd
 from qingyu.unimodal_xbm_losses import UnimodalQuadraticResidualHead
 
 setup_sys_path_and_cwd(chdir_repo=False)
@@ -47,9 +47,10 @@ from abmil_layers import TokenGatedABMILPool, DualLayerTapWrapper
 class IntermediateThreeLayerGatedTap(nn.Module):
     """
     Explicit 3-Layer Intermediate Readout Hook (Section 3.5):
-    Hooks arbitrary specified block indices `tap_indices` (e.g. `[15, 19, 22]` on 24-block `PE-Core-Large`)
-    and fuses them with final-layer tokens via LayerNorm + learned per-channel sigmoid gates (zero-init residual
-    so step-0 representations remain smooth while immediately exposing mid-layer high-frequency texture gradients).
+    Hooks specified block indices `tap_indices` (e.g. `[15, 19, 22]` on 24-block `PE-Core-Large`)
+    and fuses them with final-layer tokens via LayerNorm + learned per-channel sigmoid gates.
+    Automatically slices trailing spatial tokens when a backbone (such as `C-RADIOv4-H`) strips
+    prefix summary/register tokens from `final_tokens`.
     """
     def __init__(self, blocks: nn.ModuleList, dim: int, tap_indices: Sequence[int]):
         super().__init__()
@@ -77,17 +78,23 @@ class IntermediateThreeLayerGatedTap(nn.Module):
         return _hk
 
     def fuse(self, final_tokens: torch.Tensor) -> torch.Tensor:
-        parts = []
-        for slot, ln in enumerate(self.norms):
-            c = self._caches.get(slot, None)
-            if c is None or c.shape != final_tokens.shape:
-                self.clear()
-                return final_tokens
-            parts.append(ln(c.float()))
-        self.clear()
-        cat_mid = torch.cat(parts, dim=-1)
-        gate = torch.sigmoid(self.gate_logit).view(1, 1, -1)
-        return final_tokens.float() + 0.50 * gate * self.proj(cat_mid)
+        amp_dev = "cuda" if final_tokens.is_cuda else "cpu"
+        with torch.autocast(device_type=amp_dev, enabled=False):
+            ft = final_tokens.float()
+            L_tgt = ft.shape[1]
+            parts = []
+            for slot, ln in enumerate(self.norms):
+                c = self._caches.get(slot, None)
+                if c is None or c.shape[0] != ft.shape[0] or c.shape[-1] != ft.shape[-1] or c.shape[1] < L_tgt:
+                    self.clear()
+                    return ft
+                if c.shape[1] > L_tgt:
+                    c = c[:, -L_tgt:, :]
+                parts.append(ln(c.float()))
+            self.clear()
+            cat_mid = torch.cat(parts, dim=-1)
+            gate = torch.sigmoid(self.gate_logit.float()).view(1, 1, -1)
+            return ft + 0.50 * gate * self.proj(cat_mid)
 
     def clear(self) -> None:
         for k in list(self._caches.keys()):
@@ -97,7 +104,6 @@ class IntermediateThreeLayerGatedTap(nn.Module):
 class MaskedTokenGatedABMILPool(nn.Module):
     """
     Padding-mask-aware `TokenGatedABMILPool` for variable-length `SigLIP2-SO400M-NaFlex` sequences (`max_num_patches=784`).
-    Computes masked mean, masked spatial std, masked Top-5% anomaly pooling, and masked Gated ABMIL!
     """
     def __init__(self, dim: int, bottleneck: int = 256):
         super().__init__()
@@ -119,51 +125,47 @@ class MaskedTokenGatedABMILPool(nn.Module):
         self.gate_alpha = nn.Parameter(torch.tensor(0.25))
 
     def forward(self, tokens: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """`tokens`: `[B, L, D]`, `mask`: optional `[B, L]` float/bool (`1 = valid patch, 0 = pad`)."""
-        t = tokens.float()
-        B, L, D = t.shape
-        if mask is None:
-            mask_f = t.new_ones((B, L))
-        else:
-            mask_f = mask.float()
-            if mask_f.shape[1] != L:
-                mask_f = F.interpolate(mask_f.unsqueeze(1), size=L, mode="nearest").squeeze(1)
+        amp_dev = "cuda" if tokens.is_cuda else "cpu"
+        with torch.autocast(device_type=amp_dev, enabled=False):
+            t = tokens.float()
+            B, L, D = t.shape
+            if mask is None:
+                mask_f = t.new_ones((B, L))
+            else:
+                mask_f = mask.float()
+                if mask_f.shape[1] != L:
+                    mask_f = F.interpolate(mask_f.unsqueeze(1), size=L, mode="nearest").squeeze(1)
 
-        valid_cnt = mask_f.sum(dim=1, keepdim=True).clamp(min=1.0)  # [B, 1]
-        m_exp = mask_f.unsqueeze(-1)                                # [B, L, 1]
-        mean_pool = (t * m_exp).sum(dim=1) / valid_cnt              # [B, D]
+            valid_cnt = mask_f.sum(dim=1, keepdim=True).clamp(min=1.0)
+            m_exp = mask_f.unsqueeze(-1)
+            mean_pool = (t * m_exp).sum(dim=1) / valid_cnt
 
-        diff_sq = ((t - mean_pool.unsqueeze(1)) ** 2) * m_exp
-        spatial_std = torch.sqrt(diff_sq.sum(dim=1) / valid_cnt + 1e-5)
+            diff_sq = ((t - mean_pool.unsqueeze(1)) ** 2) * m_exp
+            spatial_std = torch.sqrt(diff_sq.sum(dim=1) / valid_cnt + 1e-5)
 
-        neg_inf = -1e4
-        tau = 0.10 + 0.15 * torch.sigmoid(self.tau_raw)
-        sal_logits = (torch.tanh(self.saliency_proj(t)) / tau).masked_fill(m_exp == 0, neg_inf)
-        sal_w = F.softmax(sal_logits, dim=1).mean(dim=-1, keepdim=True)
-        sal_pool = (sal_w * t).sum(dim=1)
+            neg_inf = -1e4
+            tau = 0.10 + 0.15 * torch.sigmoid(self.tau_raw.float())
+            sal_logits = (torch.tanh(self.saliency_proj(t)) / tau).masked_fill(m_exp == 0, neg_inf)
+            sal_w = F.softmax(sal_logits, dim=1).mean(dim=-1, keepdim=True)
+            sal_pool = (sal_w * t).sum(dim=1)
 
-        scores = (self.anom_scorer(t).squeeze(-1) / math.sqrt(D)).masked_fill(mask_f == 0, neg_inf)
-        k = max(1, min(L, int(math.ceil(L * 0.05))))
-        top_v, top_i = torch.topk(scores, k=k, dim=1)
-        top_w = F.softmax(top_v, dim=1).unsqueeze(-1)
-        top_p = torch.gather(t, dim=1, index=top_i.unsqueeze(-1).expand(-1, -1, D))
-        top5_pool = (top_w * top_p).sum(dim=1)
+            scores = (self.anom_scorer(t).squeeze(-1) / math.sqrt(D)).masked_fill(mask_f == 0, neg_inf)
+            k = max(1, min(L, int(math.ceil(L * 0.05))))
+            top_v, top_i = torch.topk(scores, k=k, dim=1)
+            top_w = F.softmax(top_v, dim=1).unsqueeze(-1)
+            top_p = torch.gather(t, dim=1, index=top_i.unsqueeze(-1).expand(-1, -1, D))
+            top5_pool = (top_w * top_p).sum(dim=1)
 
-        mil_a = self.attn_w(torch.tanh(self.attn_V(t)) * torch.sigmoid(self.attn_U(t))).squeeze(-1)
-        mil_a = mil_a.masked_fill(mask_f == 0, neg_inf)
-        mil_w = F.softmax(mil_a, dim=1).unsqueeze(-1)
-        mil_pool = (mil_w * t).sum(dim=1)
+            mil_a = self.attn_w(torch.tanh(self.attn_V(t)) * torch.sigmoid(self.attn_U(t))).squeeze(-1)
+            mil_a = mil_a.masked_fill(mask_f == 0, neg_inf)
+            mil_w = F.softmax(mil_a, dim=1).unsqueeze(-1)
+            mil_pool = (mil_w * t).sum(dim=1)
 
-        cat = self.norm_stats(torch.cat([spatial_std, sal_pool, top5_pool, mil_pool], dim=-1))
-        return mean_pool + torch.tanh(self.gate_alpha) * self.proj_res(cat)
+            cat = self.norm_stats(torch.cat([spatial_std, sal_pool, top5_pool, mil_pool], dim=-1))
+            return mean_pool + torch.tanh(self.gate_alpha.float()) * self.proj_res(cat)
 
 
 class MultiViewAttentionAggregator(nn.Module):
-    """
-    Aggregates `[global_view, crop_1, ..., crop_M]` representations `[B, V, D]` into `[B, 3 * D]`
-    using `concat([global_view, gated_attn_crops, amax_crops])` so sharp local crop anomalies
-    are never diluted by clean crops.
-    """
     def __init__(self, dim: int):
         super().__init__()
         self.gate = nn.Sequential(
@@ -174,23 +176,20 @@ class MultiViewAttentionAggregator(nn.Module):
         )
 
     def forward(self, v_feats: torch.Tensor) -> torch.Tensor:
-        # v_feats: [B, V, D]
-        if v_feats.shape[1] == 1:
-            return torch.cat([v_feats[:, 0], v_feats[:, 0], v_feats[:, 0]], dim=-1)
-        g_feat = v_feats[:, 0]
-        local_v = v_feats[:, 1:]  # [B, V-1, D]
-        w = F.softmax(self.gate(local_v).squeeze(-1), dim=1).unsqueeze(-1)
-        attn_local = (w * local_v).sum(dim=1)
-        max_local = local_v.amax(dim=1)
-        return torch.cat([g_feat, attn_local, max_local], dim=-1)
+        amp_dev = "cuda" if v_feats.is_cuda else "cpu"
+        with torch.autocast(device_type=amp_dev, enabled=False):
+            vf = v_feats.float()
+            if vf.shape[1] == 1:
+                return torch.cat([vf[:, 0], vf[:, 0], vf[:, 0]], dim=-1)
+            g_feat = vf[:, 0]
+            local_v = vf[:, 1:]
+            w = F.softmax(self.gate(local_v).squeeze(-1), dim=1).unsqueeze(-1)
+            attn_local = (w * local_v).sum(dim=1)
+            max_local = local_v.amax(dim=1)
+            return torch.cat([g_feat, attn_local, max_local], dim=-1)
 
 
 class QingyuVisionQualityTower(nn.Module):
-    """
-    Unified Pure-Real Vision Tower wrapping any of the 6 Tier-1 / Tier-2 backbones
-    (`convnextv2_base`, `pe_core_large`, `dinov3_vitl16`, `siglip2_so400m_naflex`, `cradio_v4_h`, `internvit_6b`)
-    with `UnimodalQuadraticResidualHead` + `TipAdapterPrototypeBank`.
-    """
     def __init__(
         self,
         backbone_key: str,
@@ -218,7 +217,7 @@ class QingyuVisionQualityTower(nn.Module):
         self.register_buffer("img_mean", torch.tensor(mean, dtype=torch.float32).view(1, 3, 1, 1))
         self.register_buffer("img_std", torch.tensor(std, dtype=torch.float32).view(1, 3, 1, 1))
 
-        self.view_agg = MultiViewAttentionAggregator(single_view_dim)
+        self.view_agg = MultiViewAttentionAggregator(single_view_dim).float()
         self.head = UnimodalQuadraticResidualHead(
             in_dim=single_view_dim * 3,
             phys_dim=phys_dim,
@@ -226,7 +225,7 @@ class QingyuVisionQualityTower(nn.Module):
             proj_dim=512,
             dropout=0.20,
             max_prototypes=128,
-        )
+        ).float()
 
     def _unfreeze_top_blocks(self, model: nn.Module, blocks: Optional[Sequence[nn.Module]], k: int) -> None:
         for p in model.parameters():
@@ -236,7 +235,6 @@ class QingyuVisionQualityTower(nn.Module):
             for blk in list(blocks)[-k_eff:]:
                 for p in blk.parameters():
                     p.requires_grad = True
-        # Always unfreeze final norms & our added tap/ABMIL modules
         for n, p in model.named_parameters():
             if any(tag in n for tag in ("norm", "post_layernorm", "head_norm", "tap3", "dual_tap", "abmil", "stages.3", "stages.2")):
                 p.requires_grad = True
@@ -258,23 +256,25 @@ class QingyuVisionQualityTower(nn.Module):
             else:
                 m = timm.create_model("convnextv2_base.fcmae_ft_in22k_in1k", pretrained=True, num_classes=0)
             dc = timm.data.resolve_data_config({}, model=m)
-            # Full finetuning on 0.089B ConvNeXtV2-Base with spatial mean + std + max pooling (3 * 1024 -> 1024 proj)
             for p in m.parameters():
                 p.requires_grad = True
             m.spatial_proj = nn.Sequential(
                 nn.LayerNorm(1024 * 3),
                 nn.Linear(1024 * 3, 1024),
                 nn.GELU(),
-            )
+            ).float()
 
             def fwd_cnv(x: torch.Tensor) -> torch.Tensor:
-                feat_map = m.forward_features(x)  # [N, 1024, H', W']
-                if feat_map.ndim == 4:
-                    f_mean = feat_map.float().mean(dim=(2, 3))
-                    f_std = torch.sqrt(feat_map.float().var(dim=(2, 3), unbiased=False) + 1e-5)
-                    f_max = feat_map.float().amax(dim=(2, 3))
-                    return m.spatial_proj(torch.cat([f_mean, f_std, f_max], dim=-1))
-                return feat_map.float()
+                feat_map = m.forward_features(x)
+                amp_dev = "cuda" if feat_map.is_cuda else "cpu"
+                with torch.autocast(device_type=amp_dev, enabled=False):
+                    if feat_map.ndim == 4:
+                        ff = feat_map.float()
+                        f_mean = ff.mean(dim=(2, 3))
+                        f_std = torch.sqrt(ff.var(dim=(2, 3), unbiased=False) + 1e-5)
+                        f_max = ff.amax(dim=(2, 3))
+                        return m.spatial_proj(torch.cat([f_mean, f_std, f_max], dim=-1))
+                    return feat_map.float()
 
             return m, fwd_cnv, dc["mean"], dc["std"], m.stages, 1024, "multi_crop_448"
 
@@ -286,19 +286,20 @@ class QingyuVisionQualityTower(nn.Module):
             m = timm.create_model("vit_pe_core_large_patch14_336", pretrained=False, num_classes=0, dynamic_img_size=True)
             m.load_state_dict(load_file(w_path), strict=False)
             dc = timm.data.resolve_data_config({}, model=m)
-            # Blueprint Section 3.5: Intermediate Readout at 0-indexed blocks [15, 19, 22] (1-indexed layers 16, 20, 23)
-            m.tap3 = IntermediateThreeLayerGatedTap(m.blocks, m.embed_dim, tap_indices=[15, 19, 22])
-            m.abmil = TokenGatedABMILPool(m.embed_dim)
+            m.tap3 = IntermediateThreeLayerGatedTap(m.blocks, m.embed_dim, tap_indices=[15, 19, 22]).float()
+            m.abmil = TokenGatedABMILPool(m.embed_dim).float()
             self._unfreeze_top_blocks(m, m.blocks, max(unfreeze_last_k, 9))
 
             def fwd_pec(x: torch.Tensor) -> torch.Tensor:
-                t = m.forward_features(x).float()
-                t = m.tap3.fuse(t)
-                n_pref = getattr(m, "num_prefix_tokens", 1)
-                if n_pref > 0:
-                    pt = torch.cat([t[:, :1], t[:, n_pref:]], dim=1)
-                    return torch.cat([t[:, 0], m.abmil(pt, has_cls=True)], dim=1)
-                return torch.cat([t.mean(dim=1), m.abmil(t, has_cls=False)], dim=1)
+                raw_t = m.forward_features(x)
+                amp_dev = "cuda" if raw_t.is_cuda else "cpu"
+                with torch.autocast(device_type=amp_dev, enabled=False):
+                    t = m.tap3.fuse(raw_t.float())
+                    n_pref = getattr(m, "num_prefix_tokens", 1)
+                    if n_pref > 0:
+                        pt = torch.cat([t[:, :1], t[:, n_pref:]], dim=1)
+                        return torch.cat([t[:, 0], m.abmil(pt, has_cls=True)], dim=1)
+                    return torch.cat([t.mean(dim=1), m.abmil(t, has_cls=False)], dim=1)
 
             return m, fwd_pec, dc["mean"], dc["std"], m.blocks, m.embed_dim * 2, "multi_crop_448"
 
@@ -310,22 +311,24 @@ class QingyuVisionQualityTower(nn.Module):
             m = timm.create_model("vit_large_patch16_dinov3", pretrained=False, num_classes=0, dynamic_img_size=True)
             m.load_state_dict(load_file(w_path), strict=True)
             dc = timm.data.resolve_data_config({}, model=m)
-            m.tap3 = IntermediateThreeLayerGatedTap(m.blocks, m.embed_dim, tap_indices=[15, 19, 22])
-            m.abmil = TokenGatedABMILPool(m.embed_dim)
+            m.tap3 = IntermediateThreeLayerGatedTap(m.blocks, m.embed_dim, tap_indices=[15, 19, 22]).float()
+            m.abmil = TokenGatedABMILPool(m.embed_dim).float()
             self._unfreeze_top_blocks(m, m.blocks, max(unfreeze_last_k, 8))
             self.is_native_aspect_pair = True
 
             def fwd_dino(x: torch.Tensor) -> torch.Tensor:
-                t = m.forward_features(x).float()
-                t = m.tap3.fuse(t)
-                n_pref = getattr(m, "num_prefix_tokens", 1)
-                pt = torch.cat([t[:, :1], t[:, n_pref:]], dim=1)
-                return torch.cat([t[:, 0], m.abmil(pt, has_cls=True)], dim=1)
+                raw_t = m.forward_features(x)
+                amp_dev = "cuda" if raw_t.is_cuda else "cpu"
+                with torch.autocast(device_type=amp_dev, enabled=False):
+                    t = m.tap3.fuse(raw_t.float())
+                    n_pref = getattr(m, "num_prefix_tokens", 1)
+                    pt = torch.cat([t[:, :1], t[:, n_pref:]], dim=1)
+                    return torch.cat([t[:, 0], m.abmil(pt, has_cls=True)], dim=1)
 
             return m, fwd_dino, dc["mean"], dc["std"], m.blocks, m.embed_dim * 2, "native_aspect_plus_crops"
 
         if key == "siglip2_so400m_naflex":
-            from transformers import AutoModel, AutoImageProcessor, SiglipVisionModel
+            from transformers import AutoModel, AutoImageProcessor
             repo = resolve_model_path("siglip2_so400m_naflex")
             vis = None
             proc = None
@@ -349,9 +352,9 @@ class QingyuVisionQualityTower(nn.Module):
 
             self.naflex_processor = proc
             blocks = vis.encoder.layers
-            hid = vis.config.hidden_size  # 1152
-            vis.tap3 = IntermediateThreeLayerGatedTap(blocks, hid, tap_indices=[max(0, len(blocks) - 9), max(0, len(blocks) - 5), len(blocks) - 2])
-            vis.masked_abmil = MaskedTokenGatedABMILPool(hid)
+            hid = vis.config.hidden_size
+            vis.tap3 = IntermediateThreeLayerGatedTap(blocks, hid, tap_indices=[max(0, len(blocks) - 9), max(0, len(blocks) - 5), len(blocks) - 2]).float()
+            vis.masked_abmil = MaskedTokenGatedABMILPool(hid).float()
             self._unfreeze_top_blocks(vis, blocks, max(unfreeze_last_k, 8))
 
             if is_true_naflex:
@@ -375,7 +378,6 @@ class QingyuVisionQualityTower(nn.Module):
 
                 return vis, fwd_naflex, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), blocks, hid * 2, "naflex_dict"
             else:
-                # Interpolated dynamic-aspect fallback if server has `siglip2-so400m-patch14-384` cached offline
                 emb = vis.embeddings
                 orig_emb_fwd = emb.forward
                 emb.forward = lambda pixel_values, **kw: orig_emb_fwd(pixel_values, interpolate_pos_encoding=True)
@@ -392,16 +394,17 @@ class QingyuVisionQualityTower(nn.Module):
             repo = resolve_model_path("cradio_v4_h")
             m = AutoModel.from_pretrained(repo, trust_remote_code=True)
             blocks = m.radio_model.model.blocks
-            m.tap3 = IntermediateThreeLayerGatedTap(blocks, 1280, tap_indices=[max(0, len(blocks) - 10), max(0, len(blocks) - 5), len(blocks) - 2])
-            m.abmil = TokenGatedABMILPool(1280)
+            m.tap3 = IntermediateThreeLayerGatedTap(blocks, 1280, tap_indices=[max(0, len(blocks) - 10), max(0, len(blocks) - 5), len(blocks) - 2]).float()
+            m.abmil = TokenGatedABMILPool(1280).float()
             self._unfreeze_top_blocks(m, blocks, max(unfreeze_last_k, 8))
             self.is_native_aspect_pair = True
 
             def fwd_radio(x_01: torch.Tensor) -> torch.Tensor:
-                # Note: C-RADIO expects [0, 1] RGB inputs (mean=(0,0,0), std=(1,1,1))
                 summ, feat = m(x_01)
-                feat_f = m.tap3.fuse(feat.float())
-                return torch.cat([summ.float(), m.abmil(feat_f, has_cls=False)], dim=1)
+                amp_dev = "cuda" if feat.is_cuda else "cpu"
+                with torch.autocast(device_type=amp_dev, enabled=False):
+                    feat_f = m.tap3.fuse(feat.float())
+                    return torch.cat([summ.float(), m.abmil(feat_f, has_cls=False)], dim=1)
 
             return m, fwd_radio, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0), blocks, int(2560 + 1280), "native_aspect_plus_crops"
 
@@ -430,11 +433,20 @@ class QingyuVisionQualityTower(nn.Module):
                 from peft import LoraConfig, get_peft_model
                 for p in m.parameters():
                     p.requires_grad = False
+                # Dynamically intersect existing Linear leaf names so PEFT never raises ValueError on absent names!
+                allowed = {"qkv", "proj", "fc1", "fc2", "q_proj", "k_proj", "v_proj", "out_proj"}
+                present = sorted({
+                    mn.split(".")[-1]
+                    for mn, mod in m.named_modules()
+                    if isinstance(mod, nn.Linear) and mn.split(".")[-1] in allowed
+                })
+                if not present:
+                    present = ["fc1", "fc2"]
                 l_cfg = LoraConfig(
                     r=lora_rank,
                     lora_alpha=lora_rank * 2,
                     lora_dropout=0.05,
-                    target_modules=["qkv", "proj", "fc1", "fc2", "q_proj", "k_proj", "v_proj", "out_proj"],
+                    target_modules=present,
                     bias="none",
                 )
                 m = get_peft_model(m, l_cfg)
@@ -463,11 +475,13 @@ class QingyuVisionQualityTower(nn.Module):
             def fwd_iv6b(x: torch.Tensor) -> torch.Tensor:
                 _ensure_pos_448(x.shape[-1])
                 out = m(pixel_values=x.to(torch.bfloat16))
-                t = out.last_hidden_state.float()
-                if m.dual_tap._mid_cache is not None:
-                    m.dual_tap._mid_cache = m.dual_tap._mid_cache.float()
-                t = m.dual_tap.fuse(t)
-                return torch.cat([t[:, 0], m.abmil(t, has_cls=True)], dim=1)
+                amp_dev = "cuda" if out.last_hidden_state.is_cuda else "cpu"
+                with torch.autocast(device_type=amp_dev, enabled=False):
+                    t = out.last_hidden_state.float()
+                    if m.dual_tap._mid_cache is not None:
+                        m.dual_tap._mid_cache = m.dual_tap._mid_cache.float()
+                    t = m.dual_tap.fuse(t)
+                    return torch.cat([t[:, 0], m.abmil(t, has_cls=True)], dim=1)
 
             return m, fwd_iv6b, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225), raw_m.encoder.layers, 6400, "multi_crop_448"
 
@@ -483,18 +497,10 @@ class QingyuVisionQualityTower(nn.Module):
         native_global_list: Optional[List[torch.Tensor]] = None,
         naflex_views_list: Optional[List[Dict[str, torch.Tensor]]] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Supports all 3 input modes seamlessly:
-          1. `multi_crop_448`: `views_01` of shape `[B, V, 3, 448, 448]` in `[0, 1]`.
-          2. `native_aspect_plus_crops`: `native_global_list` (list of `B` variable-aspect `[1, 3, H_i, W_i]` tensors)
-             + `views_01` (`[B, V_crop, 3, 448, 448]` 1:1 guided crops).
-          3. `naflex_dict`: `naflex_views_list` (list of `V` batched processor dicts `[B, max_patches, ...]`).
-        """
         if self.mode_tag == "naflex_dict" and naflex_views_list is not None:
             v_embs = [self._encode_single_view(vd) for vd in naflex_views_list]
-            v_stack = torch.stack(v_embs, dim=1)  # [B, V, D]
+            v_stack = torch.stack(v_embs, dim=1)
         elif self.mode_tag == "native_aspect_plus_crops" and native_global_list is not None:
-            # Group same-shape native-aspect tensors in the mini-batch to batch GPU calls cleanly!
             B = len(native_global_list)
             g_feats = [None] * B
             shape_groups: Dict[Tuple[int, int], List[int]] = {}
@@ -506,7 +512,7 @@ class QingyuVisionQualityTower(nn.Module):
                 gf = self._encode_single_view(self._norm_img(gx))
                 for loc_j, orig_i in enumerate(idxs):
                     g_feats[orig_i] = gf[loc_j]
-            g_stack = torch.stack(g_feats, dim=0).unsqueeze(1)  # [B, 1, D]
+            g_stack = torch.stack(g_feats, dim=0).unsqueeze(1)
 
             if views_01 is not None and views_01.shape[1] > 0:
                 B_, Vc, C, H, W = views_01.shape
@@ -520,11 +526,12 @@ class QingyuVisionQualityTower(nn.Module):
             flat = self._norm_img(views_01.reshape(B * V, C, H, W))
             v_stack = self._encode_single_view(flat).view(B, V, -1)
 
-        vis_summary = self.view_agg(v_stack)
-        return self.head(vis_summary, phys_feat=phys_feat)
+        amp_dev = "cuda" if v_stack.is_cuda else "cpu"
+        with torch.autocast(device_type=amp_dev, enabled=False):
+            vis_summary = self.view_agg(v_stack.float())
+            return self.head(vis_summary, phys_feat=phys_feat.float() if phys_feat is not None else None)
 
     def trainable_state_dict(self) -> Dict[str, torch.Tensor]:
-        """Saves ONLY trainable parameters + buffers (`phys_mu`, `phys_sd`, `proto_bank`) for lightweight Model Soup."""
         req = {n for n, p in self.named_parameters() if p.requires_grad}
         out = {}
         for k, v in self.state_dict().items():
