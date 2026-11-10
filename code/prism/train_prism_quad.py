@@ -185,13 +185,13 @@ def predict_prism_quad(net: PrismQuadMicroscopeNet, loader: DataLoader, dev: str
 
 def main():
     ap = argparse.ArgumentParser()
-    # Matches exact backbone order of V17_S2R_SpecD_All6_Giant_s{16,17} for 100% warm-start alignment
-    ap.add_argument('--backbones', default='pecoreg:lastk6,dinov3l:lastk6,cradio:lastk6,eva02:lastk6')
+    # Matches exact backbone & unfreeze depth of V17_S2R_SpecD_All6_Giant_s{16,17} for 100% warm-start alignment
+    ap.add_argument('--backbones', default='pecoreg:lastk4,dinov3l:lastk6,cradio:lastk4,eva02:lastk6')
     ap.add_argument('--init-ckpt', default='results/v17_end2end_s16_s17/V17_S2R_SpecD_All6_Giant_s16_ep5.pt')
     ap.add_argument('--epochs-s1', type=int, default=3)
     ap.add_argument('--epochs-s2', type=int, default=2)
-    ap.add_argument('--batch', type=int, default=8)
-    ap.add_argument('--grad-accum', type=int, default=2)
+    ap.add_argument('--batch', type=int, default=4)
+    ap.add_argument('--grad-accum', type=int, default=4)
     ap.add_argument('--size', type=int, default=448)
     ap.add_argument('--tiles', type=int, default=2)
     ap.add_argument('--lr-full', type=float, default=6.5e-5)

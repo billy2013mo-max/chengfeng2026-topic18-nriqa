@@ -149,14 +149,14 @@ if [ "${NUM_GPUS}" -ge 8 ]; then
         --split data/v17_splits/split_s16_prism.csv \
         --manifest data/v17_splits/manifest_s16_prism.csv \
         --init-ckpt results/v17_end2end_s16_s17/V17_S2R_SpecD_All6_Giant_s16_ep5.pt \
-        --epochs-s1 3 --epochs-s2 2 \
+        --epochs-s1 3 --epochs-s2 2 --batch 4 --grad-accum 4 \
         --out results/prism/prism_quad_s16.json
 
     launch_job_if_needed "prism_quad_s17" env CUDA_VISIBLE_DEVICES=1 python3 -u code/prism/train_prism_quad.py \
         --split data/v17_splits/split_s17_prism.csv \
         --manifest data/v17_splits/manifest_s17_prism.csv \
         --init-ckpt results/v17_end2end_s16_s17/V17_S2R_SpecD_All6_Giant_s17_ep5.pt \
-        --epochs-s1 3 --epochs-s2 2 \
+        --epochs-s1 3 --epochs-s2 2 --batch 4 --grad-accum 4 \
         --out results/prism/prism_quad_s17.json
 
     launch_job_if_needed "prism_vit6b_s16" env CUDA_VISIBLE_DEVICES=2 python3 -u code/prism/train_prism_vit6b.py \

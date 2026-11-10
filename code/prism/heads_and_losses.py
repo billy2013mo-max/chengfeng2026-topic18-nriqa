@@ -88,12 +88,12 @@ class ConditionalHazardOrdinalHead(nn.Module):
         self.hidden_dim = hidden_dim
         self.proj_dim = proj_dim
 
-        # Shared feature trunk with Squeeze-and-Excitation channel calibration
+        # Shared feature trunk with compact 256-dim Squeeze-and-Excitation channel calibration
         self.norm = nn.LayerNorm(in_dim)
         self.se_gate = nn.Sequential(
-            nn.Linear(in_dim, max(128, in_dim // 16)),
+            nn.Linear(in_dim, 256),
             nn.GELU(),
-            nn.Linear(max(128, in_dim // 16), in_dim),
+            nn.Linear(256, in_dim),
             nn.Sigmoid(),
         )
         self.drop = nn.Dropout(dropout)

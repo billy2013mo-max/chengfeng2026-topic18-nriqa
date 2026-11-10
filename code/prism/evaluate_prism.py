@@ -6,20 +6,20 @@ code/prism/evaluate_prism.py
 PRISM Unified Reference-Anchored Multi-Tower Evaluator & Submission Engine.
 
 Key Innovations:
-  1. Mass-Preserving Conditional Hazard Ratio Fusion:
+  1. Strict Image-Name Alignment Across All Towers (`align_tower_npz_by_name`):
+     Aligns `va`, `te`, and `t150` predictions strictly by image filename (`va_names`, `te_names`,
+     `t150_names` / `names_150`) so partial subsets (e.g. `494/500` when filenames containing `_d`
+     were skipped) never cause shape broadcast errors and never misalign rows.
+  2. Mass-Preserving Conditional Hazard Ratio Fusion:
      Decomposes positive defect mass `M_12 = p1 + p2` via conditional severity ratio
-     `rho_12 = P(Y == P1 | Y in {P1, P2}) = p1 / (p1 + p2)`, refining `rho_12` in log-odds
-     space with newly trained PRISM Full-Spectrum Towers (`Prism-Quad`, `Prism-ViT6B`, `Prism-VLM8B`),
-     8-Fold OOF All-Grade Microscope (`V16_Full`), and Sim2Real DualStream (`V17_DualStream`)
-     while protecting `S_clean = 20.00 / 20.00`.
-  2. Split-Isolated Scene-Matched Reference-Anchored Calibration (`SceneMatchedAnchorBank`):
+     `rho_12 = P(Y == P1 | Y in {P1, P2}) = p1 / (p1 + p2)`, refining `rho_12` and `p0` with newly
+     trained PRISM Full-Spectrum Towers (`Prism-Quad`, `Prism-ViT6B`, `Prism-VLM8B`), 8-Fold OOF
+     All-Grade Microscope (`V16_Full`), and Sim2Real DualStream (`V17_DualStream`) while protecting
+     `S_clean = 20.00 / 20.00`.
+  3. Split-Isolated Scene-Matched Reference-Anchored Calibration (`SceneMatchedAnchorBank`):
      Constructs a reference bank strictly from `split == 'train'` authentic real images of each split
      (`s16` / `s17` — zero validation or test leakage!) and fits `AnchorCrossAttentionComparator`
      strictly on `va` (`N = 500` per split) with validation-gated acceptance.
-  3. Validation-Gated Tower & Threshold Calibration on `s16_va + s17_va` (`N = 1,000`):
-     Automatically selects optimal conditional hazard fusion weights and tight trust-region thresholds
-     strictly on validation sets (`va`), then evaluates once on blind isolated test sets (`s16_te`, `s17_te`,
-     `N = 2,000`) and exports `pred_nriqa_dataset_test.json`.
 
 Strict Compliance with AGENTS.md / GEMINI.md:
   - ZERO legacy JSON reading (`pred_nriqa_dataset_test_phaseB_overgen8.json`, `52.89`, etc. are NEVER read).
@@ -75,6 +75,88 @@ PRISM_DIR = 'results/prism'
 V16_FULL8_DIR = 'results/v16_fulldata'
 V17_DUAL_NPZ = 'results/v17_sim2real_dualstream/V17_Sim2Real_DualStream_8Fold_probs.npz'
 PHYS_CACHE = 'results/v8_experts/native_phys_feats.npz'
+
+
+def align_tower_probs_by_name(
+    tower_npz,
+    target_names: list,
+    ref_p0: np.ndarray,
+    ref_p1: np.ndarray,
+    ref_p2: np.ndarray,
+    prefix: str,
+):
+    """
+    Aligns `(tp0, tp1, tp2)` from `tower_npz` strictly by image filename onto `target_names`
+    and applies marginal prior-odds alignment (`align_odds_1d`) on the matched subset.
+    If any image in `target_names` is absent from `tower_npz` (e.g., 494/500 due to `_d` filter),
+    its entry falls back cleanly to `(ref_p0, ref_p1, ref_p2)` with zero shape mismatch!
+    """
+    if tower_npz is None or f'{prefix}_p0' not in tower_npz:
+        return None
+
+    raw_p0 = np.asarray(tower_npz[f'{prefix}_p0'], dtype=np.float32)
+    raw_p1 = np.asarray(tower_npz[f'{prefix}_p1'], dtype=np.float32)
+    raw_p2 = np.asarray(tower_npz[f'{prefix}_p2'], dtype=np.float32)
+
+    t_names = None
+    keys_avail = tower_npz.files if hasattr(tower_npz, 'files') else list(tower_npz.keys())
+    for nk in (f'{prefix}_names', 'names', 't150_names', 'names_150'):
+        if nk in keys_avail and tower_npz[nk] is not None:
+            cand = [str(x) for x in tower_npz[nk]]
+            if len(cand) == len(raw_p0):
+                t_names = cand
+                break
+
+    out_p0 = ref_p0.copy()
+    out_p1 = ref_p1.copy()
+    out_p2 = ref_p2.copy()
+
+    if t_names is not None:
+        idx_map = {nm: i for i, nm in enumerate(t_names)}
+        q_idx, t_idx = [], []
+        for qi, nm in enumerate(target_names):
+            s_nm = str(nm)
+            if s_nm in idx_map:
+                q_idx.append(qi)
+                t_idx.append(idx_map[s_nm])
+        if not q_idx:
+            return None
+        q_idx = np.asarray(q_idx, dtype=np.int64)
+        t_idx = np.asarray(t_idx, dtype=np.int64)
+    elif len(raw_p0) == len(target_names):
+        q_idx = np.arange(len(target_names), dtype=np.int64)
+        t_idx = q_idx
+    else:
+        return None
+
+    for ci in range(6):
+        out_p0[q_idx, ci] = align_odds_1d(raw_p0[t_idx, ci], ref_p0[q_idx, ci])
+    for k in range(4):
+        out_p1[q_idx, k] = align_odds_1d(raw_p1[t_idx, k], ref_p1[q_idx, k])
+        out_p2[q_idx, k] = align_odds_1d(raw_p2[t_idx, k], ref_p2[q_idx, k])
+
+    # Also store conditional severity ratio rho_12 = tp1 / (tp1 + tp2) aligned to ref conditional ratio
+    out_m12 = np.zeros_like(ref_p1)
+    out_rho12 = np.zeros_like(ref_p1)
+    base_m12 = ref_p1 + ref_p2
+    base_rho = np.clip(ref_p1 / np.maximum(1e-5, base_m12), 1e-5, 1.0 - 1e-5)
+    out_m12[:] = base_m12
+    out_rho12[:] = base_rho
+
+    raw_m12 = np.clip(raw_p1[t_idx] + raw_p2[t_idx], 1e-5, 1.0 - 1e-5)
+    raw_rho = np.clip(raw_p1[t_idx] / np.maximum(1e-5, raw_p1[t_idx] + raw_p2[t_idx]), 1e-5, 1.0 - 1e-5)
+    for k in range(4):
+        out_m12[q_idx, k] = align_odds_1d(raw_m12[:, k], np.clip(base_m12[q_idx, k], 1e-5, 1.0 - 1e-5))
+        out_rho12[q_idx, k] = align_odds_1d(raw_rho[:, k], base_rho[q_idx, k])
+
+    return {
+        'p0': out_p0,
+        'p1': out_p1,
+        'p2': out_p2,
+        'm12': out_m12,
+        'rho12': out_rho12,
+        'matched': int(len(q_idx)),
+    }
 
 
 def load_oof_microscope_and_dualstream_bank():
@@ -188,7 +270,7 @@ def build_split_isolated_train_anchor_bank(sp: int, oof_bank: dict):
     return tr_names, np.stack(vecs, axis=0), tr_grades, anchor_bank
 
 
-def apply_prism_tower_and_hazard_fusion(
+def apply_prism_aligned_fusion(
     names: list,
     base_p0: np.ndarray,
     base_p1: np.ndarray,
@@ -196,17 +278,19 @@ def apply_prism_tower_and_hazard_fusion(
     oof_bank: dict,
     tr_vecs: np.ndarray = None,
     tr_grades: np.ndarray = None,
-    prism_quad_npz: dict = None,
-    prism_vit6b_npz: dict = None,
-    prism_vlm8b_npz: dict = None,
-    tower_weights: tuple = (0.26, 0.24, 0.16),
-    anchor_alpha: float = 0.10,
+    aligned_quad: dict = None,
+    aligned_vit6b: dict = None,
+    aligned_vlm8b: dict = None,
+    tower_weights: tuple = (0.18, 0.16, 0.12),
+    blur_ref_w: float = 0.28,
+    anchor_alpha: float = 0.08,
     prefix: str = 'te',
 ):
     """
     PRISM Mass-Preserving Conditional Hazard & Reference-Anchored Calibrator:
-      1. Incorporates newly trained PRISM Full-Spectrum Towers (`Prism-Quad`, `Prism-ViT6B`, `Prism-VLM8B`)
-         using prior-odds alignment on both P0 presence and conditional `P1 / (P1 + P2)` severity ratios.
+      1. Blends pre-aligned PRISM Full-Spectrum Towers (`Prism-Quad`, `Prism-ViT6B`, `Prism-VLM8B`)
+         both on P0 presence and on conditional `P1 / (P1 + P2)` severity ratios (with domain-aware
+         boost on `Prism-VLM8B` for semantic `过度生成` & `虚化突兀`, and `Prism-Quad` for 1:1 native textures).
       2. Refines conditional severity ratio `rho_12 = p1 / (p1 + p2)` on Blur (`k=0`) using 8-Fold OOF
          All-Grade Microscope & Sim2Real DualStream without altering Clean Gate mass.
       3. Queries Top-16 Scene-Matched Real Training Anchors (`tr_vecs`, `tr_grades`) to calibrate
@@ -217,46 +301,55 @@ def apply_prism_tower_and_hazard_fusion(
     p2_out = base_p2.copy()
 
     wq, w6, wv = tower_weights
-    for tower_npz, w_tower in [(prism_quad_npz, wq), (prism_vit6b_npz, w6), (prism_vlm8b_npz, wv)]:
-        if w_tower > 1e-6 and tower_npz is not None and f'{prefix}_p0' in tower_npz:
-            tp0, tp1, tp2 = tower_npz[f'{prefix}_p0'], tower_npz[f'{prefix}_p1'], tower_npz[f'{prefix}_p2']
-            for ci in range(6):
-                p0_out[:, ci] = (1.0 - 0.55 * w_tower) * p0_out[:, ci] + (0.55 * w_tower) * align_odds_1d(tp0[:, ci], p0_out[:, ci])
-            for k, cname in enumerate(FULL_CLASSES):
-                ci = CLASSES.index(cname)
-                # Blend total moderate+mild defect mass softly while refining conditional P1/(P1+P2) ratio
-                m12_base = p1_out[:, k] + p2_out[:, k]
-                m12_tow = align_odds_1d(np.clip(tp1[:, k] + tp2[:, k], 1e-5, 1.0 - 1e-5), np.clip(m12_base, 1e-5, 1.0 - 1e-5))
-                m12 = (1.0 - 0.45 * w_tower) * m12_base + (0.45 * w_tower) * m12_tow
+    # Domain-specialty multipliers per class (6-dim for P0, 4-dim for P1/P2)
+    P0_SPEC = {
+        'quad':  [1.10, 1.15, 1.15, 1.00, 1.00, 1.00],
+        'vit6b': [1.05, 1.05, 1.15, 1.05, 1.05, 1.00],
+        'vlm8b': [0.85, 0.85, 1.10, 0.90, 1.30, 1.25],
+    }
+    P12_SPEC = {
+        'quad':  [1.10, 1.15, 1.15, 1.05],
+        'vit6b': [1.05, 1.05, 1.15, 1.10],
+        'vlm8b': [0.85, 0.90, 1.10, 1.30],
+    }
 
-                rb = np.clip(p1_out[:, k] / np.maximum(1e-5, m12_base), 1e-5, 1.0 - 1e-5)
-                rt = np.clip(tp1[:, k] / np.maximum(1e-5, tp1[:, k] + tp2[:, k]), 1e-5, 1.0 - 1e-5)
-                rc = (1.0 - w_tower) * rb + w_tower * align_odds_1d(rt, rb)
-                p1_out[:, k] = m12 * rc
-                p2_out[:, k] = m12 * (1.0 - rc)
+    for tag, al_dict, w_tower in [('quad', aligned_quad, wq), ('vit6b', aligned_vit6b, w6), ('vlm8b', aligned_vlm8b, wv)]:
+        if w_tower > 1e-6 and al_dict is not None:
+            for ci in range(6):
+                wt_c = min(0.45, 0.55 * w_tower * P0_SPEC[tag][ci])
+                p0_out[:, ci] = (1.0 - wt_c) * p0_out[:, ci] + wt_c * al_dict['p0'][:, ci]
+            for k in range(4):
+                wt_k = min(0.50, w_tower * P12_SPEC[tag][k])
+                m12_cur = p1_out[:, k] + p2_out[:, k]
+                m12_new = (1.0 - 0.45 * wt_k) * m12_cur + (0.45 * wt_k) * al_dict['m12'][:, k]
+                rho_cur = np.clip(p1_out[:, k] / np.maximum(1e-5, m12_cur), 1e-5, 1.0 - 1e-5)
+                rho_new = (1.0 - wt_k) * rho_cur + wt_k * al_dict['rho12'][:, k]
+                p1_out[:, k] = m12_new * rho_new
+                p2_out[:, k] = m12_new * (1.0 - rho_new)
 
     # Step 2: Mass-Preserving Conditional Ratio Refinement on Blur (k=0)
-    if prefix == 't150' and oof_bank['t150_p1'] is not None and oof_bank['dual_t150_6x4'] is not None:
-        mic_p1_0 = oof_bank['t150_p1'][:, 0]
-        mic_p2_0 = oof_bank['t150_p2'][:, 0]
-        dual_p1_0 = oof_bank['dual_t150_6x4'][:, 0, 2]
-        dual_p2_0 = oof_bank['dual_t150_6x4'][:, 0, 1]
-    elif oof_bank['oof_p1_map'] and oof_bank['dual_oof_map']:
-        mic_p1_0 = np.array([oof_bank['oof_p1_map'].get(str(nm), base_p1[i])[0] for i, nm in enumerate(names)], dtype=np.float32)
-        mic_p2_0 = np.array([oof_bank['oof_p2_map'].get(str(nm), base_p2[i])[0] for i, nm in enumerate(names)], dtype=np.float32)
-        dual_p1_0 = np.array([oof_bank['dual_oof_map'][str(nm)][0, 2] if str(nm) in oof_bank['dual_oof_map'] else base_p1[i, 0] for i, nm in enumerate(names)], dtype=np.float32)
-        dual_p2_0 = np.array([oof_bank['dual_oof_map'][str(nm)][0, 1] if str(nm) in oof_bank['dual_oof_map'] else base_p2[i, 0] for i, nm in enumerate(names)], dtype=np.float32)
-    else:
-        mic_p1_0 = None
+    if blur_ref_w > 1e-6:
+        if prefix == 't150' and oof_bank['t150_p1'] is not None and oof_bank['dual_t150_6x4'] is not None:
+            mic_p1_0 = oof_bank['t150_p1'][:, 0]
+            mic_p2_0 = oof_bank['t150_p2'][:, 0]
+            dual_p1_0 = oof_bank['dual_t150_6x4'][:, 0, 2]
+            dual_p2_0 = oof_bank['dual_t150_6x4'][:, 0, 1]
+        elif oof_bank['oof_p1_map'] and oof_bank['dual_oof_map']:
+            mic_p1_0 = np.array([oof_bank['oof_p1_map'].get(str(nm), base_p1[i])[0] for i, nm in enumerate(names)], dtype=np.float32)
+            mic_p2_0 = np.array([oof_bank['oof_p2_map'].get(str(nm), base_p2[i])[0] for i, nm in enumerate(names)], dtype=np.float32)
+            dual_p1_0 = np.array([oof_bank['dual_oof_map'][str(nm)][0, 2] if str(nm) in oof_bank['dual_oof_map'] else base_p1[i, 0] for i, nm in enumerate(names)], dtype=np.float32)
+            dual_p2_0 = np.array([oof_bank['dual_oof_map'][str(nm)][0, 1] if str(nm) in oof_bank['dual_oof_map'] else base_p2[i, 0] for i, nm in enumerate(names)], dtype=np.float32)
+        else:
+            mic_p1_0 = None
 
-    if mic_p1_0 is not None:
-        m12_0 = p1_out[:, 0] + p2_out[:, 0]
-        rho_b = np.clip(p1_out[:, 0] / np.maximum(1e-5, m12_0), 1e-5, 1.0 - 1e-5)
-        rho_m = align_odds_1d(np.clip(mic_p1_0 / np.maximum(1e-5, mic_p1_0 + mic_p2_0), 1e-5, 1.0 - 1e-5), rho_b)
-        rho_d = align_odds_1d(np.clip(dual_p1_0 / np.maximum(1e-5, dual_p1_0 + dual_p2_0), 1e-5, 1.0 - 1e-5), rho_b)
-        rc_0 = 0.72 * rho_b + 0.16 * rho_m + 0.12 * rho_d
-        p1_out[:, 0] = m12_0 * rc_0
-        p2_out[:, 0] = m12_0 * (1.0 - rc_0)
+        if mic_p1_0 is not None:
+            m12_0 = p1_out[:, 0] + p2_out[:, 0]
+            rho_b = np.clip(p1_out[:, 0] / np.maximum(1e-5, m12_0), 1e-5, 1.0 - 1e-5)
+            rho_m = align_odds_1d(np.clip(mic_p1_0 / np.maximum(1e-5, mic_p1_0 + mic_p2_0), 1e-5, 1.0 - 1e-5), rho_b)
+            rho_d = align_odds_1d(np.clip(dual_p1_0 / np.maximum(1e-5, dual_p1_0 + dual_p2_0), 1e-5, 1.0 - 1e-5), rho_b)
+            rc_0 = (1.0 - blur_ref_w) * rho_b + (0.57 * blur_ref_w) * rho_m + (0.43 * blur_ref_w) * rho_d
+            p1_out[:, 0] = m12_0 * rc_0
+            p2_out[:, 0] = m12_0 * (1.0 - rc_0)
 
     # Step 3: Scene-Matched Reference-Anchored Local Conditional Ratio Calibration (Top-16 training neighbors)
     if anchor_alpha > 1e-6 and tr_vecs is not None and tr_grades is not None and len(tr_vecs) >= 16:
@@ -287,7 +380,7 @@ def apply_prism_tower_and_hazard_fusion(
 def calibrate_prism_weights_and_thresholds_on_va(split_bundles: list, oof_bank: dict):
     """
     Strictly validation-only (`s16_va + s17_va`, N=1,000) selection of:
-      1. PRISM Full-Spectrum Tower weights `(w_quad, w_vit6b, w_vlm8b)` and `anchor_alpha`.
+      1. PRISM Full-Spectrum Tower weights `(w_quad, w_vit6b, w_vlm8b)`, `blur_ref_w`, and `anchor_alpha`.
       2. Tight ±0.015 trust-region threshold coordinate refinement preserving Clean = 20.00.
     Zero access to `te` (`s16_te`, `s17_te`) or `test_150`!
     """
@@ -299,44 +392,49 @@ def calibrate_prism_weights_and_thresholds_on_va(split_bundles: list, oof_bank: 
         'shield': 0.28,
     }
 
-    def eval_va_cfg(w_tuple, a_alpha, P_cfg):
+    def eval_va_cfg(w_tuple, b_ref, a_alpha, P_cfg):
         d1_sum, d2_sum, cln_min = 0.0, 0.0, 20.0
         for b in split_bundles:
-            vp0, vp1, vp2 = apply_prism_tower_and_hazard_fusion(
+            vp0, vp1, vp2 = apply_prism_aligned_fusion(
                 b['va_names'], b['va_p0_b'], b['va_p1_b'], b['va_p2_b'], oof_bank,
                 tr_vecs=b['tr_vecs'], tr_grades=b['tr_grades'],
-                prism_quad_npz=b['pq_sp'], prism_vit6b_npz=b['p6_sp'], prism_vlm8b_npz=b['pv_sp'],
-                tower_weights=w_tuple, anchor_alpha=a_alpha, prefix='va',
+                aligned_quad=b['pq_va'], aligned_vit6b=b['p6_va'], aligned_vlm8b=b['pv_va'],
+                tower_weights=w_tuple, blur_ref_w=b_ref, anchor_alpha=a_alpha, prefix='va',
             )
             pr_va = decode_anti_interception(vp0, vp1, vp2, b['sh_va'], P_cfg)
             ev = evaluate_both_metrics(pr_va, b['gva'])
             d1_sum += 0.5 * ev['doc1_total']
             d2_sum += 0.5 * ev['doc2_strict_total']
             cln_min = min(cln_min, ev['doc1_S_clean'])
-        return 0.55 * d1_sum + 0.45 * d2_sum, d1_sum, d2_sum, cln_min
+        return 0.50 * d1_sum + 0.50 * d2_sum, d1_sum, d2_sum, cln_min
 
-    best_obj, best_d1, best_d2, base_cln = eval_va_cfg((0.0, 0.0, 0.0), 0.0, base_P)
+    best_obj, best_d1, best_d2, base_cln = eval_va_cfg((0.0, 0.0, 0.0), 0.28, 0.08, base_P)
     best_w = (0.0, 0.0, 0.0)
-    best_alpha = 0.0
+    best_bref = 0.28
+    best_alpha = 0.08
 
     cand_weights = [
         (0.0, 0.0, 0.0),
-        (0.18, 0.16, 0.12),
-        (0.26, 0.24, 0.16),
-        (0.32, 0.28, 0.20),
-        (0.25, 0.0, 0.15),
-        (0.0, 0.24, 0.15),
-        (0.28, 0.24, 0.0),
-        (0.0, 0.0, 0.18),
+        (0.10, 0.10, 0.08),
+        (0.16, 0.14, 0.10),
+        (0.22, 0.18, 0.14),
+        (0.28, 0.24, 0.18),
+        (0.20, 0.00, 0.12),
+        (0.00, 0.20, 0.12),
+        (0.22, 0.20, 0.00),
+        (0.18, 0.00, 0.00),
+        (0.00, 0.18, 0.00),
+        (0.00, 0.00, 0.14),
     ]
     for w_tup in cand_weights:
-        for a_al in (0.0, 0.08, 0.12):
-            obj, d1, d2, cln = eval_va_cfg(w_tup, a_al, base_P)
-            if cln >= base_cln - 0.05 and obj > best_obj + 1e-4:
-                best_obj, best_d1, best_d2 = obj, d1, d2
-                best_w, best_alpha = w_tup, a_al
+        for b_ref in (0.0, 0.20, 0.28):
+            for a_al in (0.0, 0.08, 0.12):
+                obj, d1, d2, cln = eval_va_cfg(w_tup, b_ref, a_al, base_P)
+                if cln >= base_cln - 0.03 and obj > best_obj + 1e-4:
+                    best_obj, best_d1, best_d2 = obj, d1, d2
+                    best_w, best_bref, best_alpha = w_tup, b_ref, a_al
 
-    # Coordinate trust-region refinement (±0.01) on validation set
+    # Coordinate trust-region refinement (±0.015) on validation set
     P_opt = copy.deepcopy(base_P)
     for key in ('T0', 'T1', 'T2'):
         for idx in range(len(P_opt[key])):
@@ -344,16 +442,16 @@ def calibrate_prism_weights_and_thresholds_on_va(split_bundles: list, oof_bank: 
             for delta in (-0.015, -0.01, 0.01, 0.015):
                 P_try = copy.deepcopy(P_opt)
                 P_try[key][idx] = round(orig_v + delta, 4)
-                obj, d1, d2, cln = eval_va_cfg(best_w, best_alpha, P_try)
-                if cln >= base_cln - 0.02 and obj > best_obj + 0.015:
+                obj, d1, d2, cln = eval_va_cfg(best_w, best_bref, best_alpha, P_try)
+                if cln >= base_cln - 0.01 and obj > best_obj + 0.015:
                     best_obj, best_d1, best_d2 = obj, d1, d2
                     P_opt = P_try
 
     print(
-        f"[PRISM Validation Gate (N=1,000)] Selected weights={best_w}, anchor_alpha={best_alpha:.2f} "
-        f"| Val Doc1={best_d1:.3f}, Val Doc2_Strict={best_d2:.3f}"
+        f"[PRISM Validation Gate (N=1,000)] Selected tower_weights={best_w}, blur_ref_w={best_bref:.2f}, "
+        f"anchor_alpha={best_alpha:.2f} | Val Doc1={best_d1:.3f}, Val Doc2_Strict={best_d2:.3f}"
     )
-    return best_w, best_alpha, P_opt
+    return best_w, best_bref, best_alpha, P_opt
 
 
 def run_prism_evaluation(use_anchor_net: bool = True, out_tag: str = 'prism_ra_iqa'):
@@ -361,13 +459,24 @@ def run_prism_evaluation(use_anchor_net: bool = True, out_tag: str = 'prism_ra_i
     print("=== [PRISM Architecture] Pairwise Reference-Anchored Integrated Severity Microscope Evaluation ===")
     print("=" * 108)
 
-    # Audit newly trained PRISM towers
+    # Audit newly trained PRISM towers & their standalone JSON metrics if present
     for sp in (16, 17):
-        found = [
-            tag for tag in ('prism_quad', 'prism_vit6b', 'prism_vlm8b')
-            if os.path.exists(f'{PRISM_DIR}/{tag}_s{sp}_probs.npz')
-        ]
-        print(f"[PRISM Tower Inventory] Split s{sp}: loaded {len(found)}/3 new PRISM towers -> {found}")
+        found_info = []
+        for tag in ('prism_quad', 'prism_vit6b', 'prism_vlm8b'):
+            npz_p = f'{PRISM_DIR}/{tag}_s{sp}_probs.npz'
+            js_p = f'{PRISM_DIR}/{tag}_s{sp}.json'
+            if os.path.exists(npz_p):
+                sc_str = ''
+                if os.path.exists(js_p):
+                    try:
+                        jd = json.load(open(js_p, encoding='utf-8'))
+                        val = jd.get('doc1', jd.get('test', {}).get('total', None))
+                        if val is not None:
+                            sc_str = f'({float(val):.2f})'
+                    except Exception:
+                        pass
+                found_info.append(f'{tag}{sc_str}')
+        print(f"[PRISM Tower Inventory] Split s{sp}: loaded {len(found_info)}/3 new PRISM towers -> {found_info}")
 
     oof_bank = load_oof_microscope_and_dualstream_bank()
 
@@ -410,11 +519,15 @@ def run_prism_evaluation(use_anchor_net: bool = True, out_tag: str = 'prism_ra_i
     base_t150_p0, base_t150_p1, base_t150_p2, sh_t150 = fuse_6b_vlm_4spec_synergy(
         p0_6b_t, p1_6b_t, p2_6b_t, mA_t, mB_t, mC_t, mD_t, mVLM_t, m16_t_tuple, m10_t_tuple, prefix='t150'
     )
-    names_150 = mA_t['names']
+    names_150 = [str(n) for n in mA_t['names']]
 
-    prism_q_t = load_avg_t150([f'{PRISM_DIR}/prism_quad_s{sp}_probs.npz' for sp in (16, 17)])
-    prism_6b_t = load_avg_t150([f'{PRISM_DIR}/prism_vit6b_s{sp}_probs.npz' for sp in (16, 17)])
-    prism_vlm_t = load_avg_t150([f'{PRISM_DIR}/prism_vlm8b_s{sp}_probs.npz' for sp in (16, 17)])
+    prism_q_t_raw = load_avg_t150([f'{PRISM_DIR}/prism_quad_s{sp}_probs.npz' for sp in (16, 17)])
+    prism_6b_t_raw = load_avg_t150([f'{PRISM_DIR}/prism_vit6b_s{sp}_probs.npz' for sp in (16, 17)])
+    prism_vlm_t_raw = load_avg_t150([f'{PRISM_DIR}/prism_vlm8b_s{sp}_probs.npz' for sp in (16, 17)])
+
+    pq_t150 = align_tower_probs_by_name(prism_q_t_raw, names_150, base_t150_p0, base_t150_p1, base_t150_p2, 't150')
+    p6_t150 = align_tower_probs_by_name(prism_6b_t_raw, names_150, base_t150_p0, base_t150_p1, base_t150_p2, 't150')
+    pv_t150 = align_tower_probs_by_name(prism_vlm_t_raw, names_150, base_t150_p0, base_t150_p1, base_t150_p2, 't150')
 
     split_bundles = []
     for sp in (16, 17):
@@ -424,9 +537,9 @@ def run_prism_evaluation(use_anchor_net: bool = True, out_tag: str = 'prism_ra_i
         va_names = [str(n) for n in mA['va_names']]
         te_names = [str(n) for n in mA['te_names']]
 
-        pq_sp = np.load(f'{PRISM_DIR}/prism_quad_s{sp}_probs.npz') if os.path.exists(f'{PRISM_DIR}/prism_quad_s{sp}_probs.npz') else None
-        p6_sp = np.load(f'{PRISM_DIR}/prism_vit6b_s{sp}_probs.npz') if os.path.exists(f'{PRISM_DIR}/prism_vit6b_s{sp}_probs.npz') else None
-        pv_sp = np.load(f'{PRISM_DIR}/prism_vlm8b_s{sp}_probs.npz') if os.path.exists(f'{PRISM_DIR}/prism_vlm8b_s{sp}_probs.npz') else None
+        pq_sp = np.load(f'{PRISM_DIR}/prism_quad_s{sp}_probs.npz', allow_pickle=True) if os.path.exists(f'{PRISM_DIR}/prism_quad_s{sp}_probs.npz') else None
+        p6_sp = np.load(f'{PRISM_DIR}/prism_vit6b_s{sp}_probs.npz', allow_pickle=True) if os.path.exists(f'{PRISM_DIR}/prism_vit6b_s{sp}_probs.npz') else None
+        pv_sp = np.load(f'{PRISM_DIR}/prism_vlm8b_s{sp}_probs.npz', allow_pickle=True) if os.path.exists(f'{PRISM_DIR}/prism_vlm8b_s{sp}_probs.npz') else None
 
         _, tr_vecs, tr_grades, anchor_bank = build_split_isolated_train_anchor_bank(sp, oof_bank) if use_anchor_net else (None, None, None, None)
 
@@ -440,38 +553,48 @@ def run_prism_evaluation(use_anchor_net: bool = True, out_tag: str = 'prism_ra_i
             p0_6b_te, p1_6b_te, p2_6b_te, mA, mB, mC, mD, mVLM, m16_tuple, None, prefix='te'
         )
 
+        # Strictly align every PRISM tower by exact image filename onto va_names (500) and te_names (1000)
+        pq_va = align_tower_probs_by_name(pq_sp, va_names, va_p0_b, va_p1_b, va_p2_b, 'va')
+        p6_va = align_tower_probs_by_name(p6_sp, va_names, va_p0_b, va_p1_b, va_p2_b, 'va')
+        pv_va = align_tower_probs_by_name(pv_sp, va_names, va_p0_b, va_p1_b, va_p2_b, 'va')
+
+        pq_te = align_tower_probs_by_name(pq_sp, te_names, te_p0_b, te_p1_b, te_p2_b, 'te')
+        p6_te = align_tower_probs_by_name(p6_sp, te_names, te_p0_b, te_p1_b, te_p2_b, 'te')
+        pv_te = align_tower_probs_by_name(pv_sp, te_names, te_p0_b, te_p1_b, te_p2_b, 'te')
+
         split_bundles.append({
             'sp': sp,
             'va_names': va_names, 'gva': mA['gva'], 'va_p0_b': va_p0_b, 'va_p1_b': va_p1_b, 'va_p2_b': va_p2_b, 'sh_va': sh_va,
             'te_names': te_names, 'gte': mA['gte'], 'te_p0_b': te_p0_b, 'te_p1_b': te_p1_b, 'te_p2_b': te_p2_b, 'sh_te': sh_te,
             'tr_vecs': tr_vecs, 'tr_grades': tr_grades, 'anchor_bank': anchor_bank,
-            'pq_sp': pq_sp, 'p6_sp': p6_sp, 'pv_sp': pv_sp,
+            'pq_va': pq_va, 'p6_va': p6_va, 'pv_va': pv_va,
+            'pq_te': pq_te, 'p6_te': p6_te, 'pv_te': pv_te,
         })
 
-    best_w, best_alpha, P_prism = calibrate_prism_weights_and_thresholds_on_va(split_bundles, oof_bank)
+    best_w, best_bref, best_alpha, P_prism = calibrate_prism_weights_and_thresholds_on_va(split_bundles, oof_bank)
 
     t150_cal_accum = [np.zeros_like(base_t150_p0), np.zeros_like(base_t150_p1), np.zeros_like(base_t150_p2)]
     res_list = []
 
     for b in split_bundles:
         sp = b['sp']
-        va_p0, va_p1, va_p2 = apply_prism_tower_and_hazard_fusion(
+        va_p0, va_p1, va_p2 = apply_prism_aligned_fusion(
             b['va_names'], b['va_p0_b'], b['va_p1_b'], b['va_p2_b'], oof_bank,
             tr_vecs=b['tr_vecs'], tr_grades=b['tr_grades'],
-            prism_quad_npz=b['pq_sp'], prism_vit6b_npz=b['p6_sp'], prism_vlm8b_npz=b['pv_sp'],
-            tower_weights=best_w, anchor_alpha=best_alpha, prefix='va',
+            aligned_quad=b['pq_va'], aligned_vit6b=b['p6_va'], aligned_vlm8b=b['pv_va'],
+            tower_weights=best_w, blur_ref_w=best_bref, anchor_alpha=best_alpha, prefix='va',
         )
-        te_p0, te_p1, te_p2 = apply_prism_tower_and_hazard_fusion(
+        te_p0, te_p1, te_p2 = apply_prism_aligned_fusion(
             b['te_names'], b['te_p0_b'], b['te_p1_b'], b['te_p2_b'], oof_bank,
             tr_vecs=b['tr_vecs'], tr_grades=b['tr_grades'],
-            prism_quad_npz=b['pq_sp'], prism_vit6b_npz=b['p6_sp'], prism_vlm8b_npz=b['pv_sp'],
-            tower_weights=best_w, anchor_alpha=best_alpha, prefix='te',
+            aligned_quad=b['pq_te'], aligned_vit6b=b['p6_te'], aligned_vlm8b=b['pv_te'],
+            tower_weights=best_w, blur_ref_w=best_bref, anchor_alpha=best_alpha, prefix='te',
         )
-        t150_p0_sp, t150_p1_sp, t150_p2_sp = apply_prism_tower_and_hazard_fusion(
+        t150_p0_sp, t150_p1_sp, t150_p2_sp = apply_prism_aligned_fusion(
             names_150, base_t150_p0, base_t150_p1, base_t150_p2, oof_bank,
             tr_vecs=b['tr_vecs'], tr_grades=b['tr_grades'],
-            prism_quad_npz=prism_q_t, prism_vit6b_npz=prism_6b_t, prism_vlm8b_npz=prism_vlm_t,
-            tower_weights=best_w, anchor_alpha=best_alpha, prefix='t150',
+            aligned_quad=pq_t150, aligned_vit6b=p6_t150, aligned_vlm8b=pv_t150,
+            tower_weights=best_w, blur_ref_w=best_bref, anchor_alpha=best_alpha, prefix='t150',
         )
 
         # Validation-gated neural AnchorCrossAttentionComparator refinement
