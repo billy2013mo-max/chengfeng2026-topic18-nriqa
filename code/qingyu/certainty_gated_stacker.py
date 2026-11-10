@@ -4,7 +4,7 @@
 code/qingyu/certainty_gated_stacker.py
 ======================================
 Pillar 3 (Section 4.5 of Blueprint):
-Vector Temperature Scaling + Centered Log-Odds Certainty-Gated Meta-Stacker (`C = 0.1`).
+Vector Temperature Scaling + Class-Aligned Structured Centered Log-Odds Certainty-Gated Meta-Stacker (`C = 0.1`).
 
 Key Mathematical Properties:
   1. Per-Model Per-Dimension Vector Temperature Calibration (`T_{m,d}`):
@@ -12,17 +12,19 @@ Key Mathematical Properties:
      so overconfident models cannot hijack log-odds space (`ECE < 0.02`).
   2. Centered Log-Odds Transformation:
        l_tilde^{(m)}_{d,k}(x) = log p^{(m)}_{d,k}(x) - (1 / K_d) * sum_{j in A_d} log p^{(m)}_{d,j}(x)
-     Replaces `align_odds_1d` completely — zero dependence on test-batch `.mean()`!
+     Zero dependence on test-batch `.mean()` or `.std()`.
   3. Normalized Negative-Entropy Dynamic Certainty Gate:
        omega^{(m)}_d(x) = 1 + (1 / log K_d) * sum_{j in A_d} p^{(m)}_{d,j}(x) * log p^{(m)}_{d,j}(x)  in [0, 1]
      Amplifies decisive domain experts (`omega -> 1`) while muting uncertain guesses (`omega -> 0`).
-  4. Cross-Model Max Log-Odds Envelope (`max_m l_tilde^{(m)}_{d,k}(x)`):
-     Preserves sharp local detections (e.g. 1–2px MEOR halo or tiny 6-finger hand ROI)
-     that linear probability averaging would dilute below threshold.
-  5. Strong L2-Regularized Multinomial Logistic Regression (`C = 0.1`, i.e. L2 penalty `10.0`):
-     Solved via deterministic L-BFGS-B (with built-in pure-NumPy Barzilai-Borwein fallback)
-     with nested K-Fold OOF predictions, plus a dedicated calibrated Global All-Clean Probability Head `Q_clean(x_i)`.
-  6. Strict Single-Image Invariance:
+  4. Non-Negative Class-Aligned Structured Log-Odds Combination + Defect-Specific Physics Routing:
+       z_{d,k}(x) = b_{d,k}
+                  + sum_{m=1}^M [alpha_{d,m} + beta_{d,m} * omega^{(m)}_d(x)] * l_tilde^{(m)}_{d,k}(x)
+                  + gamma_d * e_max_{d,k}(x)
+                  + (c_d(x)^T U_d)_k
+     With non-negativity constraints `alpha_{d,m}, beta_{d,m}, gamma_d >= 0` (preventing collinear negative
+     weight cancellation across correlated backbones!) and sample-size-invariant Ridge regularization on `U_d`
+     using ONLY the physical operators physically matched to defect `d`.
+  5. Dedicated Calibrated Global All-Clean Head `Q_clean(x_i)` & Strict Single-Image Invariance:
      `predict_proba([single_img])` == `predict_proba(batch)[i]` up to floating-point machine epsilon!
 """
 import os
@@ -38,6 +40,21 @@ if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
 from qingyu.config_and_paths import DIMS, FULL_DIMS, P0_ONLY_DIMS
+
+# Domain-matched physical feature slices from DualEnginePhysicsExtractor (36D):
+#   0..9:   MEOR & UI stroke mask (过锐)
+#   10..18: Foreground depth-decoupled defocus sharpness S_fg (模糊)
+#   19..24: Cutout boundary discontinuity A_cutout & depth grad (虚化突兀)
+#   25..31: Foreground micro-texture & Laplacian-to-gradient ratio (纹理损失)
+#   32..35: 8x8 blockiness, chroma spike (花屏) & log aspect/area
+DIM_PHYS_INDICES: Dict[int, Tuple[int, ...]] = {
+    0: (10, 11, 12, 13, 14, 15, 16, 17, 18, 34, 35),
+    1: (25, 26, 27, 28, 29, 30, 31, 12, 35),
+    2: (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+    3: (32, 33, 31, 35),
+    4: (28, 29, 30, 31, 23, 34, 35),
+    5: (19, 20, 21, 22, 23, 24, 18),
+}
 
 
 def p012_to_6x4_simplex(p0: np.ndarray, p1: np.ndarray, p2: np.ndarray, eps: float = 1e-6) -> np.ndarray:
@@ -105,22 +122,26 @@ def compute_ece_6x4(probs_6x4: np.ndarray, gold_6d: np.ndarray, n_bins: int = 15
 def _minimize_lbfgs_or_bb(
     loss_and_grad_fn,
     x0: np.ndarray,
-    bounds: Optional[List[Tuple[float, float]]] = None,
+    bounds: Optional[List[Tuple[Optional[float], Optional[float]]]] = None,
     maxiter: int = 250,
 ) -> np.ndarray:
-    """Uses `scipy.optimize.minimize(L-BFGS-B)` when available, with pure-NumPy Barzilai-Borwein fallback."""
+    """Uses `scipy.optimize.minimize(L-BFGS-B)` when available, with pure-NumPy projected Barzilai-Borwein fallback."""
     try:
         from scipy.optimize import minimize
         res = minimize(
-            loss_and_grad_fn, x0, jac=True, method="L-BFGS-B", bounds=bounds, options={"maxiter": maxiter, "ftol": 1e-10}
+            loss_and_grad_fn,
+            x0,
+            jac=True,
+            method="L-BFGS-B",
+            bounds=bounds,
+            options={"maxiter": maxiter, "ftol": 1e-10},
         )
         return np.asarray(res.x, dtype=np.float64)
     except ImportError:
         x = x0.astype(np.float64).copy()
-        if bounds is not None:
-            lo = np.array([b[0] for b in bounds], dtype=np.float64)
-            hi = np.array([b[1] for b in bounds], dtype=np.float64)
-            x = np.clip(x, lo, hi)
+        lo = np.array([-np.inf if (bounds is None or b[0] is None) else b[0] for b in (bounds or [(-np.inf, np.inf)] * len(x0))], dtype=np.float64)
+        hi = np.array([np.inf if (bounds is None or b[1] is None) else b[1] for b in (bounds or [(-np.inf, np.inf)] * len(x0))], dtype=np.float64)
+        x = np.clip(x, lo, hi)
         f, g = loss_and_grad_fn(x)
         step = 0.25
         prev_x, prev_g = None, None
@@ -136,9 +157,7 @@ def _minimize_lbfgs_or_bb(
             prev_x, prev_g = x.copy(), g.copy()
             cur_s = step
             for _ls in range(12):
-                cand = x - cur_s * g
-                if bounds is not None:
-                    cand = np.clip(cand, lo, hi)
+                cand = np.clip(x - cur_s * g, lo, hi)
                 f_new, g_new = loss_and_grad_fn(cand)
                 if f_new <= f - 1e-4 * float(np.dot(g, x - cand)) + 1e-12:
                     x, f, g = cand, f_new, g_new
@@ -150,7 +169,7 @@ def _minimize_lbfgs_or_bb(
 
 
 class VectorTemperatureCalibrator:
-    def __init__(self, reg_temp: float = 2.0, reg_bias: float = 5.0):
+    def __init__(self, reg_temp: float = 3.0, reg_bias: float = 8.0):
         self.reg_temp = reg_temp
         self.reg_bias = reg_bias
         self.inv_temp = np.ones(6, dtype=np.float64)
@@ -194,7 +213,7 @@ class VectorTemperatureCalibrator:
 
             x0 = np.zeros(1 + K, dtype=np.float64)
             x0[0] = 1.0
-            bounds = [(0.45, 2.10)] + [(-0.80, 0.80)] * K
+            bounds: List[Tuple[Optional[float], Optional[float]]] = [(0.50, 1.85)] + [(-0.65, 0.65)] * K
             opt_x = _minimize_lbfgs_or_bb(obj_and_grad, x0, bounds=bounds, maxiter=180)
             self.inv_temp[d] = float(opt_x[0])
             b_opt = opt_x[1:] - opt_x[1:].mean()
@@ -219,52 +238,157 @@ class VectorTemperatureCalibrator:
         return out.astype(np.float32)
 
 
-def _fit_l2_multinomial_logreg(
+def _fit_structured_certainty_stacker_dim(
+    lt_nmk: np.ndarray,
+    gated_nmk: np.ndarray,
+    max_env_nk: np.ndarray,
+    ctx_nf: np.ndarray,
+    y_loc: np.ndarray,
+    C: float = 0.10,
+) -> Dict[str, np.ndarray]:
+    """
+    Fits the non-negative class-aligned structured log-odds combiner for dimension `d`:
+      logits[i, k] = b[k] + sum_m alpha[m] * lt[i,m,k] + sum_m beta[m] * gated[i,m,k]
+                     + gamma * max_env[i, k] + (ctx[i] @ U)[k]
+    Regularization is directly scaled on mean NLL (sample-size invariant, so N=400 and N=3,573
+    both enjoy strong shrinkage without collinearity overfitting!).
+    """
+    N, M, K = lt_nmk.shape
+    F_ctx = ctx_nf.shape[1]
+    inv_m = 1.0 / float(max(1, M))
+
+    # Sample-size-invariant Ridge penalties on mean NLL:
+    reg_tower = 0.015 / max(0.02, float(C))   # 0.15 when C=0.10
+    reg_env = 0.025 / max(0.02, float(C))     # 0.25 when C=0.10
+    reg_ctx = 0.035 / max(0.02, float(C))     # 0.35 when C=0.10 (strongly damps noisy context/phys features!)
+    reg_b = 0.005
+
+    # Parameter layout: [alpha (M), beta (M), gamma (1), b (K), U_flat (F_ctx * K)]
+    idx_beta = M
+    idx_gamma = 2 * M
+    idx_b = 2 * M + 1
+    idx_u = 2 * M + 1 + K
+    total_p = idx_u + F_ctx * K
+
+    def loss_and_grad(params: np.ndarray) -> Tuple[float, np.ndarray]:
+        alpha = params[:idx_beta]
+        beta = params[idx_beta:idx_gamma]
+        gamma = params[idx_gamma]
+        b = params[idx_b:idx_u]
+        b_c = b - b.mean()
+        U = params[idx_u:].reshape(F_ctx, K) if F_ctx > 0 else np.zeros((0, K), dtype=np.float64)
+        if F_ctx > 0:
+            U_c = U - U.mean(axis=1, keepdims=True)
+        else:
+            U_c = U
+
+        # [N, K]
+        logits = (
+            np.einsum("nmk,m->nk", lt_nmk, alpha)
+            + np.einsum("nmk,m->nk", gated_nmk, beta)
+            + gamma * max_env_nk
+            + b_c[None, :]
+        )
+        if F_ctx > 0:
+            logits = logits + ctx_nf @ U_c
+
+        logits -= logits.max(axis=1, keepdims=True)
+        exp_l = np.exp(logits)
+        probs = exp_l / exp_l.sum(axis=1, keepdims=True)
+
+        p_true = np.clip(probs[np.arange(N), y_loc], 1e-12, 1.0)
+        nll = -float(np.mean(np.log(p_true)))
+
+        d_alpha = alpha - inv_m
+        reg = (
+            0.5 * reg_tower * float(np.sum(d_alpha ** 2) + np.sum(beta ** 2))
+            + 0.5 * reg_env * float(gamma * gamma)
+            + 0.5 * reg_b * float(np.sum(b_c ** 2))
+            + (0.5 * reg_ctx * float(np.sum(U_c ** 2)) if F_ctx > 0 else 0.0)
+        )
+
+        diff = probs.copy()
+        diff[np.arange(N), y_loc] -= 1.0
+        diff /= float(N)
+
+        g_alpha = np.einsum("nmk,nk->m", lt_nmk, diff) + reg_tower * d_alpha
+        g_beta = np.einsum("nmk,nk->m", gated_nmk, diff) + reg_tower * beta
+        g_gamma = np.array([float(np.sum(max_env_nk * diff)) + reg_env * gamma], dtype=np.float64)
+        g_b = diff.sum(axis=0) + reg_b * b_c
+        g_b -= g_b.mean()
+
+        if F_ctx > 0:
+            g_U = ctx_nf.T @ diff + reg_ctx * U_c
+            g_U -= g_U.mean(axis=1, keepdims=True)
+            grad = np.concatenate([g_alpha, g_beta, g_gamma, g_b, g_U.ravel()])
+        else:
+            grad = np.concatenate([g_alpha, g_beta, g_gamma, g_b])
+        return float(nll + reg), grad
+
+    x0 = np.zeros(total_p, dtype=np.float64)
+    x0[:M] = inv_m  # Starts at calibrated equal-weight geometric pool!
+    bounds: List[Tuple[Optional[float], Optional[float]]] = (
+        [(0.0, 2.0)] * M          # alpha_m >= 0 (no negative cancellation!)
+        + [(0.0, 2.0)] * M        # beta_m >= 0  (certainty gate boost >= 0!)
+        + [(0.0, 0.55)]           # gamma >= 0   (max envelope weight)
+        + [(-1.5, 1.5)] * K       # class bias
+        + [(-0.8, 0.8)] * (F_ctx * K)
+    )
+    opt_p = _minimize_lbfgs_or_bb(loss_and_grad, x0, bounds=bounds, maxiter=240)
+    U_opt = opt_p[idx_u:].reshape(F_ctx, K) if F_ctx > 0 else np.zeros((0, K), dtype=np.float64)
+    if F_ctx > 0:
+        U_opt = U_opt - U_opt.mean(axis=1, keepdims=True)
+    b_opt = opt_p[idx_b:idx_u] - opt_p[idx_b:idx_u].mean()
+    return {
+        "alpha": opt_p[:idx_beta].copy(),
+        "beta": opt_p[idx_beta:idx_gamma].copy(),
+        "gamma": float(opt_p[idx_gamma]),
+        "b": b_opt,
+        "U": U_opt,
+    }
+
+
+def _fit_sample_invariant_binary_logreg(
     X: np.ndarray,
     y: np.ndarray,
-    num_classes: int,
-    C: float = 0.1,
-    sample_weight: Optional[np.ndarray] = None,
+    C: float = 0.15,
 ) -> Tuple[np.ndarray, np.ndarray]:
     X64 = np.asarray(X, dtype=np.float64)
     y64 = np.asarray(y, dtype=np.int64)
     N, F_dim = X64.shape
-    K = int(num_classes)
-    sw = np.ones(N, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
-    sw_sum = max(1e-8, float(sw.sum()))
-    lam = 1.0 / max(1e-6, float(C))
+    reg_w = 0.02 / max(0.02, float(C))
 
-    def loss_and_grad(params):
-        W = params[: F_dim * K].reshape(F_dim, K)
-        b = params[F_dim * K :]
+    def loss_and_grad(params: np.ndarray) -> Tuple[float, np.ndarray]:
+        W = params[: F_dim * 2].reshape(F_dim, 2)
+        W_c = W - W.mean(axis=1, keepdims=True)
+        b = params[F_dim * 2 :]
         b_c = b - b.mean()
-        logits = X64 @ W + b_c[None, :]
+        logits = X64 @ W_c + b_c[None, :]
         logits -= logits.max(axis=1, keepdims=True)
         exp_l = np.exp(logits)
         probs = exp_l / exp_l.sum(axis=1, keepdims=True)
 
         p_true = np.clip(probs[np.arange(N), y64], 1e-12, 1.0)
-        nll = -np.sum(sw * np.log(p_true)) / sw_sum
-        reg = 0.5 * (lam / sw_sum) * np.sum(W * W)
+        nll = -float(np.mean(np.log(p_true)))
+        reg = 0.5 * reg_w * float(np.sum(W_c ** 2))
 
         diff = probs.copy()
         diff[np.arange(N), y64] -= 1.0
-        diff *= (sw / sw_sum)[:, None]
-
-        gW = X64.T @ diff + (lam / sw_sum) * W
+        diff /= float(N)
+        gW = X64.T @ diff + reg_w * W_c
+        gW -= gW.mean(axis=1, keepdims=True)
         gb = diff.sum(axis=0)
         gb -= gb.mean()
         return float(nll + reg), np.concatenate([gW.ravel(), gb])
 
-    init = np.zeros(F_dim * K + K, dtype=np.float64)
-    counts = np.bincount(y64, minlength=K).astype(np.float64) + 0.5
-    log_prior = np.log(counts / counts.sum())
-    log_prior -= log_prior.mean()
-    init[F_dim * K :] = log_prior
-
-    opt_x = _minimize_lbfgs_or_bb(loss_and_grad, init, bounds=None, maxiter=250)
-    W_opt = opt_x[: F_dim * K].reshape(F_dim, K)
-    b_opt = opt_x[F_dim * K :] - opt_x[F_dim * K :].mean()
+    init = np.zeros(F_dim * 2 + 2, dtype=np.float64)
+    counts = np.bincount(y64, minlength=2).astype(np.float64) + 0.5
+    lp = np.log(counts / counts.sum())
+    init[F_dim * 2 :] = lp - lp.mean()
+    opt = _minimize_lbfgs_or_bb(loss_and_grad, init, bounds=None, maxiter=200)
+    W_opt = opt[: F_dim * 2].reshape(F_dim, 2)
+    W_opt -= W_opt.mean(axis=1, keepdims=True)
+    b_opt = opt[F_dim * 2 :] - opt[F_dim * 2 :].mean()
     return W_opt, b_opt
 
 
@@ -277,15 +401,14 @@ class CenteredLogOddsCertaintyGatedStacker:
         self.base_calibrators: List[VectorTemperatureCalibrator] = []
         self.phys_mean: Optional[np.ndarray] = None
         self.phys_std: Optional[np.ndarray] = None
-        self.feat_means: Dict[int, np.ndarray] = {}
-        self.feat_stds: Dict[int, np.ndarray] = {}
-        self.W_dim: Dict[int, np.ndarray] = {}
-        self.b_dim: Dict[int, np.ndarray] = {}
+        self.ctx_means: Dict[int, np.ndarray] = {}
+        self.ctx_stds: Dict[int, np.ndarray] = {}
+        self.dim_params: Dict[int, Dict[str, np.ndarray]] = {}
         self.clean_feat_mean: Optional[np.ndarray] = None
         self.clean_feat_std: Optional[np.ndarray] = None
         self.W_clean: Optional[np.ndarray] = None
         self.b_clean: Optional[np.ndarray] = None
-        self.post_calibrator = VectorTemperatureCalibrator(reg_temp=1.5, reg_bias=4.0)
+        self.post_calibrator = VectorTemperatureCalibrator(reg_temp=3.0, reg_bias=8.0)
 
     @staticmethod
     def _active_indices(d: int) -> List[int]:
@@ -309,33 +432,31 @@ class CenteredLogOddsCertaintyGatedStacker:
             w_list.append(omega)
         return np.stack(l_list, axis=1), np.stack(w_list, axis=1)
 
-    def _build_dim_features(
+    def _build_dim_components(
         self,
         cal_models_6x4: Sequence[np.ndarray],
         d: int,
         phys_norm: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        lt, om = self._centered_log_odds_and_certainty(cal_models_6x4, d)
-        N, M, K_d = lt.shape
-
-        gated = (om * lt).reshape(N, M * K_d)
-        raw_lt = lt.reshape(N, M * K_d)
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        lt, om = self._centered_log_odds_and_certainty(cal_models_6x4, d)  # [N, M, K_d], [N, M, 1]
+        gated = om * lt
         max_env = lt.max(axis=1)
-        om_sum = np.maximum(1e-5, om.sum(axis=1))
-        cert_mean = (om * lt).sum(axis=1) / om_sum
+        max_env = max_env - max_env.mean(axis=-1, keepdims=True)
 
-        ctx_list = []
+        # Compact 6D cross-defect co-occurrence context (mean log-odds of any defect across the 6 dims)
+        ctx_cols = []
         for d_other in range(6):
-            p0_m = np.stack([np.clip(pm[:, d_other, 3], 1e-5, 1.0 - 1e-5) for pm in cal_models_6x4], axis=1)
             pc_m = np.stack([np.clip(pm[:, d_other, 0], 1e-5, 1.0 - 1e-5) for pm in cal_models_6x4], axis=1)
-            ctx_list.append(np.log(p0_m / (1.0 - p0_m)).mean(axis=1))
-            ctx_list.append(np.log((1.0 - pc_m) / pc_m).mean(axis=1))
-        ctx_mat = np.stack(ctx_list, axis=1)
+            ctx_cols.append(np.log((1.0 - pc_m) / pc_m).mean(axis=1))
+        ctx_parts = [np.stack(ctx_cols, axis=1)]
 
-        parts = [gated, raw_lt, max_env, cert_mean, ctx_mat]
-        if phys_norm is not None:
-            parts.append(phys_norm)
-        return np.concatenate(parts, axis=1).astype(np.float64)
+        if phys_norm is not None and phys_norm.shape[1] > 0:
+            valid_idx = [ix for ix in DIM_PHYS_INDICES.get(d, ()) if ix < phys_norm.shape[1]]
+            if valid_idx:
+                ctx_parts.append(phys_norm[:, valid_idx])
+
+        ctx_raw = np.concatenate(ctx_parts, axis=1).astype(np.float64)
+        return lt, gated, max_env, ctx_raw
 
     def _build_global_clean_features(
         self,
@@ -358,11 +479,15 @@ class CenteredLogOddsCertaintyGatedStacker:
             pmc = np.clip(pm[:, :, 0], 1e-6, 1.0 - 1e-6)
             per_model_joint.append(np.sum(np.log(pmc), axis=1))
         pm_mat = np.stack(per_model_joint, axis=1)
+        pm_mean = pm_mat.mean(axis=1, keepdims=True)
         pm_min = pm_mat.min(axis=1, keepdims=True)
 
-        parts = [log_joint_clean, min_clean_d, max_p0_logit, per_dim_clean_logits, pm_mat, pm_min]
-        if phys_norm is not None:
-            parts.append(phys_norm[:, : min(12, phys_norm.shape[1])])
+        parts = [log_joint_clean, min_clean_d, max_p0_logit, per_dim_clean_logits, pm_mean, pm_min]
+        if phys_norm is not None and phys_norm.shape[1] >= 4:
+            # Summary physical cleanliness indicators only (MEOR_p99, S_fg_p90, A_cutout_p99, blockiness)
+            key_ix = [ix for ix in (3, 13, 21, 32) if ix < phys_norm.shape[1]]
+            if key_ix:
+                parts.append(phys_norm[:, key_ix])
         return np.concatenate(parts, axis=1).astype(np.float64)
 
     def _standardize_phys(self, phys: Optional[np.ndarray], fit: bool = False) -> Optional[np.ndarray]:
@@ -375,6 +500,24 @@ class CenteredLogOddsCertaintyGatedStacker:
         if self.phys_mean is None or self.phys_std is None:
             return np.clip(P, -5.0, 5.0)
         return np.clip((P - self.phys_mean) / self.phys_std, -5.0, 5.0)
+
+    @staticmethod
+    def _eval_dim_logits(
+        lt_nmk: np.ndarray,
+        gated_nmk: np.ndarray,
+        max_env_nk: np.ndarray,
+        ctx_norm: np.ndarray,
+        dp: Dict[str, np.ndarray],
+    ) -> np.ndarray:
+        logits = (
+            np.einsum("nmk,m->nk", lt_nmk, dp["alpha"])
+            + np.einsum("nmk,m->nk", gated_nmk, dp["beta"])
+            + float(dp["gamma"]) * max_env_nk
+            + dp["b"][None, :]
+        )
+        if ctx_norm.shape[1] > 0 and dp["U"].shape[0] == ctx_norm.shape[1]:
+            logits = logits + ctx_norm @ dp["U"]
+        return logits
 
     def fit(
         self,
@@ -399,19 +542,18 @@ class CenteredLogOddsCertaintyGatedStacker:
         raw_stacked = np.zeros((len(gold_6d), 6, 4), dtype=np.float32)
         for d in range(6):
             act = self._active_indices(d)
-            X_d = self._build_dim_features(cal_models, d, phys_norm)
-            mu = X_d.mean(axis=0, keepdims=True)
-            sd = X_d.std(axis=0, keepdims=True) + 1e-5
-            self.feat_means[d] = mu
-            self.feat_stds[d] = sd
-            X_dn = np.clip((X_d - mu) / sd, -6.0, 6.0)
+            lt, gated, max_env, ctx_raw = self._build_dim_components(cal_models, d, phys_norm)
+            mu = ctx_raw.mean(axis=0, keepdims=True)
+            sd = ctx_raw.std(axis=0, keepdims=True) + 1e-5
+            self.ctx_means[d] = mu
+            self.ctx_stds[d] = sd
+            ctx_n = np.clip((ctx_raw - mu) / sd, -5.0, 5.0)
 
             y_loc = np.array([act.index(3 if (d in P0_ONLY_DIMS and v > 0) else int(v)) for v in gold_6d[:, d]], dtype=np.int64)
-            W_d, b_d = _fit_l2_multinomial_logreg(X_dn, y_loc, num_classes=len(act), C=self.C)
-            self.W_dim[d] = W_d
-            self.b_dim[d] = b_d
+            dp = _fit_structured_certainty_stacker_dim(lt, gated, max_env, ctx_n, y_loc, C=self.C)
+            self.dim_params[d] = dp
 
-            logits = X_dn @ W_d + b_d[None, :]
+            logits = self._eval_dim_logits(lt, gated, max_env, ctx_n, dp)
             logits -= logits.max(axis=1, keepdims=True)
             sm = np.exp(logits)
             sm /= sm.sum(axis=1, keepdims=True)
@@ -425,8 +567,8 @@ class CenteredLogOddsCertaintyGatedStacker:
         Xc = self._build_global_clean_features(cal_models, cal_stacked, phys_norm)
         self.clean_feat_mean = Xc.mean(axis=0, keepdims=True)
         self.clean_feat_std = Xc.std(axis=0, keepdims=True) + 1e-5
-        Xcn = np.clip((Xc - self.clean_feat_mean) / self.clean_feat_std, -6.0, 6.0)
-        self.W_clean, self.b_clean = _fit_l2_multinomial_logreg(Xcn, y_clean, num_classes=2, C=self.clean_C)
+        Xcn = np.clip((Xc - self.clean_feat_mean) / self.clean_feat_std, -5.0, 5.0)
+        self.W_clean, self.b_clean = _fit_sample_invariant_binary_logreg(Xcn, y_clean, C=self.clean_C)
         return self
 
     def predict_proba(
@@ -442,9 +584,9 @@ class CenteredLogOddsCertaintyGatedStacker:
         raw_stacked = np.zeros((N, 6, 4), dtype=np.float32)
         for d in range(6):
             act = self._active_indices(d)
-            X_d = self._build_dim_features(cal_models, d, phys_norm)
-            X_dn = np.clip((X_d - self.feat_means[d]) / self.feat_stds[d], -6.0, 6.0)
-            logits = X_dn @ self.W_dim[d] + self.b_dim[d][None, :]
+            lt, gated, max_env, ctx_raw = self._build_dim_components(cal_models, d, phys_norm)
+            ctx_n = np.clip((ctx_raw - self.ctx_means[d]) / self.ctx_stds[d], -5.0, 5.0)
+            logits = self._eval_dim_logits(lt, gated, max_env, ctx_n, self.dim_params[d])
             logits -= logits.max(axis=1, keepdims=True)
             sm = np.exp(logits)
             sm /= sm.sum(axis=1, keepdims=True)
@@ -453,7 +595,7 @@ class CenteredLogOddsCertaintyGatedStacker:
 
         cal_stacked = self.post_calibrator.transform(raw_stacked)
         Xc = self._build_global_clean_features(cal_models, cal_stacked, phys_norm)
-        Xcn = np.clip((Xc - self.clean_feat_mean) / self.clean_feat_std, -6.0, 6.0)
+        Xcn = np.clip((Xc - self.clean_feat_mean) / self.clean_feat_std, -5.0, 5.0)
         c_logits = Xcn @ self.W_clean + self.b_clean[None, :]
         c_logits -= c_logits.max(axis=1, keepdims=True)
         c_sm = np.exp(c_logits)
