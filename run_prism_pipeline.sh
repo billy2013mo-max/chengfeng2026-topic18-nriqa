@@ -6,11 +6,13 @@
 #   1) Fast Reference-Anchored Hazard Calibration & Evaluation (~15s):
 #        bash run_prism_pipeline.sh --eval-only
 #
-#   2) Full End-to-End PRISM Pipeline with Smart Resume (skips already-completed
-#      towers in results/prism/*_probs.npz and trains any missing/failed towers):
+#   2) Fast 8-GPU Seam-Free PRISM-VLM8B v2 Upgrade (~4-5 mins on 8xH200) + Eval:
+#        bash run_prism_pipeline.sh --retrain-vlm
+#
+#   3) Full End-to-End PRISM Pipeline with Smart Resume:
 #        bash run_prism_pipeline.sh --full
 #
-#   3) Force Clean Retraining of All 6 Towers from Scratch:
+#   4) Force Clean Retraining of All 6 Towers from Scratch:
 #        bash run_prism_pipeline.sh --force-retrain
 # ==============================================================================
 set -euo pipefail
@@ -35,36 +37,16 @@ mkdir -p "${REPO_ROOT}/results/prism" "${REPO_ROOT}/results/final" "${REPO_ROOT}
 
 if [ "${MODE}" = "--eval-only" ]; then
     echo "======================================================================"
-    echo " [PRISM Fast Mode] Reference-Anchored Conditional Hazard Calibration"
+    echo " [PRISM v2 Fast Mode] Reference-Anchored + QualiRAG Hazard Calibration"
     echo "======================================================================"
-    python3 -u code/prism/evaluate_prism.py --out-tag prism_ra_iqa
+    python3 -u code/prism/evaluate_prism.py --out-tag prism_v2_55plus
     echo "======================================================================"
     echo " [PRISM Complete] Exported submission to:"
     echo "   - ${REPO_ROOT}/pred_nriqa_dataset_test.json"
-    echo "   - ${REPO_ROOT}/results/final/pred_nriqa_dataset_test_prism_ra_iqa.json"
+    echo "   - ${REPO_ROOT}/results/final/pred_nriqa_dataset_test_prism_v2_55plus.json"
     echo "======================================================================"
     exit 0
 fi
-
-echo "======================================================================"
-echo " [Stage 1/3] Generating Split-Isolated Real-Defect Poisson Quadruplets"
-echo "======================================================================"
-if [ "${FORCE_RETRAIN}" -eq 1 ] || [ ! -s "data/v17_splits/split_s16_prism.csv" ] || [ ! -s "data/v17_splits/manifest_s16_prism.csv" ]; then
-    python3 -u code/prism/real_defect_synthesizer.py --split data/resplits/split_s16.csv --max-quads 60
-else
-    echo " [Skip] data/v17_splits/split_s16_prism.csv already prepared."
-fi
-
-if [ "${FORCE_RETRAIN}" -eq 1 ] || [ ! -s "data/v17_splits/split_s17_prism.csv" ] || [ ! -s "data/v17_splits/manifest_s17_prism.csv" ]; then
-    python3 -u code/prism/real_defect_synthesizer.py --split data/resplits/split_s17.csv --max-quads 60
-else
-    echo " [Skip] data/v17_splits/split_s17_prism.csv already prepared."
-fi
-
-NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l || echo 4)
-echo "======================================================================"
-echo " [Stage 2/3] Launching PRISM Three Full-Spectrum Towers (Detected ${NUM_GPUS} GPUs)"
-echo "======================================================================"
 
 declare -a JOB_NAMES=()
 declare -a JOB_PIDS=()
@@ -115,7 +97,7 @@ wait_and_verify_jobs() {
             break
         fi
         echo " [$(date +%H:%M:%S)] Active=${alive}/${n_jobs}${status_line}"
-        sleep 25
+        sleep 20
     done
 
     local any_failed=0
@@ -144,6 +126,58 @@ wait_and_verify_jobs() {
     fi
 }
 
+NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l || echo 4)
+
+if [ "${MODE}" = "--retrain-vlm" ]; then
+    echo "======================================================================"
+    echo " [PRISM-VLM8B v2 Upgrade] Seam-Free 1024px 3-Layer Pyramid + Q-Align"
+    echo "======================================================================"
+    rm -f results/prism/prism_vlm8b_s16_probs.npz results/prism/prism_vlm8b_s17_probs.npz
+    if [ "${NUM_GPUS}" -ge 8 ]; then
+        launch_job_if_needed "prism_vlm8b_s16" env CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29518 code/prism/train_prism_vlm8b.py \
+            --split data/resplits/split_s16.csv --epochs 3 --batch 4 --max-pixels 1048576 \
+            --out results/prism/prism_vlm8b_s16.json
+
+        launch_job_if_needed "prism_vlm8b_s17" env CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 --master_port=29519 code/prism/train_prism_vlm8b.py \
+            --split data/resplits/split_s17.csv --epochs 3 --batch 4 --max-pixels 1048576 \
+            --out results/prism/prism_vlm8b_s17.json
+
+        wait_and_verify_jobs
+    else
+        torchrun --nproc_per_node="${NUM_GPUS}" --master_port=29518 code/prism/train_prism_vlm8b.py \
+            --split data/resplits/split_s16.csv --epochs 3 --batch 4 --max-pixels 1048576 \
+            --out results/prism/prism_vlm8b_s16.json
+        torchrun --nproc_per_node="${NUM_GPUS}" --master_port=29519 code/prism/train_prism_vlm8b.py \
+            --split data/resplits/split_s17.csv --epochs 3 --batch 4 --max-pixels 1048576 \
+            --out results/prism/prism_vlm8b_s17.json
+    fi
+
+    echo "======================================================================"
+    echo " [PRISM v2 Evaluation] Running Full 3-Tower + QualiRAG Calibration"
+    echo "======================================================================"
+    python3 -u code/prism/evaluate_prism.py --out-tag prism_v2_55plus
+    exit 0
+fi
+
+echo "======================================================================"
+echo " [Stage 1/3] Generating Split-Isolated Real-Defect Poisson Quadruplets"
+echo "======================================================================"
+if [ "${FORCE_RETRAIN}" -eq 1 ] || [ ! -s "data/v17_splits/split_s16_prism.csv" ] || [ ! -s "data/v17_splits/manifest_s16_prism.csv" ]; then
+    python3 -u code/prism/real_defect_synthesizer.py --split data/resplits/split_s16.csv --max-quads 60
+else
+    echo " [Skip] data/v17_splits/split_s16_prism.csv already prepared."
+fi
+
+if [ "${FORCE_RETRAIN}" -eq 1 ] || [ ! -s "data/v17_splits/split_s17_prism.csv" ] || [ ! -s "data/v17_splits/manifest_s17_prism.csv" ]; then
+    python3 -u code/prism/real_defect_synthesizer.py --split data/resplits/split_s17.csv --max-quads 60
+else
+    echo " [Skip] data/v17_splits/split_s17_prism.csv already prepared."
+fi
+
+echo "======================================================================"
+echo " [Stage 2/3] Launching PRISM Three Full-Spectrum Towers (Detected ${NUM_GPUS} GPUs)"
+echo "======================================================================"
+
 if [ "${NUM_GPUS}" -ge 8 ]; then
     launch_job_if_needed "prism_quad_s16" env CUDA_VISIBLE_DEVICES=0 python3 -u code/prism/train_prism_quad.py \
         --split data/v17_splits/split_s16_prism.csv \
@@ -171,12 +205,12 @@ if [ "${NUM_GPUS}" -ge 8 ]; then
 
     launch_job_if_needed "prism_vlm8b_s16" env CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node=2 --master_port=29518 code/prism/train_prism_vlm8b.py \
         --split data/resplits/split_s16.csv \
-        --epochs 3 --batch 8 \
+        --epochs 3 --batch 6 --max-pixels 1048576 \
         --out results/prism/prism_vlm8b_s16.json
 
     launch_job_if_needed "prism_vlm8b_s17" env CUDA_VISIBLE_DEVICES=6,7 torchrun --nproc_per_node=2 --master_port=29519 code/prism/train_prism_vlm8b.py \
         --split data/resplits/split_s17.csv \
-        --epochs 3 --batch 8 \
+        --epochs 3 --batch 6 --max-pixels 1048576 \
         --out results/prism/prism_vlm8b_s17.json
 
     wait_and_verify_jobs
@@ -184,13 +218,13 @@ else
     launch_job_if_needed "prism_quad_s16" env CUDA_VISIBLE_DEVICES=0 python3 -u code/prism/train_prism_quad.py \
         --split data/v17_splits/split_s16_prism.csv \
         --manifest data/v17_splits/manifest_s16_prism.csv \
-        --epochs-s1 3 --epochs-s2 2 \
+        --epochs-s1 3 --epochs-s2 2 --batch 4 --grad-accum 4 \
         --out results/prism/prism_quad_s16.json
 
     launch_job_if_needed "prism_quad_s17" env CUDA_VISIBLE_DEVICES=1 python3 -u code/prism/train_prism_quad.py \
         --split data/v17_splits/split_s17_prism.csv \
         --manifest data/v17_splits/manifest_s17_prism.csv \
-        --epochs-s1 3 --epochs-s2 2 \
+        --epochs-s1 3 --epochs-s2 2 --batch 4 --grad-accum 4 \
         --out results/prism/prism_quad_s17.json
 
     launch_job_if_needed "prism_vit6b_s16" env CUDA_VISIBLE_DEVICES=2 python3 -u code/prism/train_prism_vit6b.py \
@@ -205,26 +239,22 @@ else
 
     wait_and_verify_jobs
 
-    JOB_NAMES=()
-    JOB_PIDS=()
-    JOB_NPZS=()
-    JOB_LOGS=()
     if [ "${FORCE_RETRAIN}" -eq 1 ] || [ ! -s "results/prism/prism_vlm8b_s16_probs.npz" ]; then
         torchrun --nproc_per_node=4 --master_port=29518 code/prism/train_prism_vlm8b.py \
-            --split data/resplits/split_s16.csv --epochs 3 --batch 6 --out results/prism/prism_vlm8b_s16.json
+            --split data/resplits/split_s16.csv --epochs 3 --batch 4 --max-pixels 1048576 --out results/prism/prism_vlm8b_s16.json
     fi
     if [ "${FORCE_RETRAIN}" -eq 1 ] || [ ! -s "results/prism/prism_vlm8b_s17_probs.npz" ]; then
         torchrun --nproc_per_node=4 --master_port=29519 code/prism/train_prism_vlm8b.py \
-            --split data/resplits/split_s17.csv --epochs 3 --batch 6 --out results/prism/prism_vlm8b_s17.json
+            --split data/resplits/split_s17.csv --epochs 3 --batch 4 --max-pixels 1048576 --out results/prism/prism_vlm8b_s17.json
     fi
 fi
 
 echo "======================================================================"
-echo " [Stage 3/3] Running PRISM Reference-Anchored Multi-Tower Evaluation"
+echo " [Stage 3/3] Running PRISM v2 Reference-Anchored Multi-Tower Evaluation"
 echo "======================================================================"
-python3 -u code/prism/evaluate_prism.py --out-tag prism_full_55plus
+python3 -u code/prism/evaluate_prism.py --out-tag prism_v2_55plus
 echo "======================================================================"
 echo " [PRISM Full Pipeline Complete] Final submission exported to:"
 echo "   - ${REPO_ROOT}/pred_nriqa_dataset_test.json"
-echo "   - ${REPO_ROOT}/results/final/pred_nriqa_dataset_test_prism_full_55plus.json"
+echo "   - ${REPO_ROOT}/results/final/pred_nriqa_dataset_test_prism_v2_55plus.json"
 echo "======================================================================"
