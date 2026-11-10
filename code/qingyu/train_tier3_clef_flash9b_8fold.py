@@ -888,7 +888,7 @@ def train_single_fold(args: argparse.Namespace) -> str:
                 collate_fn,
                 device,
                 args.global_max_pixels,
-                batch_size=args.batch_size * 2,
+                batch_size=args.batch_size,
                 workers=args.workers,
             )
             if ep >= max(0, args.epochs - 2)
@@ -903,7 +903,7 @@ def train_single_fold(args: argparse.Namespace) -> str:
             collate_fn,
             device,
             args.global_max_pixels,
-            batch_size=args.batch_size * 2,
+            batch_size=args.batch_size,
             workers=args.workers,
         )
         qdec = DampedFrankWolfeBayesianDecoder(dfw_steps=20, eta_doc1=0.50, max_clean_p0_fpr=0.008).fit(vp, vqc, gv)
@@ -935,10 +935,10 @@ def train_single_fold(args: argparse.Namespace) -> str:
         }
         model.load_state_dict(swa_sd, strict=False)
         populate_clef_prototypes(
-            model, tr_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size * 2, args.workers
+            model, tr_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size, args.workers
         )
         vp_s, vqc_s, gv_s, _ = predict_clef_2x_tta(
-            model, va_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size * 2, args.workers
+            model, va_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size, args.workers
         )
         qdec_s = DampedFrankWolfeBayesianDecoder(dfw_steps=20, eta_doc1=0.50, max_clean_p0_fpr=0.008).fit(vp_s, vqc_s, gv_s)
         ev_s = evaluate_qingyu_dual_metrics(qdec_s.decode(vp_s, vqc_s), gv_s)
@@ -951,21 +951,21 @@ def train_single_fold(args: argparse.Namespace) -> str:
     if best_sd is not None:
         model.load_state_dict(best_sd, strict=False)
         populate_clef_prototypes(
-            model, tr_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size * 2, args.workers
+            model, tr_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size, args.workers
         )
         final_payload = {"state_dict": model.trainable_state_dict(), "best_val_score": float(best_obj)}
         torch.save(final_payload, ckpt_best)
         shutil.copy2(ckpt_best, str(ckpt_dir / f"fold_{args.fold}_best.pt"))
 
     va_probs, va_qclean, gva, va_names = predict_clef_2x_tta(
-        model, va_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size * 2, args.workers
+        model, va_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size, args.workers
     )
     va_p0, va_p1, va_p2 = simplex_6x4_to_p012(va_probs)
 
     ordered_150 = load_test_template_names("results/v2_full/template_150.json")
     t150_rows = [{"name": nm, "group_id": nm, "grades": [0] * 6} for nm in ordered_150]
     t150_probs, t150_qclean, _, _ = predict_clef_2x_tta(
-        model, t150_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size * 2, args.workers
+        model, t150_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size, args.workers
     )
     t150_p0, t150_p1, t150_p2 = simplex_6x4_to_p012(t150_probs)
 
@@ -990,7 +990,7 @@ def train_single_fold(args: argparse.Namespace) -> str:
         ext_names = load_test_template_names(args.extra_test_template)
         ext_rows = [{"name": nm, "group_id": nm, "grades": [0] * 6} for nm in ext_names]
         ext_probs, ext_qclean, _, _ = predict_clef_2x_tta(
-            model, ext_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size * 2, args.workers
+            model, ext_rows, img_loader, meta_store, collate_fn, device, args.global_max_pixels, args.batch_size, args.workers
         )
         save_dict["extra_probs_6x4"] = ext_probs
         save_dict["extra_qclean"] = ext_qclean

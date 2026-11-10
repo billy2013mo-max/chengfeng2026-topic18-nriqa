@@ -20,7 +20,7 @@ Pillar 2 (Section 3.5) & Pillar 5 (25.28B Pool) Vision Backbone Builders:
          SAM + DINO + CLIP/SigLIP teacher representations) + 3 key 1:1 `448x448` crops.
   - Tier-2 Visual Foundation Bridge (`6.08B`):
       6. `internvit_6b` (`InternViT-6B-448px-V2.5`): Global `448x448` + 4 deterministic 1:1 `448x448` physics crops,
-         3-Layer Pyramid Tap (layers 32/40/48) + `TokenGatedABMILPool` + LoRA (`r=32`) / last-k unfreezing.
+         3-Layer Pyramid Tap (layers 32/40/48) + `TokenGatedABMILPool` + LoRA (`r=32`) + Gradient Checkpointing.
 """
 import os
 import sys
@@ -433,7 +433,6 @@ class QingyuVisionQualityTower(nn.Module):
                 from peft import LoraConfig, get_peft_model
                 for p in m.parameters():
                     p.requires_grad = False
-                # Dynamically intersect existing Linear leaf names so PEFT never raises ValueError on absent names!
                 allowed = {"qkv", "proj", "fc1", "fc2", "q_proj", "k_proj", "v_proj", "out_proj"}
                 present = sorted({
                     mn.split(".")[-1]
@@ -454,7 +453,15 @@ class QingyuVisionQualityTower(nn.Module):
                 self._unfreeze_top_blocks(m, blocks, max(unfreeze_last_k, 6))
 
             raw_m = m.base_model.model if hasattr(m, "base_model") else m
-            raw_m.encoder.gradient_checkpointing = False
+            # Enable gradient checkpointing + input-grad hook on frozen patch embeddings:
+            # Slashes 48-layer 6B activation VRAM from ~125 GB to ~18 GB while preserving 100% LoRA grads!
+            raw_m.encoder.gradient_checkpointing = True
+            def _enable_frozen_emb_grad(_mod, _inp, out):
+                if torch.is_grad_enabled() and isinstance(out, torch.Tensor) and not out.requires_grad:
+                    return out.requires_grad_(True)
+                return out
+            raw_m.embeddings.register_forward_hook(_enable_frozen_emb_grad)
+
             m.dual_tap = DualLayerTapWrapper(raw_m.encoder.layers, 3200).float()
             m.abmil = TokenGatedABMILPool(3200).float()
             _cur_grid = [int(getattr(cfg, "image_size", 448))]
@@ -524,7 +531,12 @@ class QingyuVisionQualityTower(nn.Module):
             assert views_01 is not None, "views_01 must be provided for multi_crop_448 mode"
             B, V, C, H, W = views_01.shape
             flat = self._norm_img(views_01.reshape(B * V, C, H, W))
-            v_stack = self._encode_single_view(flat).view(B, V, -1)
+            chunk_sz = 10 if self.backbone_key == "internvit_6b" else 64
+            if flat.shape[0] > chunk_sz:
+                chunks = [self._encode_single_view(flat[s : s + chunk_sz]) for s in range(0, flat.shape[0], chunk_sz)]
+                v_stack = torch.cat(chunks, dim=0).view(B, V, -1)
+            else:
+                v_stack = self._encode_single_view(flat).view(B, V, -1)
 
         amp_dev = "cuda" if v_stack.is_cuda else "cpu"
         with torch.autocast(device_type=amp_dev, enabled=False):

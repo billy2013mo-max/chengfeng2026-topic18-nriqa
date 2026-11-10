@@ -4,20 +4,13 @@
 code/qingyu/train_tier2_internvit6b_8fold.py
 ============================================
 Stage 2B (Sections 3.5, 5.1, 5.2, 7.2 of Blueprint):
-Pure-Real 8-Fold Parallel Trainer for Tier-2 `InternViT-6B-448px-V2.5` (`6.08B`):
-  - Input: Global `448x448` + 4 deterministic 1:1 `448x448` physics crops (`focus_fg`, `meor_non_ui`,
-    `cutout_boundary`, `fg_micro_tex`) + 36D single-image physical feature vector.
-  - Architecture: 3-Layer Shallow/Mid/Deep Pyramid Tap (67% / 83% / 100% depth) + `TokenGatedABMILPool`
-    + LoRA (`r=32`) + FP32 `UnimodalQuadraticResidualHead` + `TipAdapterPrototypeBank(128)` + `XBM(512)`.
-  - Execution:
-      * 1-Fold-per-H200 (`--fold 0 --gpu 0` ... `--fold 7 --gpu 7` in parallel across 8xH200 GPUs — each H200
-        has 141GB VRAM while BF16 LoRA InternViT-6B takes only ~22GB, finishing all 8 folds in ~25 minutes!),
-      * AND `--aggregate-8fold` to merge all 8 folds into `results/qingyu/tier2_internvit_6b_8fold_oof.npz`.
+Pure-Real 8-Fold Parallel Trainer for Tier-2 `InternViT-6B-448px-V2.5` (`6.08B`).
 """
 import os
 import sys
 import json
 import time
+import shutil
 import argparse
 import numpy as np
 import torch
@@ -29,6 +22,7 @@ if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
 from qingyu.config_and_paths import (
+    QINGYU_CKPT_DIR,
     REPO_ROOT,
     LosslessNativeImageLoader,
     enforce_deterministic_runtime,
@@ -116,7 +110,7 @@ def train_internvit6b_fold(args) -> str:
             {"params": head_params, "lr": args.lr_head, "weight_decay": 0.01},
         ]
     )
-    eff_steps_per_ep = max(1, len(dl_tr) // max(1, args.grad_accum))
+    eff_steps_per_ep = max(1, (len(dl_tr) + max(1, args.grad_accum) - 1) // max(1, args.grad_accum))
     total_steps = max(1, eff_steps_per_ep * args.epochs)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=[args.lr_lora, args.lr_head], total_steps=total_steps, pct_start=0.10
@@ -126,18 +120,21 @@ def train_internvit6b_fold(args) -> str:
     ).to(device)
 
     out_dir = os.path.join(REPO_ROOT, args.out_dir, "internvit_6b")
+    ckpt_dir = QINGYU_CKPT_DIR / "internvit_6b"
     os.makedirs(out_dir, exist_ok=True)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_best = os.path.join(out_dir, f"fold_{args.fold}_best.pt")
 
     print(
         f"=== [Qingyu Tier-2 InternViT-6B] Fold {args.fold}/8 | train={len(tr_rows)} val={len(va_rows)} "
-        f"| LoRA_r={args.lora_rank} | device={device} ===",
+        f"| bs={args.batch_size}x{args.grad_accum} | LoRA_r={args.lora_rank} | device={device} ===",
         flush=True,
     )
 
     best_obj = -1e9
     best_sd = None
     swa_sds = []
+    eval_bs = max(1, args.batch_size)
 
     for ep in range(args.epochs):
         model.train()
@@ -172,11 +169,13 @@ def train_internvit6b_fold(args) -> str:
                     scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
         n_proto = populate_prototype_bank(
-            model, tr_rows, img_loader, meta_store, collate_fn, device, batch_size=args.batch_size * 2, workers=args.workers
+            model, tr_rows, img_loader, meta_store, collate_fn, device, batch_size=eval_bs, workers=args.workers
         )
         vp, vqc, gv, _ = predict_2x_tta(
-            model, va_rows, img_loader, meta_store, collate_fn, device, batch_size=args.batch_size * 2, workers=args.workers
+            model, va_rows, img_loader, meta_store, collate_fn, device, batch_size=eval_bs, workers=args.workers
         )
         qdec = DampedFrankWolfeBayesianDecoder(dfw_steps=20, eta_doc1=0.50, max_clean_p0_fpr=0.008).fit(vp, vqc, gv)
         ev = evaluate_qingyu_dual_metrics(qdec.decode(vp, vqc), gv)
@@ -195,7 +194,7 @@ def train_internvit6b_fold(args) -> str:
         if val_obj > best_obj:
             best_obj = val_obj
             best_sd = cur_sd
-            torch.save(best_sd, ckpt_best)
+            torch.save({"state_dict": best_sd, "best_val_score": float(val_obj)}, ckpt_best)
 
     if best_sd is not None and len(swa_sds) >= 2:
         cands = swa_sds + [best_sd]
@@ -204,29 +203,32 @@ def train_internvit6b_fold(args) -> str:
             for k in best_sd.keys()
         }
         model.load_state_dict(avg_sd, strict=False)
-        populate_prototype_bank(model, tr_rows, img_loader, meta_store, collate_fn, device, batch_size=args.batch_size * 2, workers=args.workers)
-        vp_s, vqc_s, gv_s, _ = predict_2x_tta(model, va_rows, img_loader, meta_store, collate_fn, device, batch_size=args.batch_size * 2, workers=args.workers)
+        populate_prototype_bank(model, tr_rows, img_loader, meta_store, collate_fn, device, batch_size=eval_bs, workers=args.workers)
+        vp_s, vqc_s, gv_s, _ = predict_2x_tta(model, va_rows, img_loader, meta_store, collate_fn, device, batch_size=eval_bs, workers=args.workers)
         qdec_s = DampedFrankWolfeBayesianDecoder(dfw_steps=20, eta_doc1=0.50, max_clean_p0_fpr=0.008).fit(vp_s, vqc_s, gv_s)
         ev_s = evaluate_qingyu_dual_metrics(qdec_s.decode(vp_s, vqc_s), gv_s)
         ece_s = compute_ece_6x4(vp_s, gv_s)
-        if 0.5 * ev_s["doc1_total"] + 0.5 * ev_s["doc2_strict_total"] - 2.0 * ece_s >= best_obj - 0.10:
+        sc_s = 0.5 * ev_s["doc1_total"] + 0.5 * ev_s["doc2_strict_total"] - 2.0 * ece_s
+        if sc_s >= best_obj - 0.10:
+            best_obj = max(best_obj, sc_s)
             best_sd = model.trainable_state_dict()
-            torch.save(best_sd, ckpt_best)
 
     if best_sd is not None:
         model.load_state_dict(best_sd, strict=False)
-        populate_prototype_bank(model, tr_rows, img_loader, meta_store, collate_fn, device, batch_size=args.batch_size * 2, workers=args.workers)
-        torch.save(model.trainable_state_dict(), ckpt_best)
+        populate_prototype_bank(model, tr_rows, img_loader, meta_store, collate_fn, device, batch_size=eval_bs, workers=args.workers)
+        final_payload = {"state_dict": model.trainable_state_dict(), "best_val_score": float(best_obj)}
+        torch.save(final_payload, ckpt_best)
+        shutil.copy2(ckpt_best, str(ckpt_dir / f"fold_{args.fold}_best.pt"))
 
     va_probs, va_qclean, gva, va_names = predict_2x_tta(
-        model, va_rows, img_loader, meta_store, collate_fn, device, batch_size=args.batch_size * 2, workers=args.workers
+        model, va_rows, img_loader, meta_store, collate_fn, device, batch_size=eval_bs, workers=args.workers
     )
     va_p0, va_p1, va_p2 = simplex_6x4_to_p012(va_probs)
 
     ordered_150 = load_test_template_names("results/v2_full/template_150.json")
     t150_rows = [{"name": nm, "group_id": nm, "grades": [0] * 6} for nm in ordered_150]
     t150_probs, t150_qclean, _, _ = predict_2x_tta(
-        model, t150_rows, img_loader, meta_store, collate_fn, device, batch_size=args.batch_size * 2, workers=args.workers
+        model, t150_rows, img_loader, meta_store, collate_fn, device, batch_size=eval_bs, workers=args.workers
     )
     t150_p0, t150_p1, t150_p2 = simplex_6x4_to_p012(t150_probs)
 
@@ -251,7 +253,7 @@ def train_internvit6b_fold(args) -> str:
         ext_names = load_test_template_names(args.extra_test_template)
         ext_rows = [{"name": nm, "group_id": nm, "grades": [0] * 6} for nm in ext_names]
         ext_probs, ext_qclean, _, _ = predict_2x_tta(
-            model, ext_rows, img_loader, meta_store, collate_fn, device, batch_size=args.batch_size * 2, workers=args.workers
+            model, ext_rows, img_loader, meta_store, collate_fn, device, batch_size=eval_bs, workers=args.workers
         )
         save_dict["extra_probs_6x4"] = ext_probs
         save_dict["extra_qclean"] = ext_qclean
@@ -320,8 +322,8 @@ def main():
     ap.add_argument("--dual-engine-npz", default="results/qingyu/dual_engine_meta.npz")
     ap.add_argument("--out-dir", default="results/qingyu")
     ap.add_argument("--epochs", type=int, default=5)
-    ap.add_argument("--batch-size", type=int, default=6)
-    ap.add_argument("--grad-accum", type=int, default=2)
+    ap.add_argument("--batch-size", type=int, default=4)
+    ap.add_argument("--grad-accum", type=int, default=3)
     ap.add_argument("--lora-rank", type=int, default=32)
     ap.add_argument("--lr-lora", type=float, default=1.2e-4)
     ap.add_argument("--lr-head", type=float, default=6e-4)
