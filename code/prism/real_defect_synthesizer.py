@@ -25,16 +25,14 @@ import numpy as np
 import cv2
 from PIL import Image
 
-REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+PRISM_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(PRISM_SRC_DIR, '../..'))
 os.chdir(REPO_ROOT)
-for p in [REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.dirname(os.path.abspath(__file__))]:
+for p in [REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), PRISM_SRC_DIR]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-try:
-    from code.prism.heads_and_losses import CLASSES, FULL_CLASSES
-except ImportError:
-    from heads_and_losses import CLASSES, FULL_CLASSES
+from heads_and_losses import CLASSES, FULL_CLASSES
 
 # Save directly into /dev/shm/v18_synth_quads so V18FastMicroscopeDataset finds all images natively
 PRISM_SYNTH_DIR = '/dev/shm/v18_synth_quads'

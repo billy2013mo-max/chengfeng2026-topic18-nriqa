@@ -6,7 +6,6 @@ code/prism/train_prism_quad.py
 PRISM Tower 3: `Prism-Quad` Full-Spectrum 4-Backbone Deep Native Microscope Trainer.
 """
 import argparse
-import copy
 import csv
 import json
 import math
@@ -27,9 +26,10 @@ try:
 except Exception:
     pass
 
-REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+PRISM_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(PRISM_SRC_DIR, '../..'))
 os.chdir(REPO_ROOT)
-for p in [REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.join(REPO_ROOT, 'code/decision_eval'), os.path.dirname(os.path.abspath(__file__))]:
+for p in [REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.join(REPO_ROOT, 'code/decision_eval'), PRISM_SRC_DIR]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -44,18 +44,11 @@ from train_v18_paired_kd_specialist import (
 from cv_decoder_calib import decode_pc, HAND
 import comp_metrics as cm
 
-try:
-    from code.prism.heads_and_losses import (
-        ConditionalHazardOrdinalHead,
-        PrismExactGradeLoss,
-        PrismDifferentialCalibratorLoss,
-    )
-except ImportError:
-    from heads_and_losses import (
-        ConditionalHazardOrdinalHead,
-        PrismExactGradeLoss,
-        PrismDifferentialCalibratorLoss,
-    )
+from heads_and_losses import (
+    ConditionalHazardOrdinalHead,
+    PrismExactGradeLoss,
+    PrismDifferentialCalibratorLoss,
+)
 
 
 class PrismQuadMicroscopeNet(nn.Module):
@@ -69,8 +62,8 @@ class PrismQuadMicroscopeNet(nn.Module):
         for (m, fwd, mu, sd, bl, dim) in specs:
             self.bs.append(m)
             self.fwds.append(fwd)
-            self.register_buffer(f'mu_{len(self.fwds)}', torch.tensor(mu, dtype=torch.bfloat16).view(1, 3, 1, 1))
-            self.register_buffer(f'sd_{len(self.fwds)}', torch.tensor(sd, dtype=torch.bfloat16).view(1, 3, 1, 1))
+            self.register_buffer(f'mu_{len(self.fwds)}', torch.tensor(mu, dtype=torch.float32).view(1, 3, 1, 1))
+            self.register_buffer(f'sd_{len(self.fwds)}', torch.tensor(sd, dtype=torch.float32).view(1, 3, 1, 1))
             self.tile_attn.append(nn.Sequential(
                 nn.Linear(dim, max(64, dim // 8)),
                 nn.GELU(),
@@ -124,12 +117,14 @@ class PrismQuadMicroscopeNet(nn.Module):
 
     def forward(self, x: torch.Tensor, phys: torch.Tensor, geom: torch.Tensor = None, is_real_mask: torch.Tensor = None):
         B, T, C, H, W = x.shape
-        x_flat = x.view(B * T, C, H, W).to(torch.bfloat16).div_(255.0)
+        x_flat = x.view(B * T, C, H, W).float().div_(255.0)
         outs = []
         for i, (m, fwd) in enumerate(zip(self.bs, self.fwds)):
             mu = getattr(self, f'mu_{i + 1}')
             sd = getattr(self, f'sd_{i + 1}')
-            f = fwd((x_flat - mu) / sd).view(B, T, -1).float()
+            dt = next(m.parameters()).dtype
+            z = ((x_flat - mu) / sd).to(dt)
+            f = fwd(z).view(B, T, -1).float()
             outs.append(self._agg(f, self.tile_attn[i]))
 
         h_vis = torch.cat(outs, dim=-1)
@@ -143,7 +138,7 @@ class PrismQuadMicroscopeNet(nn.Module):
         return self.prism_head(h, is_real_mask=is_real_mask)
 
 
-def build_layerwise_param_groups(specs, lr_full: float, lr_last: float, decay: float = 0.85):
+def build_layerwise_param_groups_on_device(specs, lr_full: float, lr_last: float, decay: float = 0.85):
     pg = []
     for (m, fwd, mu, sd, bl, dim), mode in specs:
         for p in m.parameters():
@@ -151,7 +146,9 @@ def build_layerwise_param_groups(specs, lr_full: float, lr_last: float, decay: f
         if mode == 'full':
             for p in m.parameters():
                 p.requires_grad_(True)
-            pg.append({'params': [p for p in m.parameters() if p.requires_grad], 'lr': lr_full})
+            params_m = [p for p in m.parameters() if p.requires_grad]
+            if params_m:
+                pg.append({'params': params_m, 'lr': lr_full})
         elif mode.startswith('lastk') and bl is not None:
             k = int(mode[5:])
             n_blocks = len(bl)
@@ -161,10 +158,9 @@ def build_layerwise_param_groups(specs, lr_full: float, lr_last: float, decay: f
                 blk_lr = lr_last * (decay ** depth_from_top)
                 for p in bl[idx_b].parameters():
                     p.requires_grad_(True)
-                pg.append({'params': list(bl[idx_b].parameters()), 'lr': blk_lr})
-        for p in m.parameters():
-            if not p.requires_grad and p.is_floating_point():
-                p.data = p.data.to(torch.bfloat16)
+                blk_p = [p for p in bl[idx_b].parameters() if p.requires_grad]
+                if blk_p:
+                    pg.append({'params': blk_p, 'lr': blk_lr})
     return pg
 
 
@@ -189,7 +185,8 @@ def predict_prism_quad(net: PrismQuadMicroscopeNet, loader: DataLoader, dev: str
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--backbones', default='dinov3l:lastk6,pecoreg:lastk6,siglip2g:lastk6,convnext:full')
+    # Matches exact backbone order of V17_S2R_SpecD_All6_Giant_s{16,17} for 100% warm-start alignment
+    ap.add_argument('--backbones', default='pecoreg:lastk6,dinov3l:lastk6,cradio:lastk6,eva02:lastk6')
     ap.add_argument('--init-ckpt', default='results/v17_end2end_s16_s17/V17_S2R_SpecD_All6_Giant_s16_ep5.pt')
     ap.add_argument('--epochs-s1', type=int, default=3)
     ap.add_argument('--epochs-s2', type=int, default=2)
@@ -236,7 +233,13 @@ def main():
     va = [r for r in rows if r['split'] == 'val']
     te = [r for r in rows if r['split'] == 'test'] or va
 
-    tr_real = [r for r in tr_orig if not is_synth_name(r['name']) and ('_NatNeg' not in r['name']) and ('_prism_' not in r['name'])]
+    tr_real = [
+        r for r in tr_orig
+        if r.get('source', 'real') == 'real'
+        and not is_synth_name(r['name'])
+        and ('_NatNeg' not in r['name'])
+        and ('_prism_' not in r['name'])
+    ]
     phys_map = extract_for_names([r['name'] for r in tr_real + va + te], a.phys_cache)
     phys_tr_mat = np.stack([phys_map[r['name']] for r in tr_real], axis=0)
     phys_mu = np.mean(phys_tr_mat, axis=0)
@@ -285,16 +288,18 @@ def main():
         raw_specs.append(b_tuple)
         specs_with_mode.append((b_tuple, mode))
 
-    pg = build_layerwise_param_groups(specs_with_mode, a.lr_full, a.lr_last, decay=a.layer_decay)
     net = PrismQuadMicroscopeNet(raw_specs, phys_dim=60, dropout=a.dropout, n_quad=a.tiles * a.tiles).to(dev)
-
     if a.init_ckpt and os.path.exists(a.init_ckpt):
-        print(f'  Warm-starting compatible backbone & microscope layers from {a.init_ckpt}', flush=True)
         sd = torch.load(a.init_ckpt, map_location='cpu')
         cur_sd = net.state_dict()
-        compat_sd = {k: v for k, v in sd.items() if k in cur_sd and cur_sd[k].shape == v.shape}
+        compat_sd = {
+            k: v for k, v in sd.items()
+            if k in cur_sd and cur_sd[k].shape == v.shape and not k.startswith(('mu_', 'sd_'))
+        }
         net.load_state_dict(compat_sd, strict=False)
+        print(f'  Warm-started {len(compat_sd)}/{len(cur_sd)} matching tensors from {a.init_ckpt}', flush=True)
 
+    pg = build_layerwise_param_groups_on_device(specs_with_mode, a.lr_full, a.lr_last, decay=a.layer_decay)
     head_params = (
         list(net.tile_attn.parameters())
         + list(net.phys_mlp.parameters())
@@ -302,13 +307,9 @@ def main():
         + list(net.prism_head.parameters())
     )
     pg.append({'params': head_params, 'lr': a.lr_head})
-    trainable_params = [p for p in net.parameters() if p.requires_grad]
+    trainable_params = [p for g in pg for p in g['params']]
 
-    try:
-        opt = torch.optim.AdamW(pg, weight_decay=a.wd, fused=True)
-    except Exception:
-        opt = torch.optim.AdamW(pg, weight_decay=a.wd)
-
+    opt = torch.optim.AdamW(pg, weight_decay=a.wd)
     total_steps = max(1, (len(ltr_s1) // a.grad_accum) * a.epochs_s1 + (len(ltr_s2) // a.grad_accum) * a.epochs_s2)
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=total_steps, eta_min=1e-6)
 
@@ -359,14 +360,15 @@ def main():
             f'val_Doc1={s_hand["total"]:.2f} (S_pos={s_hand["S_pos"]:.3f} S_p0={s_hand["S_p0"]:.3f} S_clean={s_hand["S_clean"]:.3f}) ({time.time()-t0:.0f}s)',
             flush=True,
         )
-        cur_sd = {k: v.cpu().clone() for k, v in net.state_dict().items()}
+        cur_sd = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
         if is_stage2 or ep == total_epochs - 1:
             s2_ckpts.append(cur_sd)
 
     if len(s2_ckpts) >= 2:
         swa_sd = {
-            k: (sum(ck[k] for ck in s2_ckpts) / float(len(s2_ckpts))) if s2_ckpts[0][k].is_floating_point() else s2_ckpts[-1][k]
-            for k in s2_ckpts[0].keys()
+            k: (sum(ck[k].float() for ck in s2_ckpts) / float(len(s2_ckpts))).to(s2_ckpts[-1][k].dtype)
+            if s2_ckpts[-1][k].is_floating_point() else s2_ckpts[-1][k]
+            for k in s2_ckpts[-1].keys()
         }
         net.load_state_dict({k: v.to(dev) for k, v in swa_sd.items()})
         out_base_pt = a.out[:-5] if a.out.endswith('.json') else a.out

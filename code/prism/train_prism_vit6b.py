@@ -25,9 +25,10 @@ try:
 except Exception:
     pass
 
-REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+PRISM_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(PRISM_SRC_DIR, '../..'))
 os.chdir(REPO_ROOT)
-for p in [REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.join(REPO_ROOT, 'code/decision_eval'), os.path.dirname(os.path.abspath(__file__))]:
+for p in [REPO_ROOT, os.path.join(REPO_ROOT, 'code'), os.path.join(REPO_ROOT, 'code/finetune'), os.path.join(REPO_ROOT, 'code/decision_eval'), PRISM_SRC_DIR]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -43,25 +44,17 @@ from train_v18_paired_kd_specialist import (
 from cv_decoder_calib import decode_pc, HAND
 import comp_metrics as cm
 
-try:
-    from code.prism.heads_and_losses import (
-        ConditionalHazardOrdinalHead,
-        PrismExactGradeLoss,
-        PrismDifferentialCalibratorLoss,
-    )
-    from code.prism.train_prism_quad import PrismQuadMicroscopeNet, predict_prism_quad
-except ImportError:
-    from heads_and_losses import (
-        ConditionalHazardOrdinalHead,
-        PrismExactGradeLoss,
-        PrismDifferentialCalibratorLoss,
-    )
-    from train_prism_quad import PrismQuadMicroscopeNet, predict_prism_quad
+from heads_and_losses import (
+    ConditionalHazardOrdinalHead,
+    PrismExactGradeLoss,
+    PrismDifferentialCalibratorLoss,
+)
+from train_prism_quad import PrismQuadMicroscopeNet, predict_prism_quad
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--backbones', default='internvit_abmil:lastk6,pecoreg_abmil:lastk6,cradio_abmil:lastk6,dinov3l_abmil:lastk6')
+    ap.add_argument('--backbones', default='internvit_abmil:lastk4,pecoreg_abmil:lastk4,cradio_abmil:lastk4,dinov3l_abmil:lastk4')
     ap.add_argument('--epochs', type=int, default=4)
     ap.add_argument('--batch', type=int, default=2)
     ap.add_argument('--grad-accum', type=int, default=4)
@@ -121,36 +114,42 @@ def main():
     lva = DataLoader(dva, batch_size=a.batch * 2, shuffle=False, num_workers=a.workers, pin_memory=True)
     lte = DataLoader(dte, batch_size=a.batch * 2, shuffle=False, num_workers=a.workers, pin_memory=True)
 
-    raw_specs = []
-    pg = []
-    abmil_params = []
+    specs = []
     for s in a.backbones.split(','):
         name, mode = s.split(':')
         b = build_backbone(name)
-        raw_specs.append(b)
-        m, _, _, _, blocks, _ = b
+        specs.append((b, name, mode))
+
+    net = PrismQuadMicroscopeNet([x[0] for x in specs], phys_dim=60, dropout=a.dropout, n_quad=a.tiles * a.tiles).to(dev)
+
+    pg = []
+    abmil_params = []
+    for (b, name, mode) in specs:
+        m = b[0]
+        blocks = b[4]
         for p in m.parameters():
             p.requires_grad_(False)
-        if mode.startswith('lastk') and blocks is not None:
-            k = int(mode[5:] or 6)
-            n_blk = len(blocks)
-            for idx_b in range(max(0, n_blk - k), n_blk):
-                depth = (n_blk - 1) - idx_b
-                pg.append({'params': list(blocks[idx_b].parameters()), 'lr': a.lr_last * (a.layer_decay ** depth)})
-                for p in blocks[idx_b].parameters():
-                    p.requires_grad_(True)
+        abmil_ids = set()
         for attr in ('abmil_pool', 'dual_tap'):
             if hasattr(m, attr):
                 subm = getattr(m, attr).float()
                 for p in subm.parameters():
                     p.requires_grad_(True)
                     abmil_params.append(p)
-        # Pre-cast frozen backbone blocks to bfloat16 while keeping trainable ABMIL/DualTap in fp32
-        for p in m.parameters():
-            if not p.requires_grad and p.is_floating_point():
-                p.data = p.data.to(torch.bfloat16)
+                    abmil_ids.add(id(p))
+        if mode.startswith('lastk') and blocks is not None:
+            k = int(mode[5:] or 4)
+            n_blk = len(blocks)
+            for idx_b in range(max(0, n_blk - k), n_blk):
+                depth = (n_blk - 1) - idx_b
+                blk_params = []
+                for p in blocks[idx_b].parameters():
+                    if id(p) not in abmil_ids:
+                        p.requires_grad_(True)
+                        blk_params.append(p)
+                if blk_params:
+                    pg.append({'params': blk_params, 'lr': a.lr_last * (a.layer_decay ** depth)})
 
-    net = PrismQuadMicroscopeNet(raw_specs, phys_dim=60, dropout=a.dropout, n_quad=a.tiles * a.tiles).to(dev)
     head_params = (
         abmil_params
         + list(net.tile_attn.parameters())
@@ -212,12 +211,13 @@ def main():
             flush=True,
         )
         if ep >= max(1, a.epochs - 2):
-            ckpts.append({k: v.cpu().clone() for k, v in net.state_dict().items()})
+            ckpts.append({k: v.detach().cpu().clone() for k, v in net.state_dict().items()})
 
     if len(ckpts) >= 2:
         swa_sd = {
-            k: (sum(ck[k] for ck in ckpts) / float(len(ckpts))) if ckpts[0][k].is_floating_point() else ckpts[-1][k]
-            for k in ckpts[0].keys()
+            k: (sum(ck[k].float() for ck in ckpts) / float(len(ckpts))).to(ckpts[-1][k].dtype)
+            if ckpts[-1][k].is_floating_point() else ckpts[-1][k]
+            for k in ckpts[-1].keys()
         }
         net.load_state_dict({k: v.to(dev) for k, v in swa_sd.items()})
 

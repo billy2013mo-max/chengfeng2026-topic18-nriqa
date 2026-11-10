@@ -13,24 +13,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+PRISM_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = '/wanqing-develop/luowenjing/18' if os.path.exists('/wanqing-develop/luowenjing/18') else os.path.abspath(os.path.join(PRISM_SRC_DIR, '../..'))
+for p in [REPO_ROOT, PRISM_SRC_DIR]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
-try:
-    from code.prism.heads_and_losses import (
-        CLASSES,
-        FULL_CLASSES,
-        convert_p012_to_conditional_hazards,
-        convert_conditional_hazards_to_p012,
-    )
-except ImportError:
-    from heads_and_losses import (
-        CLASSES,
-        FULL_CLASSES,
-        convert_p012_to_conditional_hazards,
-        convert_conditional_hazards_to_p012,
-    )
+from heads_and_losses import (
+    CLASSES,
+    FULL_CLASSES,
+    convert_p012_to_conditional_hazards,
+    convert_conditional_hazards_to_p012,
+)
 
 
 class SceneMatchedAnchorBank:
