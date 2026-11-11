@@ -209,6 +209,13 @@ def fuse_multi_pillar_outputs(
     pillar_weights: Sequence[float],
     uncertainty_gamma: float = 0.65,
 ) -> Dict[str, np.ndarray]:
+    """
+    Uncertainty-aware multi-pillar fusion + Canonical Rotation-Free Prototype Signature:
+      Constructs `quality_emb` strictly from canonically anchored coordinates (`probs_6x4`,
+      centered log-probs, `p_clean_head`, `var_6d`, and inter-pillar disagreement across all
+      pillars) rather than fold-specific random projections — guaranteeing 100% 1-to-1
+      subspace alignment between 5-Fold OOF (`Step 3c`) and FullData-SWA (`Step 5`)!
+    """
     m_cnt = len(pillar_outputs)
     assert m_cnt >= 1 and len(pillar_weights) == m_cnt
     base_w = np.asarray(pillar_weights, dtype=np.float32)
@@ -223,20 +230,40 @@ def fuse_multi_pillar_outputs(
 
     fused_logits = np.zeros((n, 6, 4), dtype=np.float32)
     fused_clean_logit = np.zeros(n, dtype=np.float32)
-    emb_chunks = []
+    canonical_sig_chunks = []
 
+    probs_stack = []
     for m, out in enumerate(pillar_outputs):
         w_m = precision_w[m][:, :, None]
-        log_p = np.log(np.clip(out["probs_6x4"], 1e-6, 1.0))
+        p_m = np.clip(out["probs_6x4"].astype(np.float32), 1e-6, 1.0)
+        p_m = p_m / np.maximum(p_m.sum(axis=-1, keepdims=True), 1e-8)
+        probs_stack.append(p_m)
+        log_p = np.log(p_m)
         fused_logits += w_m * log_p
-        fused_clean_logit += base_w[m] * out["clean_logit"]
-        emb_chunks.append(out["quality_emb"] * np.sqrt(base_w[m]))
+        fused_clean_logit += base_w[m] * out["clean_logit"].astype(np.float32)
+
+        centered_lp = np.clip((log_p - log_p.mean(axis=-1, keepdims=True)) / 3.0, -2.0, 2.0)
+        p_c_m = (1.0 / (1.0 + np.exp(-np.clip(out["clean_logit"].astype(np.float32), -20.0, 20.0))))[:, None]
+        v_m = np.clip(out["var_6d"].astype(np.float32), 0.0, 2.0) / 2.0
+        canonical_sig_chunks.extend(
+            [
+                p_m.reshape(n, 24) * np.sqrt(base_w[m]),
+                0.5 * centered_lp.reshape(n, 24) * np.sqrt(base_w[m]),
+                p_c_m * np.sqrt(base_w[m]),
+                0.5 * v_m * np.sqrt(base_w[m]),
+            ]
+        )
+
+    if m_cnt >= 2:
+        p_arr = np.stack(probs_stack, axis=0)  # [M, N, 6, 4]
+        inter_pillar_std = np.std(p_arr, axis=0).reshape(n, 24)
+        canonical_sig_chunks.append(inter_pillar_std)
 
     for d in P0_ONLY_DIMS:
         fused_logits[:, d, 1] = -1e4
         fused_logits[:, d, 2] = -1e4
 
-    concat_emb = np.concatenate(emb_chunks, axis=-1)
+    concat_emb = np.concatenate(canonical_sig_chunks, axis=-1)
     concat_emb = concat_emb / (np.linalg.norm(concat_emb, axis=1, keepdims=True) + 1e-8)
     return {
         "logits_6x4": fused_logits,
