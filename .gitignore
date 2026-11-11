@@ -52,3 +52,7 @@ tmp/
 results/_archive_*/
 logs_retrain/
 logs_p3/
+
+# Generated experiment pools and lock files
+data/r55_aux/
+*.lock

@@ -103,7 +103,8 @@ class V16NativeMicroscopeDataset(Dataset):
             off = int(self.offsets[j])
             arr = np.asarray(self.data[off:off + h * w * 3]).reshape(h, w, 3)
             return Image.fromarray(arr)
-        for d in ['/tmp/v9_authentic_imgs', '/tmp/v8_ladder_imgs', '/tmp/v7_overgen_pro_imgs', '/tmp/v6_synth_imgs',
+        extra = [os.environ['NEXT55_EXTRA_IMG_DIR']] if os.environ.get('NEXT55_EXTRA_IMG_DIR') else []
+        for d in extra + ['/tmp/v9_authentic_imgs', '/tmp/v8_ladder_imgs', '/tmp/v7_overgen_pro_imgs', '/tmp/v6_synth_imgs',
                   'data/train', 'data/images', 'data/images_supp', 'data/test_150', 'data/test']:
             p = os.path.join('/wanqing-develop/luowenjing/18', d, name) if not d.startswith('/') else os.path.join(d, name)
             if os.path.exists(p):
@@ -494,6 +495,9 @@ def main():
     ap.add_argument('--phys-cache', default='results/v8_experts/native_phys_feats.npz')
     ap.add_argument('--tau', type=float, default=0.02)
     ap.add_argument('--out', required=True)
+    # next55: V16 never saved weights, so it could not score the hidden final set. These two flags fix that.
+    ap.add_argument('--save-ckpt', action='store_true', help='save SWA state_dict + phys scaler next to --out')
+    ap.add_argument('--extra-template', default='', help='extra test template json (e.g. final 654 set) -> *_probs.npz ext_*')
     a = ap.parse_args()
 
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
@@ -671,6 +675,13 @@ def main():
                 swa_sd[k] = ep_ckpts[-1][k]
         net.load_state_dict({k: v.to(dev) for k, v in swa_sd.items()})
 
+    out_base = a.out[:-5] if a.out.endswith('.json') else a.out
+    if a.save_ckpt:
+        keep = {n for n, p in net.named_parameters() if p.requires_grad} | {n for n, _ in net.named_buffers()}
+        torch.save({'state_dict': {k: v.detach().cpu() for k, v in net.state_dict().items() if k in keep},
+                    'phys_mu': phys_mu, 'phys_sd': phys_sd, 'args': vars(a)}, out_base + '_swa.pt')
+        print(f'[v16] saved SWA checkpoint -> {out_base}_swa.pt', flush=True)
+
     dva_flip = V16NativeMicroscopeDataset(va, phys_map, phys_mu, phys_sd, a.size, False, hflip=True, tiles=a.tiles)
     dte_flip = V16NativeMicroscopeDataset(te, phys_map, phys_mu, phys_sd, a.size, False, hflip=True, tiles=a.tiles)
     lva_flip = DataLoader(dva_flip, batch_size=val_batch, shuffle=False, num_workers=a.workers, pin_memory=True)
@@ -700,11 +711,25 @@ def main():
     p150_0, p150_1, p150_2, p150_g = 0.5*(p150_0a+p150_0b), 0.5*(p150_1a+p150_1b), 0.5*(p150_2a+p150_2b), 0.5*(p150_ga+p150_gb)
 
     out_base = a.out[:-5] if a.out.endswith('.json') else a.out
+    ext = {}
+    if a.extra_template:
+        names_ext = [e['image'] for e in json.load(open(a.extra_template))]
+        phys_ext = extract_for_names(names_ext, a.phys_cache)
+        n_zero = sum(1 for n in names_ext if not np.any(phys_ext[n]))
+        assert n_zero == 0, f'{n_zero} extra-template images not found (set NEXT55_EXTRA_IMG_DIR)'
+        rows_ext = [{'name': n, **{c: 0 for c in CLASSES}} for n in names_ext]
+        outs = []
+        for hf in (False, True):
+            dx = V16NativeMicroscopeDataset(rows_ext, phys_ext, phys_mu, phys_sd, a.size, False, hflip=hf, tiles=a.tiles)
+            outs.append(predict_v16(net, DataLoader(dx, batch_size=val_batch, shuffle=False, num_workers=a.workers, pin_memory=True), dev, a.alpha_ex))
+        ext = dict(ext_p0=0.5*(outs[0][0]+outs[1][0]), ext_p1=0.5*(outs[0][1]+outs[1][1]), ext_p2=0.5*(outs[0][2]+outs[1][2]),
+                   ext_gate=0.5*(outs[0][3]+outs[1][3]), ext_names=names_ext)
     np.savez(
         out_base + '_probs.npz',
         va_p0=vp0, va_p1=vp1, va_p2=vp2, va_gate=vg, gva=gva, va_names=[r['name'] for r in va],
         te_p0=tp0, te_p1=tp1, te_p2=tp2, te_gate=tg, gte=gte, te_names=[r['name'] for r in te],
         t150_p0=p150_0, t150_p1=p150_1, t150_p2=p150_2, t150_gate=p150_g, t150_names=names_150,
+        **ext,
     )
     st_hand = cm.score(gte, decode_pc(tp0, tp1, tp2, HAND), a.tau)
     clean_te = (gte == 0).all(1)

@@ -9,8 +9,8 @@ import os
 import zipfile
 from xml.sax.saxutils import escape
 
-REPORT_MD_PATH = "/wanqing-develop/luowenjing/18/NR_IQA_Task_Status_and_Dilemma_Report.md"
-REPORT_DOCX_PATH = "/wanqing-develop/luowenjing/18/NR_IQA_Task_Status_and_Dilemma_Report.docx"
+REPORT_MD_PATH = "/wanqing-develop/luowenjing/18/docs/reports/NR_IQA_Task_Status_and_Dilemma_Report.md"
+REPORT_DOCX_PATH = "/wanqing-develop/luowenjing/18/docs/reports/NR_IQA_Task_Status_and_Dilemma_Report.docx"
 
 
 def build_report_blocks():

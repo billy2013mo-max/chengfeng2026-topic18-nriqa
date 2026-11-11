@@ -36,7 +36,14 @@
 ├── docs/
 │   ├── TECHNICAL_REPORT.md                       # ① 技术方案文档（问题分析/数据构造/训练超参/消融实验/部署成本）
 │   ├── SELF_EVALUATION_REPORT.md                 # ② 自评测与8折交叉验证报告（含逐档P/R/F1详表）
-│   └── AI_USAGE_STATEMENT.md                     # ③ AI 使用说明（组委会统一要求）
+│   ├── AI_USAGE_STATEMENT.md                     # ③ AI 使用说明（组委会统一要求）
+│   ├── reports/                                  # 历史调研、阶段报告与 Word/PDF
+│   └── archive/                                  # 聊天记录存档
+├── documents/                                    # 赛题原文与空白提交模板
+├── NEXT55_HANDOFF.md                             # 已停用的 next55 交接（指标结论已过时）
+├── R55_HANDOFF.md                                # 当前实验交接，按此执行
+├── run_next55.sh
+├── run_r55.sh
 ├── code/
 │   ├── decision_eval/
 │   │   ├── common.py                             # 六类缺陷与等级常量定义

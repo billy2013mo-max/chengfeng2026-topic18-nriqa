@@ -13,8 +13,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from generate_task_and_dilemma_report_docx import write_docx, write_markdown
 
-REPORT_MD_PATH = "/wanqing-develop/luowenjing/18/NR_IQA_Synth_Data_and_54Plus_Breakthrough_Report.md"
-REPORT_DOCX_PATH = "/wanqing-develop/luowenjing/18/NR_IQA_Synth_Data_and_54Plus_Breakthrough_Report.docx"
+REPORT_MD_PATH = "/wanqing-develop/luowenjing/18/docs/reports/NR_IQA_Synth_Data_and_54Plus_Breakthrough_Report.md"
+REPORT_DOCX_PATH = "/wanqing-develop/luowenjing/18/docs/reports/NR_IQA_Synth_Data_and_54Plus_Breakthrough_Report.docx"
 
 
 def build_report_blocks():
