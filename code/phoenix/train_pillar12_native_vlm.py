@@ -3,22 +3,20 @@
 """
 code/phoenix/train_pillar12_native_vlm.py
 =========================================
-Breakthrough 3 & 4: Unified Native-Resolution Multi-View VLM Trainer & Predictor for:
+Breakthrough 3 & 4 (Upgraded with View-Separated Peak-Anomaly Token Readout & 2x HFlip Val TTA):
   - Pillar 1 (`--pillar pillar1`): `Qwen3-VL-8B-Instruct` (`models/qwen3vl-8b`)
-  - Pillar 2 (`--pillar pillar2`): `Clef-Flash-9B` / `InternVL3.5-8B` / `Qwen2.5-VL-7B` (`models/clef-flash`)
+  - Pillar 2 (`--pillar pillar2`): `Clef-Flash-9B` / `InternVL3.5-8B` (`models/clef-flash`)
 
-Key Server & Precision Safeguards:
-  1. Exact Full-Path `nn.Linear`-Only PEFT DoRA Injection:
-     Explicitly filters `isinstance(mod, nn.Linear)` by full module name (excluding `patch_embed`,
-     `lm_head`, and `embed_tokens`) so `Qwen3-VL`'s `visual.patch_embed.proj` (`nn.Conv3d`!) is
-     NEVER wrapped by `DoraConv3dLayer` (fixing the `FloatTensor vs CUDABFloat16Type` crash!).
-  2. Strict BF16 Backbone Autocast + FP32 Head Isolation:
-     Wraps VLM forward in `torch.autocast("cuda", dtype=torch.bfloat16)` while running
-     `PhoenixUnimodalDeQAHead` and losses in exact FP32, stripping unused `lm_head` to save ~2.5 GB VRAM.
-  3. Fork-Safe Main-Process Scrutiny Box Precomputation:
-     Precomputes & caches deterministic 1:1 `384x384` scrutiny crop boxes once before DataLoader
-     workers fork (avoiding CUDA-in-forked-subprocess errors and making Epochs 2..N 5x faster!).
-  4. Multi-GPU Per-Fold Sharding (`--fold 0..4 --gpu 0..7` + `--aggregate-cv5`) & Zero-Loss Resume.
+Key Representation & Precision Safeguards:
+  1. View-Separated + Unaveraged Peak-Anomaly Token Readout (`[B, 64, D]`):
+     Instead of averaging 22 adjacent tokens via `adaptive_avg_pool1d` (which diluted localized
+     `过度生成` finger/text glitches and `1~2px` `过锐` halos!), splits visual tokens into the 3
+     independent views (`Global_Native`, `Crop0_1to1`, `Crop1_1to1`) via `image_grid_thw` and feeds
+     `20` coarse structure tokens + `42` UN-AVERAGED top-anomaly peak patch tokens + `1` spatial
+     dispersion token + `1` instruction summary token directly into `PhoenixUnimodalDeQAHead`!
+  2. Exact Full-Path `nn.Linear`-Only PEFT DoRA Injection (never touching `Conv3d` `patch_embed.proj`).
+  3. 2x Horizontal-Flip TTA during validation OOF prediction to slash P1/P2 boundary variance.
+  4. Fork-Safe Scrutiny Box Cache + Multi-GPU Per-Fold Sharding & Zero-Loss Resume.
 """
 from __future__ import annotations
 
@@ -33,6 +31,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -64,8 +63,10 @@ from phoenix.native_physics_and_views import (
 )
 
 CONCISE_INSPECTION_PROMPT = (
-    "请作为短视频无参考画质质检专家，综合图1（原生宽高比全局画面）与图2、图3（两处1:1原尺寸局部审视切片），"
-    "直接形成6类画质缺陷（模糊、纹理损失、过锐、花屏、过度生成、虚化突兀）的客观严重度表征。"
+    "请作为短视频无参考画质质检专家，综合图1（原生宽高比全局画面：判别景深关系、整体模糊与花屏）、"
+    "图2（主体解剖与景深边缘1:1原尺寸切片：判别五官手指畸变过度生成与抠图虚化突兀）、"
+    "图3（高频纹理与边缘1:1原尺寸切片：判别1至2像素过锐白边光晕与涂抹塑料感纹理损失），"
+    "直接形成6类画质缺陷的客观严重度状态。"
 )
 
 
@@ -102,11 +103,6 @@ def get_or_build_scrutiny_box_cache(
     device_str: str = "cuda",
     cache_npz_path: Optional[str] = None,
 ) -> Dict[str, np.ndarray]:
-    """
-    Computes (or loads from disk cache) the two deterministic 1:1 `384x384` scrutiny crop boxes
-    `int32[2, 4]` per image on the main process BEFORE spawning DataLoader workers.
-    Eliminates CUDA fork errors and avoids recomputing Haar+CoC maps across folds & epochs!
-    """
     cache_map: Dict[str, np.ndarray] = {}
     if cache_npz_path and os.path.exists(cache_npz_path):
         try:
@@ -139,7 +135,6 @@ def get_or_build_scrutiny_box_cache(
         if (idx + 1) % 500 == 0 or (idx + 1) == len(missing):
             print(f"  [{idx+1}/{len(missing)}] ({(idx+1)/max(1e-3, time.time()-t0):.1f} img/s)", flush=True)
 
-    # Free Depth-Anything VRAM before loading 8B-9B VLM training weights
     del coc_probe
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -161,7 +156,6 @@ def get_or_build_scrutiny_box_cache(
 
 
 def crop_1to1_from_box(pil_img, box_xyxy: Sequence[int], patch_size: int = 384):
-    """Extracts exact 1:1 unscaled `patch_size x patch_size` PIL RGB crop (reflect-padded only if smaller)."""
     from PIL import Image
 
     w, h = pil_img.size
@@ -194,6 +188,7 @@ class NativeMultiViewVLMDataset(Dataset):
         resolver: PureRealImageResolver,
         box_cache: Dict[str, np.ndarray],
         is_train: bool = True,
+        force_hflip: bool = False,
         max_global_pixels: int = 784 * 784,
         oof_teacher_probs: Optional[np.ndarray] = None,
     ) -> None:
@@ -201,6 +196,7 @@ class NativeMultiViewVLMDataset(Dataset):
         self.resolver = resolver
         self.box_cache = box_cache
         self.is_train = is_train
+        self.force_hflip = force_hflip
         self.max_global_pixels = max_global_pixels
         self.oof_teacher_probs = oof_teacher_probs
 
@@ -216,8 +212,8 @@ class NativeMultiViewVLMDataset(Dataset):
         orig_w, _ = pil_img.size
         boxes = self.box_cache[nm].copy()
 
-        # Strictly IQA-safe horizontal flip (mirroring crop boxes identically!)
-        if self.is_train and np.random.rand() < 0.5:
+        do_flip = self.force_hflip or (self.is_train and np.random.rand() < 0.5)
+        if do_flip:
             pil_img = pil_img.transpose(Image.FLIP_LEFT_RIGHT)
             old_x0 = boxes[:, 0].copy()
             old_x1 = boxes[:, 2].copy()
@@ -268,15 +264,55 @@ def _format_3image_chat_prompt(processor: Any, prompt_text: str) -> str:
     return f"<image>\n<image>\n<image>\n{prompt_text}"
 
 
-class NativeVLMPillarModel(nn.Module):
-    """
-    Wraps Pillar-1 (`Qwen3-VL-8B`, `models/qwen3vl-8b`) or Pillar-2 (`Clef-Flash-9B` /
-    `InternVL3.5-8B` / `Qwen2.5-VL-7B`, `models/clef-flash`) with:
-      - Exact `nn.Linear`-only Full-Depth ViT + LLM DoRA (never touching `Conv3d` `patch_embed.proj`!)
-      - Stripped `lm_head` to save ~2.5 GB VRAM
-      - Multi-layer hidden-state hypercolumn pooling (50%, 75%, 100% depth) into FP32 `PhoenixUnimodalDeQAHead`.
-    """
+def _infer_image_token_id(cfg: Any, processor: Any) -> int:
+    for attr in ("image_token_id", "image_token_index"):
+        val = getattr(cfg, attr, None)
+        if isinstance(val, int) and val >= 0:
+            return int(val)
+    tok = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+    for cand in ("<|image_pad|>", "<image>", "<|vision_pad|>", "<IMG_CONTEXT>"):
+        try:
+            tid = tok.convert_tokens_to_ids(cand)
+            if isinstance(tid, int) and tid >= 0 and tid != getattr(tok, "unk_token_id", -1):
+                return int(tid)
+        except Exception:
+            pass
+    return 151655
 
+
+def _extract_view_structure_and_peak_tokens(
+    v_toks: torch.Tensor,
+    n_struct: int,
+    n_peak: int,
+    fallback_tok: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Preserves BOTH global spatial context (`n_struct` pooled landmarks) AND `n_peak`
+    UN-AVERAGED peak-anomaly patch tokens (`||t - mean(t)||_2` top-k) so localized
+    3-patch defects (`过度生成` fingers/text, `1~2px` `过锐` halos) are NEVER diluted!
+    """
+    m = v_toks.shape[0]
+    if m == 0:
+        return fallback_tok.expand(n_struct + n_peak, -1)
+
+    struct = F.adaptive_avg_pool1d(
+        v_toks.unsqueeze(0).transpose(1, 2), output_size=n_struct
+    ).transpose(1, 2).squeeze(0)
+
+    mu = v_toks.mean(dim=0, keepdim=True)
+    anom_mag = torch.norm(v_toks - mu, dim=-1)  # [M]
+    k_eff = min(m, n_peak)
+    _, top_idx = torch.topk(anom_mag, k=k_eff, dim=0)
+    # Sort selected indices to preserve 2D spatial reading order
+    top_idx_sorted, _ = torch.sort(top_idx)
+    peaks = v_toks[top_idx_sorted]
+    if k_eff < n_peak:
+        peaks = torch.cat([peaks, peaks[-1:].expand(n_peak - k_eff, -1)], dim=0)
+
+    return torch.cat([struct, peaks], dim=0)  # [n_struct + n_peak, D]
+
+
+class NativeVLMPillarModel(nn.Module):
     def __init__(
         self,
         pillar_name: str = "pillar1",
@@ -290,6 +326,7 @@ class NativeVLMPillarModel(nn.Module):
         self.pillar_name = pillar_name
         self.mock_backbone = mock_backbone
         self.processor = None
+        self.image_token_id = 151655
 
         if mock_backbone:
             hidden_size = 384
@@ -304,7 +341,7 @@ class NativeVLMPillarModel(nn.Module):
         else:
             key = "pillar1_qwen3vl_8b" if pillar_name == "pillar1" else "pillar2_hetero_vlm_8b"
             resolved = model_id_or_path or resolve_local_or_hf_model(key)
-            self.backbone, self.processor, in_dim = self._load_vlm_backbone(
+            self.backbone, self.processor, in_dim, self.image_token_id = self._load_vlm_backbone(
                 resolved_path=resolved,
                 quantize_4bit_infer=quantize_4bit_infer,
                 apply_dora=apply_dora,
@@ -348,6 +385,7 @@ class NativeVLMPillarModel(nn.Module):
         if hasattr(tok, "padding_side"):
             tok.padding_side = "right"
         cfg = AutoConfig.from_pretrained(resolved_path, trust_remote_code=True)
+        img_tok_id = _infer_image_token_id(cfg, processor)
 
         loader_classes = []
         for cls_name in (
@@ -394,7 +432,6 @@ class NativeVLMPillarModel(nn.Module):
         if full_model is None:
             raise RuntimeError(f"Failed to load VLM from {resolved_path}: {last_err}")
 
-        # Strip unused vocabulary projection `lm_head` to save ~2.5 GB VRAM
         backbone = getattr(full_model, "model", full_model)
         if hasattr(full_model, "lm_head") and backbone is not full_model:
             try:
@@ -406,8 +443,6 @@ class NativeVLMPillarModel(nn.Module):
             try:
                 from peft import LoraConfig, get_peft_model
 
-                # CRITICAL FIX: Match FULL module path names of `nn.Linear` ONLY!
-                # Never pass bare leaf `"proj"` which accidentally wraps `visual.patch_embed.proj` (`nn.Conv3d`)!
                 allowed_leafs = {
                     "q_proj",
                     "k_proj",
@@ -437,7 +472,6 @@ class NativeVLMPillarModel(nn.Module):
                     if leaf in allowed_leafs:
                         exact_linear_paths.append(full_name)
 
-                # Use DoRA on full-precision training; standard LoRA when quantized 4-bit inference is active
                 use_dora_flag = not quantize_4bit_infer
                 lora_cfg = LoraConfig(
                     r=24,
@@ -451,7 +485,6 @@ class NativeVLMPillarModel(nn.Module):
             except Exception as exc:
                 print(f"[Warn] PEFT attachment fallback ({exc}); unfreezing multimodal merger.", flush=True)
 
-            # Keep multimodal projector / merger trainable for native 1:1 patch alignment
             for n, p in backbone.named_parameters():
                 nl = n.lower()
                 if any(bk in nl for bk in ("merger", "multi_modal_projector", "aligner")) and p.is_floating_point():
@@ -473,10 +506,17 @@ class NativeVLMPillarModel(nn.Module):
             hidden_dim = int(cfg.llm_config.hidden_size)
         elif getattr(cfg, "hidden_size", None):
             hidden_dim = int(cfg.hidden_size)
-        return backbone, processor, int(hidden_dim or 3584)
+        return backbone, processor, int(hidden_dim or 3584), img_tok_id
 
     def encode_multiview_tokens(self, batch_views: List[List[object]], device: torch.device) -> torch.Tensor:
-        """Extracts fused multi-depth sequence tokens `[B, T_pooled, D]` under BF16 autocast."""
+        """
+        Extracts 64 view-separated structure + UN-AVERAGED peak-anomaly tokens `[B, 64, D]`:
+          - View 0 (Global Native Aspect): 8 structure + 16 raw peak-anomaly tokens = 24
+          - View 1 (Crop0 Anatomy/Bokeh 1:1): 6 structure + 13 raw peak-anomaly tokens = 19
+          - View 2 (Crop1 High-Freq/Halo 1:1): 6 structure + 13 raw peak-anomaly tokens = 19
+          - Global Spatial Dispersion Std Token (1) + Instruction Summary Token (1) = 2
+          -> Total = 64 high-signal tokens with ZERO local micro-defect dilution!
+        """
         if self.mock_backbone:
             seq_list = []
             for views in batch_views:
@@ -486,7 +526,8 @@ class NativeVLMPillarModel(nn.Module):
                     t = torch.from_numpy(arr.transpose(2, 0, 1)).unsqueeze(0).to(device)
                     fmap = self.mock_encoder(t)
                     view_tokens.append(fmap.flatten(2).transpose(1, 2).squeeze(0))
-                seq_list.append(torch.cat(view_tokens, dim=0))
+                cat_v = torch.cat(view_tokens, dim=0)
+                seq_list.append(_extract_view_structure_and_peak_tokens(cat_v, 24, 40, cat_v[:1]))
             return torch.stack(seq_list, dim=0)
 
         texts = [_format_3image_chat_prompt(self.processor, CONCISE_INSPECTION_PROMPT) for _ in batch_views]
@@ -520,35 +561,59 @@ class NativeVLMPillarModel(nn.Module):
             idx_mid = max(0, n_layers // 2)
             idx_3q = max(0, (3 * n_layers) // 4)
             fused = (
-                h_states[idx_mid].float() + h_states[idx_3q].float() + h_states[-1].float()
-            ) / 3.0
+                0.25 * h_states[idx_mid].float()
+                + 0.35 * h_states[idx_3q].float()
+                + 0.40 * h_states[-1].float()
+            )
         else:
             last_h = getattr(outputs, "last_hidden_state", h_states[-1])
             fused = last_h.float()
 
-        # Respect right-padding mask so padded tokens never pollute adaptive pooling or final summary token
+        input_ids = moved_inputs.get("input_ids", None)
         attn_mask = moved_inputs.get("attention_mask", None)
-        bsz, seq_len, dim = fused.shape
+        grid_thw = moved_inputs.get("image_grid_thw", None)
+        bsz = fused.shape[0]
         pooled_list = []
-        for b in range(bsz):
-            if attn_mask is not None:
-                valid_toks = fused[b, attn_mask[b].bool()]
-                if valid_toks.shape[0] == 0:
-                    valid_toks = fused[b]
-            else:
-                valid_toks = fused[b]
 
-            if valid_toks.shape[0] > 64:
-                p63 = torch.nn.functional.adaptive_avg_pool1d(
-                    valid_toks.unsqueeze(0).transpose(1, 2), output_size=63
-                ).transpose(1, 2).squeeze(0)
-                seq_b = torch.cat([p63, valid_toks[-1:, :]], dim=0)
-            else:
-                pad_n = 64 - valid_toks.shape[0]
-                if pad_n > 0:
-                    seq_b = torch.cat([valid_toks, valid_toks[-1:, :].expand(pad_n, -1)], dim=0)
+        for b in range(bsz):
+            valid_mask = attn_mask[b].bool() if attn_mask is not None else torch.ones(fused.shape[1], dtype=torch.bool, device=device)
+            valid_toks = fused[b, valid_mask]
+            if valid_toks.shape[0] == 0:
+                valid_toks = fused[b]
+            last_summary = valid_toks[-1:, :]  # [1, D]
+
+            img_mask = (input_ids[b] == self.image_token_id) & valid_mask if input_ids is not None else None
+            if img_mask is not None and int(img_mask.sum().item()) >= 12:
+                vis_all = fused[b, img_mask]  # [N_vis, D]
+                n_vis = int(vis_all.shape[0])
+
+                if grid_thw is not None and grid_thw.shape[0] >= (b + 1) * 3:
+                    raw_c = [
+                        int(grid_thw[b * 3 + k, 0].item() * grid_thw[b * 3 + k, 1].item() * grid_thw[b * 3 + k, 2].item())
+                        for k in range(3)
+                    ]
+                    tot_c = max(1, sum(raw_c))
+                    c0 = max(1, int(round(n_vis * raw_c[0] / tot_c)))
+                    c1 = max(1, int(round(n_vis * raw_c[1] / tot_c)))
                 else:
-                    seq_b = valid_toks
+                    c0 = max(1, n_vis // 2)
+                    c1 = max(1, (n_vis - c0) // 2)
+
+                v0 = vis_all[:c0]
+                v1 = vis_all[c0 : min(n_vis, c0 + c1)]
+                v2 = vis_all[min(n_vis, c0 + c1) :]
+
+                t_v0 = _extract_view_structure_and_peak_tokens(v0, n_struct=8, n_peak=16, fallback_tok=last_summary)
+                t_v1 = _extract_view_structure_and_peak_tokens(v1, n_struct=6, n_peak=13, fallback_tok=last_summary)
+                t_v2 = _extract_view_structure_and_peak_tokens(v2, n_struct=6, n_peak=13, fallback_tok=last_summary)
+                vis_std = torch.sqrt(vis_all.var(dim=0, keepdim=True, unbiased=False) + 1e-5)  # [1, D]
+                seq_b = torch.cat([t_v0, t_v1, t_v2, vis_std, last_summary], dim=0)  # [64, D]
+            else:
+                seq_b = _extract_view_structure_and_peak_tokens(
+                    valid_toks, n_struct=23, n_peak=40, fallback_tok=last_summary
+                )
+                seq_b = torch.cat([seq_b, last_summary], dim=0)
+
             pooled_list.append(seq_b)
 
         return torch.stack(pooled_list, dim=0)  # [B, 64, D]
@@ -583,39 +648,71 @@ def predict_vlm_dataset(
     model: NativeVLMPillarModel,
     loader: DataLoader,
     device: torch.device,
+    loader_hflip: Optional[DataLoader] = None,
 ) -> Dict[str, np.ndarray]:
+    """Supports optional 2x Horizontal-Flip TTA (`loader_hflip`) while keeping exact sample independence."""
     model.eval()
-    names_all: List[str] = []
-    probs_list, logits_list, clean_l_list, p_clean_list = [], [], [], []
-    mu_list, var_list, emb_list, gold_list = [], [], [], []
 
-    for batch in loader:
-        names_all.extend(batch["names"])
-        out = model(
-            batch_views=batch["views"],
-            batch_ids=None,
-            apply_batch_bias=False,
-            device=device,
-        )
-        probs_list.append(out["probs_6x4"].cpu().numpy())
-        logits_list.append(out["logits_6x4"].cpu().numpy())
-        clean_l_list.append(out["clean_logit"].cpu().numpy())
-        p_clean_list.append(out["p_clean_joint"].cpu().numpy())
-        mu_list.append(out["mu_6d"].cpu().numpy())
-        var_list.append(out["var_6d"].cpu().numpy())
-        emb_list.append(out["quality_emb"].cpu().numpy())
-        gold_list.append(batch["grades"].numpy())
+    def _single_pass(dl: DataLoader) -> Dict[str, np.ndarray]:
+        names_all: List[str] = []
+        probs_list, logits_list, clean_l_list, p_clean_list = [], [], [], []
+        mu_list, var_list, emb_list, gold_list = [], [], [], []
+        for batch in dl:
+            names_all.extend(batch["names"])
+            out = model(
+                batch_views=batch["views"],
+                batch_ids=None,
+                apply_batch_bias=False,
+                device=device,
+            )
+            probs_list.append(out["probs_6x4"].cpu().numpy())
+            logits_list.append(out["logits_6x4"].cpu().numpy())
+            clean_l_list.append(out["clean_logit"].cpu().numpy())
+            p_clean_list.append(out["p_clean_joint"].cpu().numpy())
+            mu_list.append(out["mu_6d"].cpu().numpy())
+            var_list.append(out["var_6d"].cpu().numpy())
+            emb_list.append(out["quality_emb"].cpu().numpy())
+            gold_list.append(batch["grades"].numpy())
+        return {
+            "names": np.array(names_all, dtype=object),
+            "probs_6x4": np.concatenate(probs_list, axis=0).astype(np.float32),
+            "logits_6x4": np.concatenate(logits_list, axis=0).astype(np.float32),
+            "clean_logit": np.concatenate(clean_l_list, axis=0).astype(np.float32),
+            "p_clean_joint": np.concatenate(p_clean_list, axis=0).astype(np.float32),
+            "mu_6d": np.concatenate(mu_list, axis=0).astype(np.float32),
+            "var_6d": np.concatenate(var_list, axis=0).astype(np.float32),
+            "quality_emb": np.concatenate(emb_list, axis=0).astype(np.float32),
+            "gold_6d": np.concatenate(gold_list, axis=0).astype(np.int64),
+        }
+
+    p0 = _single_pass(loader)
+    if loader_hflip is None:
+        return p0
+
+    p1 = _single_pass(loader_hflip)
+    probs = 0.5 * (p0["probs_6x4"] + p1["probs_6x4"])
+    logits = np.log(np.clip(probs, 1e-6, 1.0))
+    from phoenix.config import P0_ONLY_DIMS
+
+    for d in P0_ONLY_DIMS:
+        logits[:, d, 1] = -1e4
+        logits[:, d, 2] = -1e4
+    emb = p0["quality_emb"] + p1["quality_emb"]
+    emb = emb / (np.linalg.norm(emb, axis=-1, keepdims=True) + 1e-8)
+    grid = np.array([0.0, 1.0, 2.0, 3.0], dtype=np.float32).reshape(1, 1, 4)
+    mu = (probs * grid).sum(axis=-1)
+    var = (probs * (grid - mu[:, :, None]) ** 2).sum(axis=-1)
 
     return {
-        "names": np.array(names_all, dtype=object),
-        "probs_6x4": np.concatenate(probs_list, axis=0).astype(np.float32),
-        "logits_6x4": np.concatenate(logits_list, axis=0).astype(np.float32),
-        "clean_logit": np.concatenate(clean_l_list, axis=0).astype(np.float32),
-        "p_clean_joint": np.concatenate(p_clean_list, axis=0).astype(np.float32),
-        "mu_6d": np.concatenate(mu_list, axis=0).astype(np.float32),
-        "var_6d": np.concatenate(var_list, axis=0).astype(np.float32),
-        "quality_emb": np.concatenate(emb_list, axis=0).astype(np.float32),
-        "gold_6d": np.concatenate(gold_list, axis=0).astype(np.int64),
+        "names": p0["names"],
+        "probs_6x4": probs.astype(np.float32),
+        "logits_6x4": logits.astype(np.float32),
+        "clean_logit": (0.5 * (p0["clean_logit"] + p1["clean_logit"])).astype(np.float32),
+        "p_clean_joint": (0.5 * (p0["p_clean_joint"] + p1["p_clean_joint"])).astype(np.float32),
+        "mu_6d": mu.astype(np.float32),
+        "var_6d": var.astype(np.float32),
+        "quality_emb": emb.astype(np.float32),
+        "gold_6d": p0["gold_6d"],
     }
 
 
@@ -624,8 +721,8 @@ def train_one_run(
     train_loader: DataLoader,
     device: torch.device,
     epochs: int = 4,
-    lr_head: float = 2.0e-4,
-    lr_backbone: float = 8.0e-5,
+    lr_head: float = 2.5e-4,
+    lr_backbone: float = 1.0e-4,
     grad_accum: int = 2,
     enable_rl2r: bool = True,
     swa_start_epoch: Optional[int] = None,
@@ -678,8 +775,8 @@ def train_one_run(
                 supp_bias_param=model.head.supp_batch_bias,
             )
             loss = losses["loss"]
-            if enable_rl2r and (ep >= 1 or t_probs is not None):
-                loss = loss + 0.35 * rl2r_loss_fn(out, y_6d)
+            if enable_rl2r:
+                loss = loss + 0.40 * rl2r_loss_fn(out, y_6d)
 
             (loss / grad_accum).backward()
             if (step_idx + 1) % grad_accum == 0 or (step_idx + 1) == len(train_loader):
@@ -799,7 +896,7 @@ def run_smoke_test(pillar: str) -> None:
     single_pred = predict_vlm_dataset(model, single_loader, device)
     max_diff = float(np.max(np.abs(single_pred["probs_6x4"][0] - preds["probs_6x4"][0])))
     assert max_diff < 1e-6, f"Single-image independence violated: max_diff={max_diff}"
-    print(f"[{pillar} Native VLM Smoke Test PASS] probs={preds['probs_6x4'].shape} | single_img_diff={max_diff:.2e}")
+    print(f"[{pillar} Peak-Anomaly Native VLM Smoke Test PASS] probs={preds['probs_6x4'].shape} | single_img_diff={max_diff:.2e}")
 
 
 def main() -> None:
@@ -813,12 +910,12 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--grad-accum", type=int, default=2)
-    parser.add_argument("--lr-head", type=float, default=2.0e-4)
-    parser.add_argument("--lr-backbone", type=float, default=8.0e-5)
+    parser.add_argument("--lr-head", type=float, default=2.5e-4)
+    parser.add_argument("--lr-backbone", type=float, default=1.0e-4)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--fold", type=int, default=-1, help="-1 runs all 5 folds; 0..4 runs a specific fold")
-    parser.add_argument("--aggregate-cv5", action="store_true", help="Aggregate per-fold .npz files into _oof.npz")
+    parser.add_argument("--fold", type=int, default=-1)
+    parser.add_argument("--aggregate-cv5", action="store_true")
     parser.add_argument("--precompute-boxes-only", action="store_true")
     parser.add_argument("--out-dir", default=str(PHOENIX_OOF_DIR))
     parser.add_argument("--ckpt-dir", default=str(PHOENIX_CKPT_DIR))
@@ -868,6 +965,8 @@ def main() -> None:
             print(f"[{args.pillar} Resume] {full_oof_path} already exists; skipping.", flush=True)
             return
 
+        # In stage2-rl2r (default pass passes --epochs 3), ensure at least 4 epochs so Peak-Anomaly DoRA converges fully
+        eff_epochs = max(4, args.epochs) if args.mode == "stage2-rl2r" else args.epochs
         target_folds = list(range(5)) if args.fold < 0 else [args.fold]
         gold_all = np.array([r["grades"] for r in rows], dtype=np.int64)
 
@@ -879,7 +978,6 @@ def main() -> None:
 
             tr_idx = [i for i, r in enumerate(rows) if int(r["fold"]) != f_idx]
             va_idx = [i for i, r in enumerate(rows) if int(r["fold"]) == f_idx]
-            # Strict out-of-fold hygiene: never expose validation fold indices to teacher_probs
             tr_teacher = teacher_probs_all[tr_idx] if teacher_probs_all is not None else None
 
             ds_tr = NativeMultiViewVLMDataset(
@@ -894,6 +992,14 @@ def main() -> None:
                 resolver=resolver,
                 box_cache=box_cache,
                 is_train=False,
+                force_hflip=False,
+            )
+            ds_va_flip = NativeMultiViewVLMDataset(
+                [rows[i] for i in va_idx],
+                resolver=resolver,
+                box_cache=box_cache,
+                is_train=False,
+                force_hflip=True,
             )
             dl_tr = DataLoader(
                 ds_tr,
@@ -911,9 +1017,17 @@ def main() -> None:
                 pin_memory=(device.type == "cuda"),
                 collate_fn=_collate_multiview,
             )
+            dl_va_flip = DataLoader(
+                ds_va_flip,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.workers,
+                pin_memory=(device.type == "cuda"),
+                collate_fn=_collate_multiview,
+            )
 
             print(
-                f"=== [{args.pillar} {args.mode}] Fold {f_idx}/5 | train={len(tr_idx)} val={len(va_idx)} | device={device} ===",
+                f"=== [{args.pillar} {args.mode}] Fold {f_idx}/5 | train={len(tr_idx)} val={len(va_idx)} (2x HFlip TTA) | device={device} ===",
                 flush=True,
             )
             model = NativeVLMPillarModel(
@@ -926,17 +1040,17 @@ def main() -> None:
                 model=model,
                 train_loader=dl_tr,
                 device=device,
-                epochs=args.epochs,
+                epochs=eff_epochs,
                 lr_head=args.lr_head,
                 lr_backbone=args.lr_backbone,
                 grad_accum=args.grad_accum,
                 enable_rl2r=True,
-                swa_start_epoch=max(1, args.epochs - 2),
+                swa_start_epoch=max(1, eff_epochs - 2),
             )
             if swa_sd is not None:
                 model.load_state_dict(swa_sd, strict=False)
 
-            va_out = predict_vlm_dataset(model, dl_va, device)
+            va_out = predict_vlm_dataset(model, dl_va, device, loader_hflip=dl_va_flip)
             np.savez_compressed(fold_npz, fold=np.int64(f_idx), **va_out)
 
             naive_pred = np.argmax(va_out["probs_6x4"], axis=-1)
@@ -982,7 +1096,7 @@ def main() -> None:
             pin_memory=(device.type == "cuda"),
             collate_fn=_collate_multiview,
         )
-        warm_epochs = max(1, args.epochs - 2)
+        warm_epochs = max(2, args.epochs - 1)
         train_one_run(
             model=model,
             train_loader=dl_warm,
