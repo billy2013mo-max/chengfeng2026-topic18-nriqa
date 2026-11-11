@@ -102,16 +102,16 @@ PHOENIX_MODEL_BUDGET: Dict[str, Dict[str, object]] = {
     },
     "pillar2_hetero_vlm_8b": {
         "pillar": "Pillar-2 (Heterogeneous RL2R Ranking VLM)",
-        "display": "InternVL3.5-8B / Qwen2.5-VL-7B (Pairwise Thurstone GRPO + DeQA Head)",
-        "params_b": 8.350,
-        "vram_gb_4090": 5.45,
+        "display": "Clef-Flash-9B / InternVL3.5-8B (Pairwise Thurstone GRPO + DeQA Head)",
+        "params_b": 9.120,
+        "vram_gb_4090": 5.65,
         "precision_4090": "ViT-BF16 + LLM-W4A16 + Head-FP32",
         "candidates": [
+            "models/clef-flash",
+            "models/clef-flash-9b",
             "models/internvl3.5-8b",
             "models/internvl3-8b",
             "models/qwen2.5-vl-7b",
-            "models/clef-flash-9b",
-            "models/clef-flash",
             "Qwen/Qwen2.5-VL-7B-Instruct",
         ],
     },
@@ -347,16 +347,30 @@ def load_real_manifest(manifest_rel_or_abs: str = "data/manifest_combined.csv") 
 
 def load_ordered_test_names(template_or_csv: str) -> List[str]:
     """
-    Supports loading ordered test image names from either:
+    Supports loading ordered test image names (ONLY image IDs, NEVER labels!) from:
       - Official JSON template (`[{"image": "...", "label": {...}}, ...]`)
       - Single-column CSV (`data/manifest_test_150.csv` with header `name`)
-    Automatically checks `docs/reports/` fallback if a root template was archived.
+    Automatically checks `documents/`, `docs/reports/`, and `data/manifest_test_150.csv`
+    fallbacks if root template files were moved during repo cleanup.
     """
     path = template_or_csv if os.path.isabs(template_or_csv) else os.path.join(REPO_ROOT, template_or_csv)
     if not os.path.exists(path):
-        alt = os.path.join(REPO_ROOT, "docs", "reports", os.path.basename(template_or_csv))
-        if os.path.exists(alt):
-            path = alt
+        base = os.path.basename(template_or_csv)
+        fallbacks = [
+            os.path.join(REPO_ROOT, "documents", base),
+            os.path.join(REPO_ROOT, "docs", "reports", base),
+        ]
+        if base == "pred_nriqa_dataset_test.json":
+            fallbacks.extend(
+                [
+                    os.path.join(REPO_ROOT, "data", "manifest_test_150.csv"),
+                    os.path.join(REPO_ROOT, "results", "v2_full", "template_150.json"),
+                ]
+            )
+        for alt in fallbacks:
+            if os.path.exists(alt):
+                path = alt
+                break
     if path.endswith(".csv"):
         with open(path, "r", encoding="utf-8") as f:
             return [row["name"].strip() for row in csv.DictReader(f) if row.get("name", "").strip()]

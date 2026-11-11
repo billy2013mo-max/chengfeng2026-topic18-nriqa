@@ -305,9 +305,9 @@ class Single4090PhoenixEngine:
         out1 = self.pillar1(vlm_views, batch_ids=None, apply_batch_bias=False, device=self.device)
         out2 = self.pillar2(vlm_views, batch_ids=None, apply_batch_bias=False, device=self.device)
 
-        p3_pack = build_pillar3_sample_tensors(pil_img, self.coc_probe)
+        p3_pack = build_pillar3_sample_tensors(pil_img, coc_probe=self.coc_probe)
         out3 = self.pillar3(
-            views_tensor=p3_pack["views_tensor"].unsqueeze(0).to(self.device),
+            views_01=p3_pack["views_tensor"].unsqueeze(0).to(self.device),
             phys_9ch=p3_pack["phys_9ch"].unsqueeze(0).to(self.device),
             probe_8ch=p3_pack["probe_8ch"].unsqueeze(0).to(self.device),
             batch_ids=None,

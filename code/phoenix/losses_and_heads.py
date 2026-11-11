@@ -5,7 +5,7 @@ code/phoenix/losses_and_heads.py
 ================================
 Breakthrough 4: DeQA Direct 4-Way Unimodal Soft-Distribution Head, Batch-Shift
 Calibration Embedding, Heteroscedastic OOF Soft-Relabeling, Cross-Batch Memory (XBM)
-Pairwise Thurstone RL2R Ranking Loss, and Basin-Aligned SWA Collector.
+Pairwise Thurstone RL2R Ranking Loss, and Adapter-Aware Basin-Aligned SWA Collector.
 
 Why This Replaces Cumulative Sigmoid & Multiplicative Heads:
   - Previous 14-ch cumulative subtraction `P(P1) = sigmoid(z1) - sigmoid(z0)` mathematically
@@ -17,16 +17,15 @@ Why This Replaces Cumulative Sigmoid & Multiplicative Heads:
 """
 from __future__ import annotations
 
-import copy
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from phoenix.config import DIMS, FULL_DIMS, P0_ONLY_DIMS
+from phoenix.config import P0_ONLY_DIMS
 
 
 class PhoenixUnimodalDeQAHead(nn.Module):
@@ -94,76 +93,71 @@ class PhoenixUnimodalDeQAHead(nn.Module):
         apply_batch_bias: Optional[bool] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        Args:
-          spatial_tokens: `[B, T, in_dim]` sequence of visual/physical tokens (or `[B, in_dim]`).
-          batch_ids: Optional `[B]` int tensor (`0=orig`, `1=supp`). Applied ONLY during training!
-        Returns dict with:
-          - `logits_6x4`: `[B, 6, 4]` (with `-1e4` masked on P1/P2 of binary dims `3, 5`)
-          - `probs_6x4`: `[B, 6, 4]` calibrated unimodal grade probabilities
-          - `clean_logit`: `[B]` dedicated joint-clean head logit
-          - `p_clean_joint`: `[B]` blended joint clean probability
-          - `mu_6d`: `[B, 6]` expected severity in `[0, 3]`
-          - `var_6d`: `[B, 6]` DeQA predictive ordinal variance
-          - `quality_emb`: `[B, 256]` L2-normalized embedding for Inductive Anchor Bank
-          - `attn_map`: `[B, 7, T]` spatial attention weights for interpretable region localization
+        Runs strictly in FP32 (`autocast(enabled=False)`) to prevent BF16 softmax/attention
+        underflow and mixed-dtype errors.
         """
         if spatial_tokens.ndim == 2:
             spatial_tokens = spatial_tokens.unsqueeze(1)
-        tokens = self.in_proj(spatial_tokens.float())
-        bsz = tokens.shape[0]
+        amp_dev = "cuda" if spatial_tokens.is_cuda else "cpu"
+        with torch.autocast(device_type=amp_dev, enabled=False):
+            tokens = self.in_proj(spatial_tokens.float())
+            bsz = tokens.shape[0]
 
-        q = self.defect_queries.expand(bsz, -1, -1)
-        q_cross, attn_weights = self.cross_attn(q, tokens, tokens, need_weights=True, average_attn_weights=True)
-        q = self.norm1(q + q_cross)
-        q_self, _ = self.inter_defect_attn(q, q, q, need_weights=False)
-        q = self.norm2(q + q_self)
+            q = self.defect_queries.float().expand(bsz, -1, -1)
+            q_cross, attn_weights = self.cross_attn(
+                q, tokens, tokens, need_weights=True, average_attn_weights=True
+            )
+            q = self.norm1(q + q_cross)
+            q_self, _ = self.inter_defect_attn(q, q, q, need_weights=False)
+            q = self.norm2(q + q_self)
 
-        use_bias = self.training if apply_batch_bias is None else apply_batch_bias
-        kappa = F.softplus(self.log_kappa) * 0.35
+            use_bias = self.training if apply_batch_bias is None else apply_batch_bias
+            kappa = F.softplus(self.log_kappa.float()) * 0.35
+            grid_1d = self.grade_grid.float()
 
-        logits_list = []
-        for d in range(6):
-            qd = q[:, d, :]
-            raw_z = self.grade_proj[d](qd)  # [B, 4]
-            center = 3.0 * torch.sigmoid(self.center_proj[d](qd))  # [B, 1] in [0, 3]
-            unimodal_prior = -kappa[d] * (self.grade_grid.unsqueeze(0) - center) ** 2
-            z = raw_z + unimodal_prior
+            logits_list = []
+            for d in range(6):
+                qd = q[:, d, :]
+                raw_z = self.grade_proj[d](qd)  # [B, 4]
+                center = 3.0 * torch.sigmoid(self.center_proj[d](qd))  # [B, 1] in [0, 3]
+                unimodal_prior = -kappa[d] * (grid_1d.unsqueeze(0) - center) ** 2
+                z = raw_z + unimodal_prior
 
-            if use_bias and batch_ids is not None:
-                supp_w = (batch_ids == 1).float().unsqueeze(-1)
-                z = z + supp_w * self.supp_batch_bias[d].unsqueeze(0)
+                if use_bias and batch_ids is not None:
+                    supp_w = (batch_ids == 1).float().unsqueeze(-1)
+                    z = z + supp_w * self.supp_batch_bias[d].float().unsqueeze(0)
 
-            if d in P0_ONLY_DIMS:
-                mask = torch.zeros_like(z)
-                mask[:, 1] = -1e4
-                mask[:, 2] = -1e4
-                z = z + mask
-            logits_list.append(z)
+                if d in P0_ONLY_DIMS:
+                    mask = torch.zeros_like(z)
+                    mask[:, 1] = -1e4
+                    mask[:, 2] = -1e4
+                    z = z + mask
+                logits_list.append(z)
 
-        logits_6x4 = torch.stack(logits_list, dim=1)  # [B, 6, 4]
-        probs_6x4 = F.softmax(logits_6x4, dim=-1)
+            logits_6x4 = torch.stack(logits_list, dim=1)  # [B, 6, 4]
+            probs_6x4 = F.softmax(logits_6x4, dim=-1)
 
-        clean_logit = self.clean_gate_proj(q[:, 6, :]).squeeze(-1)
-        p_clean_head = torch.sigmoid(clean_logit)
-        p_clean_prod = torch.prod(probs_6x4[:, :, 0], dim=1)
-        p_clean_joint = 0.50 * p_clean_head + 0.50 * p_clean_prod
+            clean_logit = self.clean_gate_proj(q[:, 6, :]).squeeze(-1)
+            p_clean_head = torch.sigmoid(clean_logit)
+            p_clean_prod = torch.prod(probs_6x4[:, :, 0], dim=1)
+            p_clean_joint = 0.50 * p_clean_head + 0.50 * p_clean_prod
 
-        grid = self.grade_grid.view(1, 1, 4)
-        mu_6d = torch.sum(probs_6x4 * grid, dim=-1)
-        var_6d = torch.sum(probs_6x4 * (grid - mu_6d.unsqueeze(-1)) ** 2, dim=-1)
+            grid = grid_1d.view(1, 1, 4)
+            mu_6d = torch.sum(probs_6x4 * grid, dim=-1)
+            var_6d = torch.sum(probs_6x4 * (grid - mu_6d.unsqueeze(-1)) ** 2, dim=-1)
 
-        quality_emb = F.normalize(self.anchor_emb_proj(q.reshape(bsz, -1)), dim=-1)
+            quality_emb = F.normalize(self.anchor_emb_proj(q.reshape(bsz, -1)), dim=-1)
 
-        return {
-            "logits_6x4": logits_6x4,
-            "probs_6x4": probs_6x4,
-            "clean_logit": clean_logit,
-            "p_clean_joint": p_clean_joint,
-            "mu_6d": mu_6d,
-            "var_6d": var_6d,
-            "quality_emb": quality_emb,
-            "attn_map": attn_weights,
-        }
+            return {
+                "logits_6x4": logits_6x4,
+                "probs_6x4": probs_6x4,
+                "clean_logit": clean_logit,
+                "p_clean_joint": p_clean_joint,
+                "mu_6d": mu_6d,
+                "var_6d": var_6d,
+                "quality_emb": quality_emb,
+                "attn_map": attn_weights,
+            }
 
 
 def build_heteroscedastic_soft_targets(
@@ -174,14 +168,6 @@ def build_heteroscedastic_soft_targets(
     sigma_mid: float = 0.46,
     teacher_blend: float = 0.25,
 ) -> torch.Tensor:
-    """
-    Constructs DeQA truncated-Gaussian soft targets `[B, 6, 4]`:
-      - Sharp sigma (`0.30`) on `Clean (0)` and `P0 (3)` anchors to protect exact-match boundaries.
-      - Smoother sigma (`0.46`, boosted to `0.62` if flagged as timestamp-duplicate noisy) on
-        `P2 (1)` and `P1 (2)` to resolve DistortBench middle-severity U-valley quantization error.
-      - Optional Stage-2 OOF teacher blending restricted strictly to adjacent grades `|k - y| <= 1`
-        so Clean never leaks to P0 and P0 never leaks to Clean!
-    """
     device = y_6d.device
     bsz = y_6d.shape[0]
     grid = torch.tensor([0.0, 1.0, 2.0, 3.0], device=device, dtype=torch.float32).view(1, 1, 4)
@@ -195,12 +181,10 @@ def build_heteroscedastic_soft_targets(
     dist2 = (grid - y_f) ** 2
     raw = torch.exp(-dist2 / (2.0 * sigma ** 2))
 
-    # Binary dims {3, 5} only allow states {0, 3}: keep crisp smoothing
     bin_mask = torch.ones((1, 6, 4), device=device, dtype=torch.float32)
     for d in P0_ONLY_DIMS:
         bin_mask[:, d, 1] = 0.0
         bin_mask[:, d, 2] = 0.0
-        # Prevent Clean <-> P0 Gaussian bleed on binary dims (distance=3)
     raw = raw * bin_mask
     soft_q = raw / torch.clamp(raw.sum(dim=-1, keepdim=True), min=1e-8)
 
@@ -216,12 +200,6 @@ def build_heteroscedastic_soft_targets(
 
 
 class DeQAOrdinalDistributionLoss(nn.Module):
-    """
-    Sample-additive ordinal distribution loss (100% immune to micro-batch size!):
-      L = L_DeQA_KL + beta_emd * L_CDF_EMD2 + beta_clean * L_JointClean_BCE + reg_batch_bias
-    Applies higher competition-leverage weights to P0 & rare dimensions.
-    """
-
     def __init__(
         self,
         beta_emd: float = 1.50,
@@ -232,7 +210,6 @@ class DeQAOrdinalDistributionLoss(nn.Module):
         self.beta_emd = beta_emd
         self.beta_clean = beta_clean
         self.p0_sample_boost = p0_sample_boost
-        # Higher weight on binary P0 dims & semantic long-tail OverGen/Oversharp
         dim_w = torch.tensor([1.0, 1.0, 1.15, 1.35, 1.35, 1.40], dtype=torch.float32)
         self.register_buffer("dim_weights", dim_w, persistent=False)
 
@@ -244,9 +221,9 @@ class DeQAOrdinalDistributionLoss(nn.Module):
         oof_teacher_probs: Optional[torch.Tensor] = None,
         supp_bias_param: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        logits = head_out["logits_6x4"]
-        probs = head_out["probs_6x4"]
-        clean_logit = head_out["clean_logit"]
+        logits = head_out["logits_6x4"].float()
+        probs = head_out["probs_6x4"].float()
+        clean_logit = head_out["clean_logit"].float()
 
         q = build_heteroscedastic_soft_targets(
             y_6d=y_6d,
@@ -254,16 +231,14 @@ class DeQAOrdinalDistributionLoss(nn.Module):
             oof_teacher_probs=oof_teacher_probs,
         )
         log_p = F.log_softmax(logits, dim=-1)
-        # KL(q || p) = sum q * (log q - log p)
-        kl_per = torch.sum(q * (torch.log(torch.clamp(q, min=1e-7)) - log_p), dim=-1)  # [B, 6]
+        kl_per = torch.sum(q * (torch.log(torch.clamp(q, min=1e-7)) - log_p), dim=-1)
 
-        # Squared Cumulative Distribution EMD: penalizes Clean <-> P0 9x harder than adjacent grades
         cdf_p = torch.cumsum(probs, dim=-1)[:, :, :3]
         cdf_q = torch.cumsum(q, dim=-1)[:, :, :3]
-        emd_per = torch.sum((cdf_p - cdf_q) ** 2, dim=-1)  # [B, 6]
+        emd_per = torch.sum((cdf_p - cdf_q) ** 2, dim=-1)
 
         sample_w = 1.0 + (y_6d == 3).float() * (self.p0_sample_boost - 1.0)
-        dim_w = self.dim_weights.view(1, 6)
+        dim_w = self.dim_weights.float().view(1, 6)
 
         loss_kl = torch.mean(kl_per * sample_w * dim_w)
         loss_emd = torch.mean(emd_per * sample_w * dim_w)
@@ -273,7 +248,7 @@ class DeQAOrdinalDistributionLoss(nn.Module):
 
         total = loss_kl + self.beta_emd * loss_emd + self.beta_clean * loss_clean
         if supp_bias_param is not None:
-            total = total + 0.01 * torch.mean(supp_bias_param ** 2)
+            total = total + 0.01 * torch.mean(supp_bias_param.float() ** 2)
 
         return {
             "loss": total,
@@ -284,15 +259,6 @@ class DeQAOrdinalDistributionLoss(nn.Module):
 
 
 class CrossBatchThurstoneRL2RLoss(nn.Module):
-    """
-    VisualQuality-R1 / Q-Insight Pairwise Ranking Reinforcement Loss over a 1,024-sample
-    Cross-Batch Memory (XBM) Queue.
-
-    Turns 3,573 samples into >6.38M ordinal pairs (`Clean < P2 < P1 < P0`), prioritizing
-    hard scene-matched pairs (high cosine similarity in `quality_emb` but different ground-truth
-    grade!) using variance-normalized Thurstone preference fidelity and GRPO-style group advantage.
-    """
-
     def __init__(self, queue_size: int = 1024, emb_dim: int = 256) -> None:
         super().__init__()
         self.queue_size = queue_size
@@ -315,10 +281,10 @@ class CrossBatchThurstoneRL2RLoss(nn.Module):
         if b == 0:
             return
         if b >= self.queue_size:
-            self.q_mu.copy_(mu[-self.queue_size :].detach())
-            self.q_var.copy_(var[-self.queue_size :].detach())
+            self.q_mu.copy_(mu[-self.queue_size :].detach().float())
+            self.q_var.copy_(var[-self.queue_size :].detach().float())
             self.q_y.copy_(y_6d[-self.queue_size :].detach())
-            self.q_emb.copy_(emb[-self.queue_size :].detach())
+            self.q_emb.copy_(emb[-self.queue_size :].detach().float())
             self.q_ptr[0] = 0
             self.q_filled[0] = self.queue_size
             return
@@ -326,21 +292,21 @@ class CrossBatchThurstoneRL2RLoss(nn.Module):
         ptr = int(self.q_ptr.item())
         end = ptr + b
         if end <= self.queue_size:
-            self.q_mu[ptr:end] = mu.detach()
-            self.q_var[ptr:end] = var.detach()
+            self.q_mu[ptr:end] = mu.detach().float()
+            self.q_var[ptr:end] = var.detach().float()
             self.q_y[ptr:end] = y_6d.detach()
-            self.q_emb[ptr:end] = emb.detach()
+            self.q_emb[ptr:end] = emb.detach().float()
         else:
             first = self.queue_size - ptr
-            self.q_mu[ptr:] = mu[:first].detach()
-            self.q_var[ptr:] = var[:first].detach()
+            self.q_mu[ptr:] = mu[:first].detach().float()
+            self.q_var[ptr:] = var[:first].detach().float()
             self.q_y[ptr:] = y_6d[:first].detach()
-            self.q_emb[ptr:] = emb[:first].detach()
+            self.q_emb[ptr:] = emb[:first].detach().float()
             rem = b - first
-            self.q_mu[:rem] = mu[first:].detach()
-            self.q_var[:rem] = var[first:].detach()
+            self.q_mu[:rem] = mu[first:].detach().float()
+            self.q_var[:rem] = var[first:].detach().float()
             self.q_y[:rem] = y_6d[first:].detach()
-            self.q_emb[:rem] = emb[first:].detach()
+            self.q_emb[:rem] = emb[first:].detach().float()
 
         self.q_ptr[0] = end % self.queue_size
         self.q_filled[0] = min(self.queue_size, int(self.q_filled.item()) + b)
@@ -351,10 +317,10 @@ class CrossBatchThurstoneRL2RLoss(nn.Module):
         y_6d: torch.Tensor,
         grpo_group_samples: int = 6,
     ) -> torch.Tensor:
-        mu = head_out["mu_6d"]        # [B, 6]
-        var = head_out["var_6d"]      # [B, 6]
-        probs = head_out["probs_6x4"] # [B, 6, 4]
-        emb = head_out["quality_emb"] # [B, D]
+        mu = head_out["mu_6d"].float()
+        var = head_out["var_6d"].float()
+        probs = head_out["probs_6x4"].float()
+        emb = head_out["quality_emb"].float()
 
         filled = int(self.q_filled.item())
         if filled > 0:
@@ -368,55 +334,47 @@ class CrossBatchThurstoneRL2RLoss(nn.Module):
             ref_y = y_6d
             ref_emb = emb.detach()
 
-        sim_weight = torch.clamp(emb.detach() @ ref_emb.T, min=0.0)  # [B, M]
+        sim_weight = torch.clamp(emb.detach() @ ref_emb.T, min=0.0)
         hard_scene_w = 1.0 + 1.5 * sim_weight
 
         sqrt2 = math.sqrt(2.0)
         pair_losses = []
         for d in range(6):
-            yd_cur = y_6d[:, d].unsqueeze(1)      # [B, 1]
-            yd_ref = ref_y[:, d].unsqueeze(0)     # [1, M]
-            diff_y = yd_cur - yd_ref              # [B, M]
+            yd_cur = y_6d[:, d].unsqueeze(1)
+            yd_ref = ref_y[:, d].unsqueeze(0)
+            diff_y = yd_cur - yd_ref
             valid = diff_y != 0
             if not torch.any(valid):
                 continue
 
             sign = torch.sign(diff_y.float())
-            # Focus 1.5x harder on adjacent-grade pairs (|y_i - y_j| == 1: P1 vs P2, P0 vs P1)
             adj_boost = torch.where(torch.abs(diff_y) == 1, 1.5, 1.0)
-
             denom = torch.sqrt(var[:, d].unsqueeze(1) + ref_var[:, d].unsqueeze(0) + 0.08)
             z_score = sign * (mu[:, d].unsqueeze(1) - ref_mu[:, d].unsqueeze(0)) / denom
-            # Normal CDF Phi(z) = 0.5 * (1 + erf(z / sqrt(2))) ->Continuous Fidelity loss: 1 - Phi(z)
             phi = 0.5 * (1.0 + torch.erf(z_score / sqrt2))
             fidelity_loss = (1.0 - phi) * adj_boost * hard_scene_w
             pair_losses.append(fidelity_loss[valid].mean())
 
         loss_thurstone = torch.stack(pair_losses).mean() if pair_losses else mu.sum() * 0.0
 
-        # Non-Thinking Single-Step Categorical GRPO Policy Gradient Term
-        # Samples G=6 discrete severity rollouts from `probs` per defect, computes exact
-        # competition-aligned asymmetric reward, normalizes advantage within group, and
-        # reinforces accurate P0/Clean/P1/P2 discrete selections without free-form CoT!
         if grpo_group_samples > 1:
-            bsz = probs.shape[0]
             flat_p = torch.clamp(probs.reshape(-1, 4), min=1e-7)
             flat_p = flat_p / flat_p.sum(dim=-1, keepdim=True)
-            actions = torch.multinomial(flat_p, num_samples=grpo_group_samples, replacement=True)  # [B*6, G]
+            actions = torch.multinomial(flat_p, num_samples=grpo_group_samples, replacement=True)
             gt_flat = y_6d.reshape(-1, 1).expand_as(actions)
 
             exact_hit = (actions == gt_flat).float()
             dist_pen = -0.35 * torch.abs(actions.float() - gt_flat.float())
             p0_miss = ((gt_flat == 3) & (actions != 3)).float() * (-1.25)
             clean_fp = ((gt_flat == 0) & (actions != 0)).float() * (-1.10)
-            rewards = exact_hit + dist_pen + p0_miss + clean_fp  # [B*6, G]
+            rewards = exact_hit + dist_pen + p0_miss + clean_fp
 
             r_mean = rewards.mean(dim=1, keepdim=True)
             r_std = rewards.std(dim=1, keepdim=True) + 1e-5
             adv = ((rewards - r_mean) / r_std).detach()
 
             log_probs_all = torch.log(flat_p)
-            chosen_logp = torch.gather(log_probs_all, dim=1, index=actions)  # [B*6, G]
+            chosen_logp = torch.gather(log_probs_all, dim=1, index=actions)
             loss_grpo = -torch.mean(adv * chosen_logp) * 0.15
         else:
             loss_grpo = mu.sum() * 0.0
@@ -425,26 +383,52 @@ class CrossBatchThurstoneRL2RLoss(nn.Module):
         return loss_thurstone + loss_grpo
 
 
+def extract_trainable_state_dict(model: nn.Module) -> Dict[str, torch.Tensor]:
+    """
+    Extracts ONLY trainable parameters (`requires_grad=True`, e.g., DoRA/LoRA adapters,
+    multimodal mergers, physics stems, and `PhoenixUnimodalDeQAHead`) plus head buffers.
+    Reduces 8B-9B VLM checkpoint & SWA snapshot footprint from ~35 GB down to ~180 MB!
+    """
+    trainable_keys = {name for name, param in model.named_parameters() if param.requires_grad}
+    out: Dict[str, torch.Tensor] = {}
+    for k, v in model.state_dict().items():
+        kl = k.lower()
+        if (
+            (k in trainable_keys)
+            or k.startswith("head.")
+            or k.startswith("physics_stem.")
+            or k.startswith("fgresq_branch.")
+            or k.startswith("pal4vst_probe.")
+            or k.startswith("probe_proj.")
+            or ("lora_" in kl)
+            or ("dora_" in kl)
+            or ("magnitude_vector" in kl)
+        ):
+            out[k] = v.detach().cpu().clone()
+    return out
+
+
 class BasinAlignedSWACollector:
     """
-    Averages checkpoints strictly from the SAME optimization basin (either late-cosine
-    snapshots of a full-data run, or 2~3 low-LR branches forked from the same Epoch-2
-    warmstart checkpoint). Delivers ensemble-level variance reduction in 1 single weight file
-    with ZERO parameter multiplication!
+    Averages trainable adapter + head checkpoints strictly from the SAME optimization basin.
+    Delivers ensemble-level variance reduction in 1 single weight file with ZERO parameter
+    multiplication and <0.4 GB host RAM overhead.
     """
 
     def __init__(self) -> None:
         self.count = 0
+        self.total_weight = 0.0
         self.avg_state: Optional[Dict[str, torch.Tensor]] = None
 
     @torch.no_grad()
     def update(self, model: nn.Module, weight: float = 1.0) -> None:
+        raw_sd = extract_trainable_state_dict(model)
         state = {
-            k: v.detach().cpu().float().clone()
-            for k, v in model.state_dict().items()
+            k: (v.float() if v.is_floating_point() else v.clone())
+            for k, v in raw_sd.items()
         }
         if self.avg_state is None:
-            self.avg_state = {k: v * weight for k, v in state.items()}
+            self.avg_state = {k: (v * weight if v.is_floating_point() else v) for k, v in state.items()}
             self.total_weight = float(weight)
         else:
             for k, v in state.items():

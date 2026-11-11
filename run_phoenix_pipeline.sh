@@ -8,14 +8,9 @@
 # Guarantees:
 #   - 18.655B total active/trained model pool (<= 30.0B hard rule)
 #   - ~15.48 GB single RTX 4090 resident VRAM (<= 24.0 GB, zero swapping, ~3.05s/img)
+#   - Auto-detects multi-GPU nodes to run 5 folds in parallel waves with zero-loss resume!
 #   - 100% pure-real main training (3,573 frames), zero legacy test_150 JSON anchors,
 #     zero 28/69-model .npz caches, zero test-batch quantile alignment.
-#
-# Usage Examples:
-#   bash run_phoenix_pipeline.sh --verify-local
-#   bash run_phoenix_pipeline.sh --step1-split-audit
-#   bash run_phoenix_pipeline.sh --all --test-template pred_nriqa_dataset_test.json --test-dir data/test_150
-#   bash run_phoenix_pipeline.sh --step5-deploy-4090 --test-template blind_654_template.json --test-dir /path/to/blind_654
 # ==============================================================================
 set -euo pipefail
 
@@ -31,6 +26,15 @@ TEST_TEMPLATE="pred_nriqa_dataset_test.json"
 TEST_DIR=""
 OUT_JSON="results/phoenix_submissions/pred_nriqa_dataset_test.json"
 EMIT_ATTRIB=0
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+  NUM_GPUS="${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')}"
+else
+  NUM_GPUS="${NUM_GPUS:-0}"
+fi
+if [[ -z "${NUM_GPUS}" || "${NUM_GPUS}" -lt 1 ]]; then
+  NUM_GPUS=1
+fi
 
 DO_VERIFY=0
 DO_STEP0=0
@@ -106,8 +110,62 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Helper: dispatches 5 folds across available GPUs in parallel waves + aggregates OOF
+run_5fold_parallel_or_seq() {
+  local script_path="$1"
+  local tag_prefix="$2"
+  local mode_name="$3"
+  shift 3
+  local extra_flags=("$@")
+
+  local oof_target="results/phoenix/${tag_prefix}_${mode_name}_oof.npz"
+  if [[ -f "${oof_target}" ]]; then
+    echo "[Resume] ${oof_target} already exists; skipping 5-fold run."
+    return 0
+  fi
+
+  mkdir -p logs/phoenix results/phoenix
+  # Precompute shared 1:1 Wavelet+CoC scrutiny crop boxes once on GPU 0 before parallel waves
+  if [[ ! -f "results/phoenix/scrutiny_boxes_384_cache.npz" ]]; then
+    "${PYTHON_BIN}" code/phoenix/train_pillar12_native_vlm.py --precompute-boxes-only --gpu 0
+  fi
+
+  if [[ "${NUM_GPUS}" -le 1 ]]; then
+    "${PYTHON_BIN}" "${script_path}" --mode "${mode_name}" --gpu 0 "${extra_flags[@]}"
+  else
+    echo "[Parallel 5-Fold] Dispatching ${tag_prefix} (${mode_name}) across ${NUM_GPUS} GPUs..."
+    local f=0
+    while [[ "${f}" -lt 5 ]]; do
+      local pids=()
+      local wave_folds=()
+      for ((g = 0; g < NUM_GPUS && f < 5; g++, f++)); do
+        local fold_file="results/phoenix/${tag_prefix}_${mode_name}_fold${f}.npz"
+        if [[ -f "${fold_file}" ]]; then
+          echo "  [Resume] Fold ${f} already done (${fold_file})"
+          continue
+        fi
+        local log_f="logs/phoenix/${tag_prefix}_${mode_name}_fold${f}.log"
+        echo "  -> Launching ${tag_prefix} fold ${f} on GPU ${g} (log: ${log_f})"
+        "${PYTHON_BIN}" "${script_path}" --mode "${mode_name}" --fold "${f}" --gpu "${g}" "${extra_flags[@]}" >"${log_f}" 2>&1 &
+        pids+=("$!")
+        wave_folds+=("${f}:${log_f}")
+      done
+      for idx in "${!pids[@]}"; do
+        if ! wait "${pids[$idx]}"; then
+          local failed_info="${wave_folds[$idx]}"
+          local failed_log="${failed_info#*:}"
+          echo "[ERROR] Subprocess failed (${failed_info})! Last 40 log lines:" >&2
+          tail -n 40 "${failed_log}" >&2 || true
+          exit 1
+        fi
+      done
+    done
+    "${PYTHON_BIN}" "${script_path}" --mode "${mode_name}" --aggregate-cv5 "${extra_flags[@]}"
+  fi
+}
+
 echo "=================================================================================================="
-echo "  Phoenix 55+ Clean-Slate Compliant NR-IQA Pipeline (18.655B <= 30B | 15.48 GB <= 24GB Single 4090)"
+echo "  Phoenix 55+ Clean-Slate Compliant NR-IQA Pipeline (Detected GPUs: ${NUM_GPUS})"
 echo "=================================================================================================="
 "${PYTHON_BIN}" code/phoenix/config.py
 
@@ -159,9 +217,9 @@ fi
 
 if [[ "${DO_STEP2}" -eq 1 ]]; then
   echo "[Step 2] Stage-1 5-Fold OOF Training across Orthogonal Pillars 1, 2, and 3..."
-  "${PYTHON_BIN}" code/phoenix/train_pillar12_native_vlm.py --pillar pillar1 --mode cv5 --epochs 4
-  "${PYTHON_BIN}" code/phoenix/train_pillar12_native_vlm.py --pillar pillar2 --mode cv5 --epochs 4
-  "${PYTHON_BIN}" code/phoenix/train_pillar3_hires_physics.py --mode cv5 --epochs 8
+  run_5fold_parallel_or_seq code/phoenix/train_pillar12_native_vlm.py pillar1 cv5 --pillar pillar1 --epochs 4
+  run_5fold_parallel_or_seq code/phoenix/train_pillar12_native_vlm.py pillar2 cv5 --pillar pillar2 --epochs 4
+  run_5fold_parallel_or_seq code/phoenix/train_pillar3_hires_physics.py pillar3 cv5 --epochs 8
 fi
 
 if [[ "${DO_STEP3}" -eq 1 ]]; then
@@ -174,15 +232,12 @@ if [[ "${DO_STEP3}" -eq 1 ]]; then
     --export-teacher-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
 
   echo "[Step 3b] Stage-2 XBM Pairwise Thurstone RL2R + Adjacent Soft-Relabeling Refinement..."
-  "${PYTHON_BIN}" code/phoenix/train_pillar12_native_vlm.py \
-    --pillar pillar1 --mode stage2-rl2r --epochs 3 \
-    --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
-  "${PYTHON_BIN}" code/phoenix/train_pillar12_native_vlm.py \
-    --pillar pillar2 --mode stage2-rl2r --epochs 3 \
-    --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
-  "${PYTHON_BIN}" code/phoenix/train_pillar3_hires_physics.py \
-    --mode stage2-rl2r --epochs 5 \
-    --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
+  run_5fold_parallel_or_seq code/phoenix/train_pillar12_native_vlm.py pillar1 stage2-rl2r \
+    --pillar pillar1 --epochs 3 --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
+  run_5fold_parallel_or_seq code/phoenix/train_pillar12_native_vlm.py pillar2 stage2-rl2r \
+    --pillar pillar2 --epochs 3 --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
+  run_5fold_parallel_or_seq code/phoenix/train_pillar3_hires_physics.py pillar3 stage2-rl2r \
+    --epochs 5 --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
 
   echo "[Step 3c] Fitting Final Inductive Dual-Anchor Bank & Bootstrap-LCB 1,024-State Joint Decoder..."
   "${PYTHON_BIN}" code/phoenix/inductive_anchor_and_joint_decoder.py \
@@ -194,15 +249,33 @@ fi
 
 if [[ "${DO_STEP4}" -eq 1 ]]; then
   echo "[Step 4] Full-3,573 Pure-Real Basin-Aligned SWA Training (1 Single Merged Checkpoint per Pillar)..."
-  "${PYTHON_BIN}" code/phoenix/train_pillar12_native_vlm.py \
-    --pillar pillar1 --mode fulldata-swa --epochs 4 \
-    --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
-  "${PYTHON_BIN}" code/phoenix/train_pillar12_native_vlm.py \
-    --pillar pillar2 --mode fulldata-swa --epochs 4 \
-    --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
-  "${PYTHON_BIN}" code/phoenix/train_pillar3_hires_physics.py \
-    --mode fulldata-swa --epochs 8 \
-    --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
+  if [[ "${NUM_GPUS}" -ge 3 ]]; then
+    mkdir -p logs/phoenix
+    echo "[Parallel FullData-SWA] Training Pillar-1 (GPU 0), Pillar-2 (GPU 1), Pillar-3 (GPU 2) concurrently..."
+    "${PYTHON_BIN}" code/phoenix/train_pillar12_native_vlm.py \
+      --pillar pillar1 --mode fulldata-swa --epochs 4 --gpu 0 \
+      --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz >logs/phoenix/pillar1_fulldata_swa.log 2>&1 &
+    p1_pid=$!
+    "${PYTHON_BIN}" code/phoenix/train_pillar12_native_vlm.py \
+      --pillar pillar2 --mode fulldata-swa --epochs 4 --gpu 1 \
+      --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz >logs/phoenix/pillar2_fulldata_swa.log 2>&1 &
+    p2_pid=$!
+    "${PYTHON_BIN}" code/phoenix/train_pillar3_hires_physics.py \
+      --mode fulldata-swa --epochs 8 --gpu 2 \
+      --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz >logs/phoenix/pillar3_fulldata_swa.log 2>&1 &
+    p3_pid=$!
+    wait "${p1_pid}" "${p2_pid}" "${p3_pid}"
+  else
+    "${PYTHON_BIN}" code/phoenix/train_pillar12_native_vlm.py \
+      --pillar pillar1 --mode fulldata-swa --epochs 4 --gpu 0 \
+      --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
+    "${PYTHON_BIN}" code/phoenix/train_pillar12_native_vlm.py \
+      --pillar pillar2 --mode fulldata-swa --epochs 4 --gpu 0 \
+      --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
+    "${PYTHON_BIN}" code/phoenix/train_pillar3_hires_physics.py \
+      --mode fulldata-swa --epochs 8 --gpu 0 \
+      --teacher-oof-npz results/phoenix/phoenix_3pillar_teacher_oof.npz
+  fi
 fi
 
 if [[ "${DO_STEP5}" -eq 1 ]]; then
@@ -214,7 +287,7 @@ if [[ "${DO_STEP5}" -eq 1 ]]; then
   if [[ "${EMIT_ATTRIB}" -eq 1 ]]; then
     EXTRA_ARGS+=(--emit-attribution)
   fi
-  "${PYTHON_BIN}" code/phoenix/deploy_single_4090_engine.py \
+  CUDA_VISIBLE_DEVICES=0 "${PYTHON_BIN}" code/phoenix/deploy_single_4090_engine.py \
     --template "${TEST_TEMPLATE}" \
     --out-json "${OUT_JSON}" \
     "${EXTRA_ARGS[@]}"

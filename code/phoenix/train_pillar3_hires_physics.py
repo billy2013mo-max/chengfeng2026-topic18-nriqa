@@ -5,27 +5,28 @@ code/phoenix/train_pillar3_hires_physics.py
 ===========================================
 Breakthrough 2 & 3: Pillar-3 1:1 High-Frequency & Optical Physics Specialist (`~1.555B`).
 
-Architecture Components (100% Orthogonal to VLMs):
-  1. `DINOv3-ViT-L/16` (`0.304B`) + `C-RADIOv4-H` (`0.630B`) with 4-Depth Intermediate
-     Hypercolumn Taps (`25%, 50%, 75%, 100%`) + Full-Depth DoRA -> preserves early/mid-layer
-     oversharpening overshoot ripples (`过锐`) & smooth skin/grass smearing (`纹理损失`)
-     before deep semantic pooling discards them!
-  2. `ConvNeXtV2-Large` (`0.200B`) + `1:1` 2D Haar Wavelet & Bipolar Overshoot ConvStem
-     -> directly ingests unscaled `1:1` high-frequency wavelet subbands `(LH, HL, HH)`,
-     USM bipolar halo envelope, and `8x8` macroblock glitch maps (`花屏`).
-  3. `FGResQ` Neural Restoration Degradation Adapter (`0.350B` budget) + `PAL4VST` Spatial
-     Artifact Saliency Probe (`0.046B`) + `CoC Depth-Defocus Jacobian Field` (`0.025B` frozen
-     `Depth-Anything-V2-Small`) -> pinpoints `虚化突兀` (same-depth sharpness cliffs) and
-     `过度生成` (localized generative implausibility).
-  4. `PhoenixUnimodalDeQAHead` + `DeQAOrdinalDistributionLoss` + `CrossBatchThurstoneRL2RLoss`
-     + `BasinAlignedSWACollector` (`cv5`, `stage2-rl2r`, `fulldata-swa`, and `--smoke-test`).
+Server-Verified Architecture Components (100% Orthogonal to VLMs):
+  1. `DINOv3-ViT-L/16` (`0.304B`, `models/dinov3-vitl16/model.safetensors` via `timm`
+     `vit_large_patch16_dinov3`) with 4-Depth Intermediate Hypercolumn Hooks (`25%, 50%, 75%, 100%`)
+     + Full-Depth `nn.Linear`-only DoRA!
+  2. `C-RADIOv4-H` (`0.630B`, `models/c-radio-v4-h` via `AutoModel(..., trust_remote_code=True)`,
+     taking `[0, 1]` RGB `summ, feat = model(x_01)`) with 4-Depth Intermediate Hypercolumn Hooks
+     on `radio_model.model.blocks` (`dim=1280`, register-prefix safe)!
+  3. `ConvNeXtV2` (`0.200B`, `models/convnextv2-base/model.safetensors` or `convnextv2-large`)
+     + `1:1` 2D Haar Wavelet & Bipolar Overshoot ConvStem (`9ch`: Haar LH/HL/HH, Bipolar Halo,
+     8x8 Macroblock Glitch, UI Stroke Mask, and 3ch CoC Depth-Defocus Jacobian Field).
+  4. `PE-Core-Large` / `FGResQ` Perceptual-Degradation Branch (`0.350B`, auto-loads
+     `models/pe-core-l14/model.safetensors` when available!) + `PAL4VST` Spatial Artifact Probe.
+  5. Fork-safe main-process CoC/box caching + BF16 vision autocast + FP32 `PhoenixUnimodalDeQAHead`
+     + Multi-GPU per-fold sharding (`--fold 0..4 --gpu 0..7` + `--aggregate-cv5`) & resume!
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-from typing import Dict, List, Optional, Sequence
+import time
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -51,28 +52,115 @@ from phoenix.losses_and_heads import (
     CrossBatchThurstoneRL2RLoss,
     DeQAOrdinalDistributionLoss,
     PhoenixUnimodalDeQAHead,
+    extract_trainable_state_dict,
 )
 from phoenix.native_physics_and_views import (
     CoCDepthDefocusProbe,
     compute_1to1_wavelet_and_artifact_maps,
     resize_native_aspect_pil,
-    select_scrutiny_1to1_patches,
 )
 from phoenix.stage0_real_restoration_tapt import (
     FGResQDegradationProjector,
     PAL4VSTArtifactSaliencyProbe,
 )
-from phoenix.train_pillar12_native_vlm import load_batch_shift_init, load_split_rows
+from phoenix.train_pillar12_native_vlm import (
+    aggregate_5fold_oof,
+    crop_1to1_from_box,
+    get_or_build_scrutiny_box_cache,
+    load_batch_shift_init,
+    load_split_rows,
+)
+
+
+class _FourStageBlockHook:
+    """Captures intermediate token outputs at 25%, 50%, 75%, and 100% block depths."""
+
+    def __init__(self, blocks: nn.ModuleList) -> None:
+        n = len(blocks)
+        self.indices = [
+            max(0, n // 4 - 1),
+            max(0, n // 2 - 1),
+            max(0, (3 * n) // 4 - 1),
+            max(0, n - 1),
+        ]
+        self.cache: Dict[int, Optional[torch.Tensor]] = {s: None for s in range(4)}
+        for slot, b_idx in enumerate(self.indices):
+            blocks[b_idx].register_forward_hook(self._make_hook(slot))
+
+    def _make_hook(self, slot: int):
+        def _hk(_mod, _inp, out):
+            t = out[0] if isinstance(out, tuple) else out
+            self.cache[slot] = t
+
+        return _hk
+
+    def pop_pooled_hypercolumn(self, fallback_tokens: torch.Tensor, grid_hw: Tuple[int, int] = (6, 6)) -> torch.Tensor:
+        target_len = grid_hw[0] * grid_hw[1]
+        ft = fallback_tokens.float()
+        l_ref = ft.shape[1]
+        chunks: List[torch.Tensor] = []
+        for slot in range(4):
+            c = self.cache.get(slot)
+            self.cache[slot] = None
+            if c is None:
+                c_f = ft
+            else:
+                c_f = c.float()
+                # Strip leading CLS / register summary tokens if present
+                if c_f.shape[1] > l_ref and l_ref >= target_len:
+                    c_f = c_f[:, -l_ref:, :]
+            if c_f.ndim == 4:
+                p = F.adaptive_avg_pool2d(c_f, output_size=grid_hw).flatten(2).transpose(1, 2)
+            else:
+                p = F.adaptive_avg_pool1d(c_f.transpose(1, 2), output_size=target_len).transpose(1, 2)
+            chunks.append(p)
+        return torch.cat(chunks, dim=-1)  # [B, 36, 4*D]
+
+
+def _attach_linear_only_dora_or_unfreeze(
+    model: nn.Module,
+    blocks: Optional[nn.ModuleList],
+    rank: int = 16,
+    use_dora: bool = True,
+) -> nn.Module:
+    try:
+        from peft import LoraConfig, get_peft_model
+
+        exact_linear = [
+            name
+            for name, mod in model.named_modules()
+            if isinstance(mod, nn.Linear)
+            and not any(s in name.lower() for s in ("patch_embed", "head", "stem"))
+            and name.split(".")[-1] in {"qkv", "proj", "fc1", "fc2", "q_proj", "k_proj", "v_proj", "out_proj"}
+        ]
+        if exact_linear:
+            for p in model.parameters():
+                p.requires_grad = False
+            cfg = LoraConfig(
+                r=rank,
+                lora_alpha=rank * 2,
+                lora_dropout=0.05,
+                target_modules=exact_linear,
+                use_dora=use_dora,
+                bias="none",
+            )
+            return get_peft_model(model, cfg)
+    except Exception:
+        pass
+
+    for p in model.parameters():
+        p.requires_grad = False
+    if blocks is not None and len(blocks) > 0:
+        for blk in list(blocks)[-min(8, len(blocks)) :]:
+            for p in blk.parameters():
+                p.requires_grad = True
+    for n, p in model.named_parameters():
+        if "norm" in n.lower():
+            p.requires_grad = True
+    return model
 
 
 class HaarWaveletCoCPhysicsStem(nn.Module):
-    """
-    1.8M-param explicit physical inductive-bias stem encoding:
-      - `haar_hf` (3 ch: LH, HL, HH) + `bipolar_halo` (1 ch) + `macroblock_glitch` (1 ch)
-        + `ui_text_mask` (1 ch) + `coc_jacobian_field` (3 ch: Z_hat, E_HF, CoC_Cliff) = 9 channels!
-    Outputs `[B, 36, out_dim]` spatial tokens aligned to the Query2Defect head.
-    """
-
     def __init__(self, in_channels: int = 9, out_dim: int = 512) -> None:
         super().__init__()
         self.net = nn.Sequential(
@@ -88,22 +176,27 @@ class HaarWaveletCoCPhysicsStem(nn.Module):
         )
 
     def forward(self, phys_9ch: torch.Tensor) -> torch.Tensor:
-        fmap = self.net(phys_9ch)
-        pooled = F.adaptive_avg_pool2d(fmap, output_size=(6, 6))
-        return pooled.flatten(2).transpose(1, 2)  # [B, 36, out_dim]
+        amp_dev = "cuda" if phys_9ch.is_cuda else "cpu"
+        with torch.autocast(device_type=amp_dev, enabled=False):
+            fmap = self.net(phys_9ch.float())
+            pooled = F.adaptive_avg_pool2d(fmap, output_size=(6, 6))
+            return pooled.flatten(2).transpose(1, 2)  # [B, 36, out_dim]
 
 
 class MultiLayerHypercolumnVisionTower(nn.Module):
     """
-    Loads `DINOv3-ViT-L/16`, `C-RADIOv4-H`, and `ConvNeXtV2-Large`, tapping 4 intermediate
-    stages `(25%, 50%, 75%, 100%)` from each tower and projecting them into a unified `out_dim`
-    hypercolumn token sequence. Supports offline mock mode for unit testing.
+    Natively loads `/wanqing-develop/luowenjing/18/models/` offline checkpoints:
+      - `dinov3-vitl16` (`timm` `vit_large_patch16_dinov3` + `safetensors`)
+      - `c-radio-v4-h` (`AutoModel(..., trust_remote_code=True)` taking `[0, 1]` RGB)
+      - `convnextv2` (`timm` `convnextv2_base` / `convnextv2_large` + `safetensors`)
+      - Optional `pe-core-l14` (`timm` `vit_pe_core_large_patch14_336` + `safetensors`)
     """
 
     def __init__(self, out_dim: int = 512, mock_backbone: bool = False) -> None:
         super().__init__()
         self.out_dim = out_dim
         self.mock_backbone = mock_backbone
+        self.has_pecore = False
 
         if mock_backbone:
             self.mock_conv = nn.Sequential(
@@ -112,124 +205,176 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
                 nn.Conv2d(128, out_dim, kernel_size=3, stride=2, padding=1),
                 nn.AdaptiveAvgPool2d((6, 6)),
             )
+            return
+
+        # 1. DINOv3-ViT-L/16 (`timm` safetensors or HF fallback)
+        self.dinov3, self._dino_hook, d_dim = self._build_dinov3()
+        self.proj_dino = nn.Sequential(nn.LayerNorm(d_dim * 4), nn.Linear(d_dim * 4, out_dim)).float()
+
+        # 2. C-RADIOv4-H (`[0, 1]` input, `m.radio_model.model.blocks`)
+        self.cradio, self._radio_hook, r_dim = self._build_cradio()
+        self.proj_radio = nn.Sequential(nn.LayerNorm(r_dim * 4), nn.Linear(r_dim * 4, out_dim)).float()
+
+        # 3. ConvNeXtV2 (`models/convnextv2-base` or `models/convnextv2-large`)
+        self.convnext, c_dim = self._build_convnext()
+        self.proj_convnext = nn.Sequential(nn.LayerNorm(c_dim), nn.Linear(c_dim, out_dim)).float()
+
+        # 4. Optional PE-Core-L (`models/pe-core-l14/model.safetensors` under our 0.35B slot)
+        pec_res = self._try_build_pecore()
+        if pec_res is not None:
+            self.pecore, self._pec_hook, p_dim = pec_res
+            self.proj_pecore = nn.Sequential(nn.LayerNorm(p_dim * 4), nn.Linear(p_dim * 4, out_dim)).float()
+            self.has_pecore = True
+
+        self.register_buffer("imnet_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("imnet_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("pec_mean", torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("pec_std", torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1), persistent=False)
+
+    @staticmethod
+    def _build_dinov3():
+        import timm
+        from safetensors.torch import load_file
+
+        p_cand = resolve_local_or_hf_model("pillar3_dinov3_l")
+        w_file = p_cand if os.path.isfile(p_cand) else os.path.join(p_cand, "model.safetensors")
+        if os.path.exists(w_file):
+            m = timm.create_model("vit_large_patch16_dinov3", pretrained=False, num_classes=0, dynamic_img_size=True)
+            m.load_state_dict(load_file(w_file), strict=False)
         else:
-            self.dinov3, d_dim = self._load_hf_vision("pillar3_dinov3_l")
-            self.cradio, r_dim = self._load_hf_vision("pillar3_cradio_v4_h")
-            self.convnext, c_dim = self._load_convnext("pillar3_convnextv2_l")
-            self.proj_dino = nn.Linear(d_dim * 4, out_dim)
-            self.proj_radio = nn.Linear(r_dim * 4, out_dim)
-            self.proj_convnext = nn.Linear(c_dim, out_dim)
+            m = timm.create_model("vit_large_patch14_dinov2.lvd142m", pretrained=True, num_classes=0, dynamic_img_size=True)
+        hook = _FourStageBlockHook(m.blocks)
+        dim = int(m.embed_dim)
+        if torch.cuda.is_available():
+            m = m.to(torch.bfloat16)
+        m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=16, use_dora=True)
+        return m, hook, dim
 
     @staticmethod
-    def _load_hf_vision(model_key: str):
-        from transformers import AutoConfig, AutoModel
+    def _build_cradio():
+        from transformers import AutoModel
 
-        path = resolve_local_or_hf_model(model_key)
-        cfg = AutoConfig.from_pretrained(path, trust_remote_code=True)
-        dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-        model = AutoModel.from_pretrained(path, trust_remote_code=True, torch_dtype=dtype)
-        # Enable full-depth tuning via DoRA if PEFT is available, else unfreeze LayerNorm + QKV
+        repo = resolve_local_or_hf_model("pillar3_cradio_v4_h")
+        dt = torch.bfloat16 if torch.cuda.is_available() else torch.float32
         try:
-            from peft import LoraConfig, get_peft_model
-
-            linear_names = sorted(
-                {
-                    n.split(".")[-1]
-                    for n, m in model.named_modules()
-                    if isinstance(m, nn.Linear) and any(k in n for k in ("q", "k", "v", "proj", "fc1", "fc2"))
-                }
-            )
-            if linear_names:
-                model = get_peft_model(
-                    model,
-                    LoraConfig(r=16, lora_alpha=32, target_modules=linear_names, use_dora=True),
-                )
-        except Exception:
-            pass
-        hdim = int(getattr(cfg, "hidden_size", 1024))
-        return model, hdim
+            m = AutoModel.from_pretrained(repo, trust_remote_code=True, dtype=dt)
+        except TypeError:
+            m = AutoModel.from_pretrained(repo, trust_remote_code=True, torch_dtype=dt)
+        blocks = m.radio_model.model.blocks
+        hook = _FourStageBlockHook(blocks)
+        dim = 1280
+        # Unfreeze top 8 blocks of C-RADIO cleanly (custom remote_code modules work safest with block unfreezing)
+        for p in m.parameters():
+            p.requires_grad = False
+        for blk in list(blocks)[-8:]:
+            for p in blk.parameters():
+                p.requires_grad = True
+        return m, hook, dim
 
     @staticmethod
-    def _load_convnext(model_key: str):
-        path = resolve_local_or_hf_model(model_key)
+    def _build_convnext():
+        import timm
+        from safetensors.torch import load_file
+
+        p_cand = resolve_local_or_hf_model("pillar3_convnextv2_l")
+        w_file = p_cand if os.path.isfile(p_cand) else os.path.join(p_cand, "model.safetensors")
+        arch = "convnextv2_large.fcmae_ft_in22k_in1k_384" if "large" in p_cand.lower() else "convnextv2_base.fcmae_ft_in22k_in1k"
+        if os.path.exists(w_file):
+            m = timm.create_model(arch, pretrained=False, num_classes=0)
+            m.load_state_dict(load_file(w_file), strict=False)
+        else:
+            m = timm.create_model("convnextv2_base.fcmae_ft_in22k_in1k", pretrained=True, num_classes=0)
+        if torch.cuda.is_available():
+            m = m.to(torch.bfloat16)
+        for p in m.parameters():
+            p.requires_grad = True
+        return m, int(m.num_features)
+
+    @staticmethod
+    def _try_build_pecore():
+        p_cand = resolve_local_or_hf_model("pillar3_fgresq_adapter")
+        w_file = p_cand if os.path.isfile(p_cand) else os.path.join(p_cand, "model.safetensors")
+        if not os.path.exists(w_file) or "pe-core" not in w_file.lower():
+            return None
         try:
             import timm
+            from safetensors.torch import load_file
 
-            if os.path.isdir(path):
-                from transformers import AutoConfig, AutoModel
-
-                cfg = AutoConfig.from_pretrained(path, trust_remote_code=True)
-                m = AutoModel.from_pretrained(path, trust_remote_code=True)
-                dims = getattr(cfg, "hidden_sizes", [192, 384, 768, 1536])
-                return m, int(dims[-1])
-            m = timm.create_model(path, pretrained=True, num_classes=0, global_pool="")
-            return m, int(m.num_features)
+            m = timm.create_model("vit_pe_core_large_patch14_336", pretrained=False, num_classes=0, dynamic_img_size=True)
+            m.load_state_dict(load_file(w_file), strict=False)
+            hook = _FourStageBlockHook(m.blocks)
+            dim = int(m.embed_dim)
+            if torch.cuda.is_available():
+                m = m.to(torch.bfloat16)
+            m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=16, use_dora=True)
+            return m, hook, dim
         except Exception:
-            from transformers import AutoConfig, AutoModel
+            return None
 
-            cfg = AutoConfig.from_pretrained(path, trust_remote_code=True)
-            m = AutoModel.from_pretrained(path, trust_remote_code=True)
-            dims = getattr(cfg, "hidden_sizes", [192, 384, 768, 1536])
-            return m, int(dims[-1])
-
-    @staticmethod
-    def _extract_4layer_hypercolumn(model: nn.Module, x: torch.Tensor, target_tokens: int = 36) -> torch.Tensor:
-        out = model(pixel_values=x.to(next(model.parameters()).dtype), output_hidden_states=True, return_dict=True)
-        hs = out.hidden_states
-        n = len(hs)
-        taps = [hs[max(0, n // 4)], hs[max(0, n // 2)], hs[max(0, (3 * n) // 4)], hs[-1]]
-        pooled_taps = []
-        for t in taps:
-            tf = t.float()
-            if tf.ndim == 4:  # [B, C, H, W]
-                p = F.adaptive_avg_pool2d(tf, output_size=(6, 6)).flatten(2).transpose(1, 2)
-            else:             # [B, L, C]
-                p = F.adaptive_avg_pool1d(tf.transpose(1, 2), output_size=target_tokens).transpose(1, 2)
-            pooled_taps.append(p)
-        return torch.cat(pooled_taps, dim=-1)  # [B, 36, 4*D]
-
-    def forward(self, views_tensor: torch.Tensor) -> torch.Tensor:
+    def forward(self, views_01: torch.Tensor) -> torch.Tensor:
         """
         Args:
-          views_tensor: `[B, 3_views, 3, 384, 384]` normalized RGB tensor (View 0 = aspect-padded
-                        global, View 1 & 2 = unscaled 1:1 384x384 scrutiny patches).
+          views_01: `[B, 3_views, 3, 384, 384]` RGB tensor in `[0, 1]`.
         Returns:
-          `[B, T_vis, out_dim]` visual hypercolumn tokens.
+          `[B, 108, out_dim]` FP32 hypercolumn visual tokens.
         """
-        bsz, n_v, c, h, w = views_tensor.shape
-        flat_v = views_tensor.reshape(bsz * n_v, c, h, w)
+        bsz, n_v, c, h, w = views_01.shape
+        flat_01 = views_01.reshape(bsz * n_v, c, h, w)
 
         if self.mock_backbone:
-            fmap = self.mock_conv(flat_v)  # [B*3, out_dim, 6, 6]
+            fmap = self.mock_conv(flat_01)
             return fmap.flatten(2).transpose(1, 2).reshape(bsz, n_v * 36, self.out_dim)
 
-        hc_dino = self.proj_dino(self._extract_4layer_hypercolumn(self.dinov3, flat_v, 36))
-        hc_radio = self.proj_radio(self._extract_4layer_hypercolumn(self.cradio, flat_v, 36))
+        use_bf16 = flat_01.is_cuda
+        imnet_x = (flat_01 - self.imnet_mean) / self.imnet_std
 
-        try:
-            cx_out = self.convnext(flat_v.to(next(self.convnext.parameters()).dtype))
-            if hasattr(cx_out, "last_hidden_state"):
-                cx_feat = cx_out.last_hidden_state.float()
+        with torch.autocast(device_type="cuda" if use_bf16 else "cpu", dtype=torch.bfloat16, enabled=use_bf16):
+            # 1. DINOv3 forward (`timm` unwrapped or PeftModel wrapped)
+            dino_base = self.dinov3.get_base_model() if hasattr(self.dinov3, "get_base_model") else self.dinov3
+            raw_dino = dino_base.forward_features(imnet_x)
+            n_pref = int(getattr(dino_base, "num_prefix_tokens", 1))
+            spatial_dino = raw_dino[:, n_pref:, :] if raw_dino.shape[1] > n_pref else raw_dino
+
+            # 2. C-RADIOv4-H forward (expects `[0, 1]` input directly!)
+            _, feat_radio = self.cradio(flat_01)
+
+            # 3. ConvNeXtV2 spatial map forward
+            cx_map = self.convnext.forward_features(imnet_x)
+
+            # 4. Optional PE-Core-L forward (`336x336` patch-14 friendly resize)
+            if self.has_pecore:
+                pec_in = F.interpolate((flat_01 - self.pec_mean) / self.pec_std, size=(336, 336), mode="bilinear", align_corners=False)
+                pec_base = self.pecore.get_base_model() if hasattr(self.pecore, "get_base_model") else self.pecore
+                raw_pec = pec_base.forward_features(pec_in)
+                p_pref = int(getattr(pec_base, "num_prefix_tokens", 1))
+                spatial_pec = raw_pec[:, p_pref:, :] if raw_pec.shape[1] > p_pref else raw_pec
             else:
-                cx_feat = cx_out.float()
-            if cx_feat.ndim == 4:
+                spatial_pec = None
+
+        amp_dev = "cuda" if flat_01.is_cuda else "cpu"
+        with torch.autocast(device_type=amp_dev, enabled=False):
+            hc_dino = self.proj_dino(self._dino_hook.pop_pooled_hypercolumn(spatial_dino, (6, 6)))
+            hc_radio = self.proj_radio(self._radio_hook.pop_pooled_hypercolumn(feat_radio, (6, 6)))
+
+            if cx_map.ndim == 4:
                 cx_tok = self.proj_convnext(
-                    F.adaptive_avg_pool2d(cx_feat, output_size=(6, 6)).flatten(2).transpose(1, 2)
+                    F.adaptive_avg_pool2d(cx_map.float(), output_size=(6, 6)).flatten(2).transpose(1, 2)
                 )
             else:
                 cx_tok = self.proj_convnext(
-                    F.adaptive_avg_pool1d(cx_feat.transpose(1, 2), output_size=36).transpose(1, 2)
+                    F.adaptive_avg_pool1d(cx_map.float().transpose(1, 2), output_size=36).transpose(1, 2)
                 )
-        except Exception:
-            cx_tok = torch.zeros_like(hc_dino)
 
-        fused_per_view = (hc_dino + hc_radio + cx_tok) / 3.0  # [B*3, 36, out_dim]
-        return fused_per_view.reshape(bsz, n_v * 36, self.out_dim)
+            if self.has_pecore and spatial_pec is not None:
+                hc_pec = self.proj_pecore(self._pec_hook.pop_pooled_hypercolumn(spatial_pec, (6, 6)))
+                fused = (hc_dino + hc_radio + cx_tok + hc_pec) / 4.0
+            else:
+                fused = (hc_dino + hc_radio + cx_tok) / 3.0
+
+            return fused.reshape(bsz, n_v * 36, self.out_dim)
 
 
 class Pillar3HiResPhysicsSpecialist(nn.Module):
-    """Complete Pillar-3 model combining Vision Hypercolumns + Wavelet/CoC Physics + Restoration Probes + DeQA Head."""
-
     def __init__(
         self,
         init_batch_shift: Optional[np.ndarray] = None,
@@ -239,10 +384,10 @@ class Pillar3HiResPhysicsSpecialist(nn.Module):
         super().__init__()
         token_dim = 512
         self.vision_tower = MultiLayerHypercolumnVisionTower(out_dim=token_dim, mock_backbone=mock_backbone)
-        self.physics_stem = HaarWaveletCoCPhysicsStem(in_channels=9, out_dim=token_dim)
-        self.fgresq_branch = FGResQDegradationProjector(in_channels=8, feat_dim=256)
-        self.pal4vst_probe = PAL4VSTArtifactSaliencyProbe(in_channels=8, hidden_dim=192)
-        self.probe_proj = nn.Linear(256, token_dim)
+        self.physics_stem = HaarWaveletCoCPhysicsStem(in_channels=9, out_dim=token_dim).float()
+        self.fgresq_branch = FGResQDegradationProjector(in_channels=8, feat_dim=256).float()
+        self.pal4vst_probe = PAL4VSTArtifactSaliencyProbe(in_channels=8, hidden_dim=192).float()
+        self.probe_proj = nn.Linear(256, token_dim).float()
 
         if stage0_ckpt_path and os.path.exists(stage0_ckpt_path):
             ckpt = torch.load(stage0_ckpt_path, map_location="cpu")
@@ -255,51 +400,59 @@ class Pillar3HiResPhysicsSpecialist(nn.Module):
             num_heads=8,
             dropout=0.10,
             init_batch_shift=init_batch_shift,
-        )
+        ).float()
 
     def forward(
         self,
-        views_tensor: torch.Tensor,
+        views_01: torch.Tensor,
         phys_9ch: torch.Tensor,
         probe_8ch: torch.Tensor,
         batch_ids: Optional[torch.Tensor] = None,
         apply_batch_bias: Optional[bool] = None,
     ) -> Dict[str, torch.Tensor]:
-        vis_tokens = self.vision_tower(views_tensor)                # [B, 108, 512]
-        phys_tokens = self.physics_stem(phys_9ch)                   # [B, 36, 512]
-        fg_tokens = self.probe_proj(self.fgresq_branch(probe_8ch)["tokens"])      # [B, 16, 512]
-        pal_tokens = self.probe_proj(self.pal4vst_probe(probe_8ch)["artifact_tokens"])  # [B, 16, 512]
-
-        all_tokens = torch.cat([vis_tokens, phys_tokens, fg_tokens, pal_tokens], dim=1)
-        return self.head(all_tokens, batch_ids=batch_ids, apply_batch_bias=apply_batch_bias)
+        vis_tokens = self.vision_tower(views_01)
+        amp_dev = "cuda" if views_01.is_cuda else "cpu"
+        with torch.autocast(device_type=amp_dev, enabled=False):
+            phys_tokens = self.physics_stem(phys_9ch.float())
+            fg_tokens = self.probe_proj(self.fgresq_branch(probe_8ch.float())["tokens"])
+            pal_tokens = self.probe_proj(self.pal4vst_probe(probe_8ch.float())["artifact_tokens"])
+            all_tokens = torch.cat([vis_tokens.float(), phys_tokens, fg_tokens, pal_tokens], dim=1)
+            return self.head(all_tokens, batch_ids=batch_ids, apply_batch_bias=apply_batch_bias)
 
 
 def build_pillar3_sample_tensors(
     pil_img,
-    coc_probe: CoCDepthDefocusProbe,
+    coc_probe: Optional[CoCDepthDefocusProbe] = None,
+    precomputed_boxes: Optional[np.ndarray] = None,
     patch_size: int = 384,
 ) -> Dict[str, object]:
     """
-    Constructs exact single-image tensors for Pillar-3 without distorting aspect ratio:
-      - Global view is resized preserving aspect ratio inside `384x384` with neutral reflection padding
-      - Patch 1 & Patch 2 are strictly `1:1` unscaled `384x384` crops
-      - `phys_9ch` and `probe_8ch` capture native half-res Haar wavelets, bipolar overshoot,
-        macroblock glitches, and Optical CoC Depth-Defocus cliffs resized cleanly to `256x256`.
+    Constructs `[0, 1]` `views_01 [3, 3, 384, 384]` + `phys_9ch [9, 256, 256]` + `probe_8ch [8, 256, 256]`.
+    Uses CPU-safe analytical CoC depth fallback inside DataLoader workers when `coc_probe` is None.
     """
     rgb_np = np.asarray(pil_img, dtype=np.uint8)
     phys_maps = compute_1to1_wavelet_and_artifact_maps(rgb_np)
-    coc_field = coc_probe.compute_coc_jacobian_field(pil_img, phys_maps)
-    crops, crop_meta = select_scrutiny_1to1_patches(
-        pil_img=pil_img,
-        phys_maps=phys_maps,
-        coc_field=coc_field,
-        patch_size=patch_size,
-        num_patches=2,
-    )
+    probe_obj = coc_probe if coc_probe is not None else CoCDepthDefocusProbe(model_path=None, device="cpu")
+    coc_field = probe_obj.compute_coc_jacobian_field(pil_img, phys_maps)
 
-    # Aspect-preserving global canvas (zero stretching!)
+    if precomputed_boxes is not None:
+        crops = [
+            crop_1to1_from_box(pil_img, precomputed_boxes[0], patch_size=patch_size),
+            crop_1to1_from_box(pil_img, precomputed_boxes[1], patch_size=patch_size),
+        ]
+        crop_meta = [{"box_xyxy": precomputed_boxes[0].tolist()}, {"box_xyxy": precomputed_boxes[1].tolist()}]
+    else:
+        from phoenix.native_physics_and_views import select_scrutiny_1to1_patches
+
+        crops, crop_meta = select_scrutiny_1to1_patches(
+            pil_img=pil_img,
+            phys_maps=phys_maps,
+            coc_field=coc_field,
+            patch_size=patch_size,
+            num_patches=2,
+        )
+
     g_pil = resize_native_aspect_pil(pil_img, max_pixels=patch_size * patch_size, grid_factor=16)
-    gw, gh = g_pil.size
     g_arr = np.asarray(g_pil, dtype=np.uint8)
     canvas = np.zeros((patch_size, patch_size, 3), dtype=np.uint8)
     g_clip = g_arr[:patch_size, :patch_size]
@@ -308,22 +461,19 @@ def build_pillar3_sample_tensors(
     x_off = (patch_size - ch_w) // 2
     canvas[y_off : y_off + ch_h, x_off : x_off + ch_w] = g_clip
 
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
-    view_arrays = []
-    for arr_u8 in (canvas, np.asarray(crops[0], dtype=np.uint8), np.asarray(crops[1], dtype=np.uint8)):
-        normed = (arr_u8.astype(np.float32) / 255.0 - mean) / std
-        view_arrays.append(normed.transpose(2, 0, 1))
-    views_tensor = torch.from_numpy(np.stack(view_arrays, axis=0)).float()  # [3, 3, 384, 384]
+    view_arrays = [
+        (arr_u8.astype(np.float32) / 255.0).transpose(2, 0, 1)
+        for arr_u8 in (canvas, np.asarray(crops[0], dtype=np.uint8), np.asarray(crops[1], dtype=np.uint8))
+    ]
+    views_01 = torch.from_numpy(np.stack(view_arrays, axis=0)).float()  # [3, 3, 384, 384] in [0, 1]
 
-    # Stack 9-channel physical tensor & 8-channel restoration tensor
     phys_9_np = np.concatenate(
         [
-            phys_maps["haar_hf"],                        # 3
-            phys_maps["bipolar_halo"][:, :, None],       # 1
-            phys_maps["macroblock_glitch"][:, :, None],  # 1
-            phys_maps["ui_text_mask"][:, :, None],       # 1
-            coc_field,                                   # 3
+            phys_maps["haar_hf"],
+            phys_maps["bipolar_halo"][:, :, None],
+            phys_maps["macroblock_glitch"][:, :, None],
+            phys_maps["ui_text_mask"][:, :, None],
+            coc_field,
         ],
         axis=-1,
     )
@@ -342,7 +492,7 @@ def build_pillar3_sample_tensors(
     ).squeeze(0)
 
     return {
-        "views_tensor": views_tensor,
+        "views_tensor": views_01,
         "phys_9ch": phys_9_t,
         "probe_8ch": probe_8_t,
         "crop_meta": crop_meta,
@@ -350,17 +500,19 @@ def build_pillar3_sample_tensors(
 
 
 class Pillar3Dataset(Dataset):
+    """100% fork-safe dataset using precomputed 1:1 scrutiny boxes (zero CUDA inside workers!)."""
+
     def __init__(
         self,
         rows: Sequence[Dict[str, object]],
         resolver: PureRealImageResolver,
-        coc_probe: CoCDepthDefocusProbe,
+        box_cache: Dict[str, np.ndarray],
         is_train: bool = True,
         oof_teacher_probs: Optional[np.ndarray] = None,
     ) -> None:
         self.rows = list(rows)
         self.resolver = resolver
-        self.coc_probe = coc_probe
+        self.box_cache = box_cache
         self.is_train = is_train
         self.oof_teacher_probs = oof_teacher_probs
 
@@ -371,13 +523,21 @@ class Pillar3Dataset(Dataset):
         from PIL import Image
 
         row = self.rows[idx]
-        pil_img = self.resolver.load_rgb_pil(str(row["name"]))
+        nm = str(row["name"])
+        pil_img = self.resolver.load_rgb_pil(nm)
+        orig_w, _ = pil_img.size
+        boxes = self.box_cache[nm].copy()
+
         if self.is_train and np.random.rand() < 0.5:
             pil_img = pil_img.transpose(Image.FLIP_LEFT_RIGHT)
+            old_x0 = boxes[:, 0].copy()
+            old_x1 = boxes[:, 2].copy()
+            boxes[:, 0] = np.maximum(0, orig_w - old_x1)
+            boxes[:, 2] = boxes[:, 0] + 384
 
-        pack = build_pillar3_sample_tensors(pil_img, self.coc_probe)
+        pack = build_pillar3_sample_tensors(pil_img, coc_probe=None, precomputed_boxes=boxes)
         item: Dict[str, object] = {
-            "name": str(row["name"]),
+            "name": nm,
             "views_tensor": pack["views_tensor"],
             "phys_9ch": pack["phys_9ch"],
             "probe_8ch": pack["probe_8ch"],
@@ -402,9 +562,9 @@ def predict_pillar3_dataset(
     for batch in loader:
         names_all.extend(batch["name"])
         out = model(
-            views_tensor=batch["views_tensor"].to(device),
-            phys_9ch=batch["phys_9ch"].to(device),
-            probe_8ch=batch["probe_8ch"].to(device),
+            views_01=batch["views_tensor"].to(device, non_blocking=True),
+            phys_9ch=batch["phys_9ch"].to(device, non_blocking=True),
+            probe_8ch=batch["probe_8ch"].to(device, non_blocking=True),
             batch_ids=None,
             apply_batch_bias=False,
         )
@@ -436,7 +596,7 @@ def train_pillar3_run(
     device: torch.device,
     epochs: int = 8,
     lr_head: float = 2.0e-4,
-    lr_backbone: float = 3.0e-5,
+    lr_backbone: float = 4.0e-5,
     swa_start_epoch: Optional[int] = None,
 ) -> Optional[Dict[str, torch.Tensor]]:
     tower_ids = {id(p) for p in model.vision_tower.parameters()}
@@ -455,22 +615,24 @@ def train_pillar3_run(
     deqa_loss_fn = DeQAOrdinalDistributionLoss().to(device)
     rl2r_loss_fn = CrossBatchThurstoneRL2RLoss(queue_size=1024, emb_dim=256).to(device)
     swa = BasinAlignedSWACollector() if swa_start_epoch is not None else None
+    trainable_all = [p for p in model.parameters() if p.requires_grad]
 
     for ep in range(epochs):
         model.train()
         running = 0.0
+        t0 = time.time()
         for batch in train_loader:
-            y_6d = batch["grades"].to(device)
-            b_ids = batch["batch_id"].to(device)
-            noisy = batch["noisy_flag"].to(device)
+            y_6d = batch["grades"].to(device, non_blocking=True)
+            b_ids = batch["batch_id"].to(device, non_blocking=True)
+            noisy = batch["noisy_flag"].to(device, non_blocking=True)
             t_probs = batch.get("teacher_probs")
             if t_probs is not None:
-                t_probs = t_probs.to(device)
+                t_probs = t_probs.to(device, non_blocking=True)
 
             out = model(
-                views_tensor=batch["views_tensor"].to(device),
-                phys_9ch=batch["phys_9ch"].to(device),
-                probe_8ch=batch["probe_8ch"].to(device),
+                views_01=batch["views_tensor"].to(device, non_blocking=True),
+                phys_9ch=batch["phys_9ch"].to(device, non_blocking=True),
+                probe_8ch=batch["probe_8ch"].to(device, non_blocking=True),
                 batch_ids=b_ids,
                 apply_batch_bias=True,
             )
@@ -482,16 +644,19 @@ def train_pillar3_run(
                 supp_bias_param=model.head.supp_batch_bias,
             )
             loss = loss_dict["loss"] + 0.35 * rl2r_loss_fn(out, y_6d)
-            opt.zero_grad()
+            opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(trainable_all, max_norm=1.0)
             opt.step()
             sched.step()
             running += float(loss.item())
 
         if swa is not None and ep >= swa_start_epoch:
             swa.update(model, weight=1.0)
-        print(f"  [pillar3] Epoch {ep+1}/{epochs} | loss={running / max(1, len(train_loader)):.4f}")
+        print(
+            f"  [pillar3] Epoch {ep+1}/{epochs} ({time.time()-t0:.0f}s) | loss={running / max(1, len(train_loader)):.4f}",
+            flush=True,
+        )
 
     return swa.export_state_dict() if (swa is not None and swa.count > 0) else None
 
@@ -501,11 +666,10 @@ def run_smoke_test() -> None:
 
     set_deterministic_seed(2026)
     device = torch.device("cpu")
-    coc_probe = CoCDepthDefocusProbe(model_path=None, device="cpu")
     samples = []
     for i in range(6):
         pil_img = Image.fromarray(np.random.randint(0, 255, (720, 405, 3), dtype=np.uint8))
-        pack = build_pillar3_sample_tensors(pil_img, coc_probe)
+        pack = build_pillar3_sample_tensors(pil_img)
         samples.append(
             {
                 "name": f"p3_smoke_{i:02d}.png",
@@ -522,10 +686,9 @@ def run_smoke_test() -> None:
     model = Pillar3HiResPhysicsSpecialist(mock_backbone=True).to(device)
     swa_sd = train_pillar3_run(model, dl, device, epochs=2, swa_start_epoch=0)
     assert swa_sd is not None
-    model.load_state_dict(swa_sd)
+    model.load_state_dict(swa_sd, strict=False)
     pred = predict_pillar3_dataset(model, dl, device)
     assert pred["probs_6x4"].shape == (6, 6, 4)
-    # Single-image bit-exact independence check
     dl_one = DataLoader(samples[:1], batch_size=1, shuffle=False)
     pred_one = predict_pillar3_dataset(model, dl_one, device)
     diff = float(np.max(np.abs(pred_one["probs_6x4"][0] - pred["probs_6x4"][0])))
@@ -543,8 +706,11 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr-head", type=float, default=2.0e-4)
-    parser.add_argument("--lr-backbone", type=float, default=3.0e-5)
+    parser.add_argument("--lr-backbone", type=float, default=4.0e-5)
+    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--fold", type=int, default=-1)
+    parser.add_argument("--aggregate-cv5", action="store_true")
     parser.add_argument("--out-dir", default=str(PHOENIX_OOF_DIR))
     parser.add_argument("--ckpt-dir", default=str(PHOENIX_CKPT_DIR))
     parser.add_argument("--smoke-test", action="store_true")
@@ -554,15 +720,30 @@ def main() -> None:
         run_smoke_test()
         return
 
-    set_deterministic_seed(2026)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rows = load_split_rows(args.split_csv)
-    batch_shift = load_batch_shift_init(args.audit_json)
+    os.makedirs(args.out_dir, exist_ok=True)
+    os.makedirs(args.ckpt_dir, exist_ok=True)
+
+    if args.aggregate_cv5:
+        aggregate_5fold_oof(rows, "pillar3", args.mode, args.out_dir)
+        return
+
+    set_deterministic_seed(2026 + max(0, args.fold))
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{args.gpu}")
+        torch.cuda.set_device(device)
+    else:
+        device = torch.device("cpu")
+
     resolver = PureRealImageResolver()
-    coc_probe = CoCDepthDefocusProbe(
-        model_path=resolve_local_or_hf_model("pillar3_depth_anything_s"),
-        device=str(device),
+    box_cache_path = os.path.join(args.out_dir, "scrutiny_boxes_384_cache.npz")
+    box_cache = get_or_build_scrutiny_box_cache(
+        names=[str(r["name"]) for r in rows],
+        resolver=resolver,
+        device_str=str(device),
+        cache_npz_path=box_cache_path,
     )
+    batch_shift = load_batch_shift_init(args.audit_json)
 
     teacher_probs_all = None
     if args.teacher_oof_npz and os.path.exists(args.teacher_oof_npz):
@@ -570,32 +751,31 @@ def main() -> None:
         t_map = {str(nm): i for i, nm in enumerate(t_npz["names"])}
         teacher_probs_all = np.stack([t_npz["probs_6x4"][t_map[str(r["name"])]] for r in rows], axis=0)
 
-    os.makedirs(args.out_dir, exist_ok=True)
-    os.makedirs(args.ckpt_dir, exist_ok=True)
-
     if args.mode in ("cv5", "stage2-rl2r"):
-        n = len(rows)
-        oof_probs = np.zeros((n, 6, 4), dtype=np.float32)
-        oof_logits = np.zeros((n, 6, 4), dtype=np.float32)
-        oof_clean_l = np.zeros(n, dtype=np.float32)
-        oof_p_clean = np.zeros(n, dtype=np.float32)
-        oof_mu = np.zeros((n, 6), dtype=np.float32)
-        oof_var = np.zeros((n, 6), dtype=np.float32)
-        oof_emb = np.zeros((n, 256), dtype=np.float32)
-        gold_all = np.array([r["grades"] for r in rows], dtype=np.int64)
-        folds_all = np.array([int(r["fold"]) for r in rows], dtype=np.int64)
+        full_oof_path = os.path.join(args.out_dir, f"pillar3_{args.mode}_oof.npz")
+        if args.fold < 0 and os.path.exists(full_oof_path):
+            print(f"[pillar3 Resume] {full_oof_path} already exists; skipping.", flush=True)
+            return
 
         target_folds = list(range(5)) if args.fold < 0 else [args.fold]
+        gold_all = np.array([r["grades"] for r in rows], dtype=np.int64)
+
         for f_idx in target_folds:
+            fold_npz = os.path.join(args.out_dir, f"pillar3_{args.mode}_fold{f_idx}.npz")
+            if os.path.exists(fold_npz):
+                print(f"[pillar3 Resume] Fold {f_idx} already completed ({fold_npz}); skipping.", flush=True)
+                continue
+
             tr_idx = [i for i, r in enumerate(rows) if int(r["fold"]) != f_idx]
             va_idx = [i for i, r in enumerate(rows) if int(r["fold"]) == f_idx]
             tr_teacher = teacher_probs_all[tr_idx] if teacher_probs_all is not None else None
 
-            ds_tr = Pillar3Dataset([rows[i] for i in tr_idx], resolver, coc_probe, True, tr_teacher)
-            ds_va = Pillar3Dataset([rows[i] for i in va_idx], resolver, coc_probe, False)
-            dl_tr = DataLoader(ds_tr, batch_size=args.batch_size, shuffle=True, num_workers=4)
-            dl_va = DataLoader(ds_va, batch_size=args.batch_size, shuffle=False, num_workers=4)
+            ds_tr = Pillar3Dataset([rows[i] for i in tr_idx], resolver, box_cache, True, tr_teacher)
+            ds_va = Pillar3Dataset([rows[i] for i in va_idx], resolver, box_cache, False)
+            dl_tr = DataLoader(ds_tr, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=(device.type == "cuda"))
+            dl_va = DataLoader(ds_va, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=(device.type == "cuda"))
 
+            print(f"=== [pillar3 {args.mode}] Fold {f_idx}/5 | train={len(tr_idx)} val={len(va_idx)} | device={device} ===", flush=True)
             model = Pillar3HiResPhysicsSpecialist(
                 init_batch_shift=batch_shift,
                 stage0_ckpt_path=args.stage0_ckpt,
@@ -610,53 +790,42 @@ def main() -> None:
                 swa_start_epoch=max(2, args.epochs - 3),
             )
             if swa_sd is not None:
-                model.load_state_dict(swa_sd)
+                model.load_state_dict(swa_sd, strict=False)
 
             va_out = predict_pillar3_dataset(model, dl_va, device)
-            oof_probs[va_idx] = va_out["probs_6x4"]
-            oof_logits[va_idx] = va_out["logits_6x4"]
-            oof_clean_l[va_idx] = va_out["clean_logit"]
-            oof_p_clean[va_idx] = va_out["p_clean_joint"]
-            oof_mu[va_idx] = va_out["mu_6d"]
-            oof_var[va_idx] = va_out["var_6d"]
-            oof_emb[va_idx] = va_out["quality_emb"]
+            np.savez_compressed(fold_npz, fold=np.int64(f_idx), **va_out)
 
             m = evaluate_official_metrics(np.argmax(va_out["probs_6x4"], axis=-1), gold_all[va_idx])
-            print(f"[pillar3 Fold {f_idx}] Naive Argmax Strict={m['strict_total']:.2f}")
+            print(f"[pillar3 Fold {f_idx}] Naive Argmax Strict={m['strict_total']:.2f} | Practice={m['practice_total']:.2f}", flush=True)
 
-        tag = f"pillar3_{args.mode}_oof.npz" if args.fold < 0 else f"pillar3_{args.mode}_fold{args.fold}.npz"
-        out_npz = os.path.join(args.out_dir, tag)
-        np.savez_compressed(
-            out_npz,
-            names=np.array([r["name"] for r in rows], dtype=object),
-            folds=folds_all,
-            gold_6d=gold_all,
-            probs_6x4=oof_probs,
-            logits_6x4=oof_logits,
-            clean_logit=oof_clean_l,
-            p_clean_joint=oof_p_clean,
-            mu_6d=oof_mu,
-            var_6d=oof_var,
-            quality_emb=oof_emb,
-        )
-        print(f"[pillar3] Saved OOF predictions -> {out_npz}")
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        if args.fold < 0:
+            aggregate_5fold_oof(rows, "pillar3", args.mode, args.out_dir)
 
     elif args.mode == "fulldata-swa":
-        ds_full = Pillar3Dataset(rows, resolver, coc_probe, True, teacher_probs_all)
+        ckpt_path = os.path.join(args.ckpt_dir, "pillar3_fulldata_swa.pt")
+        if os.path.exists(ckpt_path):
+            print(f"[pillar3 Resume] Full-data SWA checkpoint exists ({ckpt_path}); skipping.", flush=True)
+            return
+
+        ds_full = Pillar3Dataset(rows, resolver, box_cache, True, teacher_probs_all)
         model = Pillar3HiResPhysicsSpecialist(
             init_batch_shift=batch_shift,
             stage0_ckpt_path=args.stage0_ckpt,
         ).to(device)
-        dl_warm = DataLoader(ds_full, batch_size=args.batch_size, shuffle=True, num_workers=4)
+        dl_warm = DataLoader(ds_full, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=(device.type == "cuda"))
         warm_epochs = max(2, args.epochs - 3)
         train_pillar3_run(model, dl_warm, device, epochs=warm_epochs, lr_head=args.lr_head, lr_backbone=args.lr_backbone)
-        warm_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        warm_state = extract_trainable_state_dict(model)
 
         basin_swa = BasinAlignedSWACollector()
         for b_idx, seed in enumerate((2026, 2027, 2028)):
             set_deterministic_seed(seed)
-            model.load_state_dict(warm_state)
-            dl_b = DataLoader(ds_full, batch_size=args.batch_size, shuffle=True, num_workers=4)
+            model.load_state_dict(warm_state, strict=False)
+            dl_b = DataLoader(ds_full, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=(device.type == "cuda"))
             train_pillar3_run(
                 model,
                 dl_b,
@@ -666,11 +835,10 @@ def main() -> None:
                 lr_backbone=args.lr_backbone * 0.30,
             )
             basin_swa.update(model, weight=1.0)
-            print(f"[pillar3 FullData Basin-SWA] Collected branch {b_idx+1}/3 (seed={seed})")
+            print(f"[pillar3 FullData Basin-SWA] Collected branch {b_idx+1}/3 (seed={seed})", flush=True)
 
-        ckpt_path = os.path.join(args.ckpt_dir, "pillar3_fulldata_swa.pt")
         torch.save({"pillar": "pillar3", "state_dict": basin_swa.export_state_dict()}, ckpt_path)
-        print(f"[pillar3] Exported SINGLE Basin-Aligned SWA checkpoint -> {ckpt_path}")
+        print(f"[pillar3] Exported SINGLE Basin-Aligned SWA checkpoint -> {ckpt_path}", flush=True)
 
 
 if __name__ == "__main__":

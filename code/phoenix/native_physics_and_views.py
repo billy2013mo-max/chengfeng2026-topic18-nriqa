@@ -179,16 +179,27 @@ class CoCDepthDefocusProbe:
                 import torch
                 from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
-                if _os.path.exists(model_path):
-                    self._proc = AutoImageProcessor.from_pretrained(model_path, local_files_only=True)
-                    self._model = (
-                        AutoModelForDepthEstimation.from_pretrained(model_path, local_files_only=True)
-                        .to(device)
-                        .eval()
-                    )
-                    for p in self._model.parameters():
-                        p.requires_grad_(False)
-                    self._pipe = True
+                use_cuda = str(device).startswith("cuda") and torch.cuda.is_available()
+                self.device = device if use_cuda else "cpu"
+                for local_only in ([True, False] if not _os.path.exists(model_path) else [True]):
+                    try:
+                        self._proc = AutoImageProcessor.from_pretrained(model_path, local_files_only=local_only)
+                        dt = torch.float16 if use_cuda else torch.float32
+                        try:
+                            m = AutoModelForDepthEstimation.from_pretrained(
+                                model_path, dtype=dt, local_files_only=local_only
+                            )
+                        except TypeError:
+                            m = AutoModelForDepthEstimation.from_pretrained(
+                                model_path, torch_dtype=dt, local_files_only=local_only
+                            )
+                        self._model = m.to(self.device).eval()
+                        for p in self._model.parameters():
+                            p.requires_grad_(False)
+                        self._pipe = True
+                        break
+                    except Exception:
+                        continue
             except Exception:
                 self._pipe = None
 
@@ -199,9 +210,13 @@ class CoCDepthDefocusProbe:
                 import torch
                 import torch.nn.functional as F
 
+                w_dtype = next(self._model.parameters()).dtype
                 inputs = self._proc(images=pil_img, return_tensors="pt")
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                with torch.no_grad():
+                inputs = {
+                    k: (v.to(self.device, dtype=w_dtype) if v.is_floating_point() else v.to(self.device))
+                    for k, v in inputs.items()
+                }
+                with torch.inference_mode():
                     pred = self._model(**inputs).predicted_depth
                     if pred.ndim == 3:
                         pred = pred.unsqueeze(1)
