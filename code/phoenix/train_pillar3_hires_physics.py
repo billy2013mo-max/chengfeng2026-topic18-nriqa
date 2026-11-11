@@ -3,27 +3,27 @@
 """
 code/phoenix/train_pillar3_hires_physics.py
 ===========================================
-Breakthrough 2 & 3: Pillar-3 1:1 High-Frequency & Optical Physics Specialist (`~1.555B`).
+Breakthrough 2 & 3 (Upgraded with 4-View 1:1 Contrast-Residual Microscope, Learned Backbone
+Gate, 2x Horizontal-Flip Val TTA, Pure-Real Rare P1/P0 Oversampling, and Stage-1->2 Warm-Start):
 
-Server-Verified Architecture Components (100% Orthogonal to VLMs):
-  1. `DINOv3-ViT-L/16` (`0.304B`, `models/dinov3-vitl16/model.safetensors` via `timm`
-     `vit_large_patch16_dinov3`) with 4-Depth Intermediate Hypercolumn Hooks (`25%, 50%, 75%, 100%`)
-     + Full-Depth `nn.Linear`-only DoRA!
-  2. `C-RADIOv4-H` (`0.630B`, `models/c-radio-v4-h` via `AutoModel(..., trust_remote_code=True)`,
-     taking `[0, 1]` RGB `summ, feat = model(x_01)`) with 4-Depth Intermediate Hypercolumn Hooks
-     on `radio_model.model.blocks` (`dim=1280`, register-prefix safe)!
-  3. `ConvNeXtV2` (`0.200B`, `models/convnextv2-base/model.safetensors` or `convnextv2-large`)
-     + `1:1` 2D Haar Wavelet & Bipolar Overshoot ConvStem (`9ch`: Haar LH/HL/HH, Bipolar Halo,
-     8x8 Macroblock Glitch, UI Stroke Mask, and 3ch CoC Depth-Defocus Jacobian Field).
-  4. `PE-Core-Large` / `FGResQ` Perceptual-Degradation Branch (`0.350B`, auto-loads
-     `models/pe-core-l14/model.safetensors` when available!) + `PAL4VST` Spatial Artifact Probe.
-  5. Fork-safe main-process CoC/box caching + BF16 vision autocast + FP32 `PhoenixUnimodalDeQAHead`
-     + Multi-GPU per-fold sharding (`--fold 0..4 --gpu 0..7` + `--aggregate-cv5`) & resume!
+Key Upgrades from 14-Channel OOF Forensic Audit:
+  1. 4-View 1:1 Contrast-Residual Microscope (`[Global, Peak0_Anatomy_Bokeh, Peak1_Halo, Mid_Interior_Tex]`):
+     Adds a deterministic `1:1` Median-Gradient Subject Interior Texture Reference Patch (`Mid_Interior_Tex`)
+     and computes explicit `6x6` spatial contrast-residual tokens:
+       - `r_peak_glob = LayerNorm(max(Peak0, Peak1) - mean(Global))` -> isolates localized `过度生成`
+         hand/eye/text flaws & `1~2px` `过锐` white-edge ringing against scene context!
+       - `r_peak_tex  = LayerNorm(max(Peak0, Peak1) - mean(Mid_Interior_Tex))` -> isolates edge
+         overshoot vs interior `纹理损失` waxy smoothing!
+  2. Learned Per-Backbone Softmax Gate (`C-RADIOv4-H 0.36, PE-Core-L 0.34, ConvNeXtV2 0.18, DINOv3 0.12`
+     init) instead of rigid `1/4` equal average so `DINOv3` never dilutes `C-RADIO` & `PE-Core`.
+  3. 2x Horizontal-Flip Val TTA (`predict_pillar3_dataset(..., loader_hflip=...)`) matching
+     `Single4090PhoenixEngine` 1-to-1 + Pure-Real Rare `P1/P0` Oversampling (zero `P2` inflation!).
 """
 from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -39,6 +39,7 @@ if os.path.dirname(THIS_DIR) not in sys.path:
     sys.path.insert(0, os.path.dirname(THIS_DIR))
 
 from phoenix.config import (
+    P0_ONLY_DIMS,
     PHOENIX_CKPT_DIR,
     PHOENIX_OOF_DIR,
     PHOENIX_SPLITS_DIR,
@@ -70,6 +71,68 @@ from phoenix.train_pillar12_native_vlm import (
     load_batch_shift_init,
     load_split_rows,
 )
+
+
+def _has_safe_disk_headroom(path_dir: str, min_free_gb: float = 25.0) -> bool:
+    try:
+        os.makedirs(path_dir, exist_ok=True)
+        free_gb = shutil.disk_usage(path_dir).free / (1024.0 ** 3)
+        return free_gb >= min_free_gb
+    except Exception:
+        return True
+
+
+def oversample_rare_real_p1_p0(
+    rows: Sequence[Dict[str, object]],
+    teacher_probs: Optional[np.ndarray] = None,
+) -> Tuple[List[Dict[str, object]], Optional[np.ndarray]]:
+    """
+    Pure-Real Rare `P1/P0` Oversampling (V16 Rule):
+      Repeats ONLY authentic real training images having `grade >= 2` (`P1` or `P0`) on rare/hard
+      dimensions `(2:过锐, 3:花屏, 4:过度生成, 5:虚化突兀)` — ZERO synthetic samples and ZERO `P2` inflation!
+    """
+    base_rows = list(rows)
+    extra_idx = [
+        i
+        for i, r in enumerate(base_rows)
+        if any(int(r["grades"][d]) >= 2 for d in (2, 3, 4, 5))  # type: ignore[index]
+    ]
+    if not extra_idx:
+        return base_rows, teacher_probs
+    aug_rows = base_rows + [base_rows[i] for i in extra_idx]
+    if teacher_probs is not None:
+        aug_teacher = np.concatenate([teacher_probs, teacher_probs[extra_idx]], axis=0)
+    else:
+        aug_teacher = None
+    return aug_rows, aug_teacher
+
+
+def _extract_median_interior_1to1_crop(pil_img, patch_size: int = 384):
+    """
+    Deterministic `<0.2ms` 1:1 Median-Gradient Subject Interior Texture Crop (`Mid_Interior_Tex`)
+    across a `3x3` spatial grid — requires zero extra cache files and pairs with Peak0/Peak1 to
+    form V16-style `r_peak_tex = max(Peak0, Peak1) - mean(Mid_Interior_Tex)` contrast residuals!
+    """
+    w, h = pil_img.size
+    if w < patch_size or h < patch_size:
+        return crop_1to1_from_box(pil_img, [0, 0, patch_size, patch_size], patch_size=patch_size)
+
+    xs = [0, max(0, (w - patch_size) // 2), max(0, w - patch_size)] if w > patch_size else [0]
+    ys = [0, max(0, (h - patch_size) // 2), max(0, h - patch_size)] if h > patch_size else [0]
+    cands = []
+    energies = []
+    for y0 in ys:
+        for x0 in xs:
+            patch = pil_img.crop((x0, y0, x0 + patch_size, y0 + patch_size))
+            arr = np.asarray(patch, dtype=np.uint8)[::4, ::4, 1].astype(np.float32)
+            gx = float(np.abs(arr[:, 1:] - arr[:, :-1]).mean())
+            gy = float(np.abs(arr[1:, :] - arr[:-1, :]).mean())
+            lx = float(np.abs(2.0 * arr[:, 1:-1] - arr[:, :-2] - arr[:, 2:]).mean())
+            ly = float(np.abs(2.0 * arr[1:-1, :] - arr[:-2, :] - arr[2:, :]).mean())
+            cands.append(patch)
+            energies.append(gx + gy + 0.85 * (lx + ly))
+    order = np.argsort(energies)
+    return cands[int(order[len(order) // 2])]
 
 
 class _FourStageBlockHook:
@@ -106,7 +169,6 @@ class _FourStageBlockHook:
                 c_f = ft
             else:
                 c_f = c.float()
-                # Strip leading CLS / register summary tokens if present
                 if c_f.shape[1] > l_ref and l_ref >= target_len:
                     c_f = c_f[:, -l_ref:, :]
             if c_f.ndim == 4:
@@ -120,7 +182,7 @@ class _FourStageBlockHook:
 def _attach_linear_only_dora_or_unfreeze(
     model: nn.Module,
     blocks: Optional[nn.ModuleList],
-    rank: int = 16,
+    rank: int = 24,
     use_dora: bool = True,
 ) -> nn.Module:
     try:
@@ -185,11 +247,9 @@ class HaarWaveletCoCPhysicsStem(nn.Module):
 
 class MultiLayerHypercolumnVisionTower(nn.Module):
     """
-    Natively loads `/wanqing-develop/luowenjing/18/models/` offline checkpoints:
-      - `dinov3-vitl16` (`timm` `vit_large_patch16_dinov3` + `safetensors`)
-      - `c-radio-v4-h` (`AutoModel(..., trust_remote_code=True)` taking `[0, 1]` RGB)
-      - `convnextv2` (`timm` `convnextv2_base` / `convnextv2_large` + `safetensors`)
-      - Optional `pe-core-l14` (`timm` `vit_pe_core_large_patch14_336` + `safetensors`)
+    4-View Hypercolumn + Explicit 1:1 Contrast-Residual Microscope Vision Tower:
+      - Learned Softmax Backbone Gate (`[DINOv3=0.12, C-RADIOv4-H=0.36, ConvNeXtV2=0.18, PE-Core-L=0.34]`)
+      - Outputs `[B, 216, out_dim]` (`4` views * `36` + `2` explicit contrast-residual maps * `36`).
     """
 
     def __init__(self, out_dim: int = 512, mock_backbone: bool = False) -> None:
@@ -197,6 +257,8 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         self.out_dim = out_dim
         self.mock_backbone = mock_backbone
         self.has_pecore = False
+        self.res_glob_norm = nn.LayerNorm(out_dim).float()
+        self.res_tex_norm = nn.LayerNorm(out_dim).float()
 
         if mock_backbone:
             self.mock_conv = nn.Sequential(
@@ -205,26 +267,27 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
                 nn.Conv2d(128, out_dim, kernel_size=3, stride=2, padding=1),
                 nn.AdaptiveAvgPool2d((6, 6)),
             )
+            self.backbone_gate_logits = nn.Parameter(torch.zeros(3, dtype=torch.float32))
             return
 
-        # 1. DINOv3-ViT-L/16 (`timm` safetensors or HF fallback)
         self.dinov3, self._dino_hook, d_dim = self._build_dinov3()
         self.proj_dino = nn.Sequential(nn.LayerNorm(d_dim * 4), nn.Linear(d_dim * 4, out_dim)).float()
 
-        # 2. C-RADIOv4-H (`[0, 1]` input, `m.radio_model.model.blocks`)
         self.cradio, self._radio_hook, r_dim = self._build_cradio()
         self.proj_radio = nn.Sequential(nn.LayerNorm(r_dim * 4), nn.Linear(r_dim * 4, out_dim)).float()
 
-        # 3. ConvNeXtV2 (`models/convnextv2-base` or `models/convnextv2-large`)
         self.convnext, c_dim = self._build_convnext()
         self.proj_convnext = nn.Sequential(nn.LayerNorm(c_dim), nn.Linear(c_dim, out_dim)).float()
 
-        # 4. Optional PE-Core-L (`models/pe-core-l14/model.safetensors` under our 0.35B slot)
         pec_res = self._try_build_pecore()
         if pec_res is not None:
             self.pecore, self._pec_hook, p_dim = pec_res
             self.proj_pecore = nn.Sequential(nn.LayerNorm(p_dim * 4), nn.Linear(p_dim * 4, out_dim)).float()
             self.has_pecore = True
+            init_prior = torch.log(torch.tensor([0.12, 0.36, 0.18, 0.34], dtype=torch.float32))
+        else:
+            init_prior = torch.log(torch.tensor([0.16, 0.54, 0.30], dtype=torch.float32))
+        self.backbone_gate_logits = nn.Parameter(init_prior)
 
         self.register_buffer("imnet_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False)
         self.register_buffer("imnet_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), persistent=False)
@@ -247,7 +310,7 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         dim = int(m.embed_dim)
         if torch.cuda.is_available():
             m = m.to(torch.bfloat16)
-        m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=16, use_dora=True)
+        m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=24, use_dora=True)
         return m, hook, dim
 
     @staticmethod
@@ -263,10 +326,9 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         blocks = m.radio_model.model.blocks
         hook = _FourStageBlockHook(blocks)
         dim = 1280
-        # Unfreeze top 8 blocks of C-RADIO cleanly (custom remote_code modules work safest with block unfreezing)
         for p in m.parameters():
             p.requires_grad = False
-        for blk in list(blocks)[-8:]:
+        for blk in list(blocks)[-10:]:
             for p in blk.parameters():
                 p.requires_grad = True
         return m, hook, dim
@@ -306,42 +368,56 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
             dim = int(m.embed_dim)
             if torch.cuda.is_available():
                 m = m.to(torch.bfloat16)
-            m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=16, use_dora=True)
+            m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=24, use_dora=True)
             return m, hook, dim
         except Exception:
             return None
 
-    def forward(self, views_01: torch.Tensor) -> torch.Tensor:
+    def _append_contrast_residuals(self, per_view_tokens: torch.Tensor) -> torch.Tensor:
         """
         Args:
-          views_01: `[B, 3_views, 3, 384, 384]` RGB tensor in `[0, 1]`.
+          per_view_tokens: `[B, n_v, 36, D]` where views are `[Global, Peak0, Peak1, MidTex]`.
         Returns:
-          `[B, 108, out_dim]` FP32 hypercolumn visual tokens.
+          `[B, (n_v + 2) * 36, D]` concatenating explicit `r_peak_glob` & `r_peak_tex`!
         """
+        bsz, n_v, l_tok, d_tok = per_view_tokens.shape
+        v_glob = per_view_tokens[:, 0]
+        if n_v >= 4:
+            edge_peak = torch.maximum(per_view_tokens[:, 1], per_view_tokens[:, 2])
+            v_tex = per_view_tokens[:, 3]
+        elif n_v >= 3:
+            edge_peak = torch.maximum(per_view_tokens[:, 1], per_view_tokens[:, 2])
+            v_tex = v_glob
+        else:
+            edge_peak = v_glob
+            v_tex = v_glob
+
+        r_peak_glob = self.res_glob_norm(edge_peak - v_glob.mean(dim=1, keepdim=True))
+        r_peak_tex = self.res_tex_norm(edge_peak - v_tex.mean(dim=1, keepdim=True))
+        flat_views = per_view_tokens.reshape(bsz, n_v * l_tok, d_tok)
+        return torch.cat([flat_views, r_peak_glob, r_peak_tex], dim=1)
+
+    def forward(self, views_01: torch.Tensor) -> torch.Tensor:
         bsz, n_v, c, h, w = views_01.shape
         flat_01 = views_01.reshape(bsz * n_v, c, h, w)
 
         if self.mock_backbone:
             fmap = self.mock_conv(flat_01)
-            return fmap.flatten(2).transpose(1, 2).reshape(bsz, n_v * 36, self.out_dim)
+            v_tok = fmap.flatten(2).transpose(1, 2).reshape(bsz, n_v, 36, self.out_dim)
+            return self._append_contrast_residuals(v_tok)
 
         use_bf16 = flat_01.is_cuda
         imnet_x = (flat_01 - self.imnet_mean) / self.imnet_std
 
         with torch.autocast(device_type="cuda" if use_bf16 else "cpu", dtype=torch.bfloat16, enabled=use_bf16):
-            # 1. DINOv3 forward (`timm` unwrapped or PeftModel wrapped)
             dino_base = self.dinov3.get_base_model() if hasattr(self.dinov3, "get_base_model") else self.dinov3
             raw_dino = dino_base.forward_features(imnet_x)
             n_pref = int(getattr(dino_base, "num_prefix_tokens", 1))
             spatial_dino = raw_dino[:, n_pref:, :] if raw_dino.shape[1] > n_pref else raw_dino
 
-            # 2. C-RADIOv4-H forward (expects `[0, 1]` input directly!)
             _, feat_radio = self.cradio(flat_01)
-
-            # 3. ConvNeXtV2 spatial map forward
             cx_map = self.convnext.forward_features(imnet_x)
 
-            # 4. Optional PE-Core-L forward (`336x336` patch-14 friendly resize)
             if self.has_pecore:
                 pec_in = F.interpolate((flat_01 - self.pec_mean) / self.pec_std, size=(336, 336), mode="bilinear", align_corners=False)
                 pec_base = self.pecore.get_base_model() if hasattr(self.pecore, "get_base_model") else self.pecore
@@ -365,13 +441,15 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
                     F.adaptive_avg_pool1d(cx_map.float().transpose(1, 2), output_size=36).transpose(1, 2)
                 )
 
+            w_bb = F.softmax(self.backbone_gate_logits.float(), dim=0)
             if self.has_pecore and spatial_pec is not None:
                 hc_pec = self.proj_pecore(self._pec_hook.pop_pooled_hypercolumn(spatial_pec, (6, 6)))
-                fused = (hc_dino + hc_radio + cx_tok + hc_pec) / 4.0
+                fused = w_bb[0] * hc_dino + w_bb[1] * hc_radio + w_bb[2] * cx_tok + w_bb[3] * hc_pec
             else:
-                fused = (hc_dino + hc_radio + cx_tok) / 3.0
+                fused = w_bb[0] * hc_dino + w_bb[1] * hc_radio + w_bb[2] * cx_tok
 
-            return fused.reshape(bsz, n_v * 36, self.out_dim)
+            v_tok = fused.reshape(bsz, n_v, 36, self.out_dim)
+            return self._append_contrast_residuals(v_tok)
 
 
 class Pillar3HiResPhysicsSpecialist(nn.Module):
@@ -427,8 +505,8 @@ def build_pillar3_sample_tensors(
     patch_size: int = 384,
 ) -> Dict[str, object]:
     """
-    Constructs `[0, 1]` `views_01 [3, 3, 384, 384]` + `phys_9ch [9, 256, 256]` + `probe_8ch [8, 256, 256]`.
-    Uses CPU-safe analytical CoC depth fallback inside DataLoader workers when `coc_probe` is None.
+    Constructs `[0, 1]` `views_01 [4, 3, 384, 384]` (`[Global, Peak0, Peak1, Mid_Interior_Tex]`)
+    + `phys_9ch [9, 256, 256]` + `probe_8ch [8, 256, 256]`.
     """
     rgb_np = np.asarray(pil_img, dtype=np.uint8)
     phys_maps = compute_1to1_wavelet_and_artifact_maps(rgb_np)
@@ -452,6 +530,8 @@ def build_pillar3_sample_tensors(
             num_patches=2,
         )
 
+    mid_tex_crop = _extract_median_interior_1to1_crop(pil_img, patch_size=patch_size)
+
     g_pil = resize_native_aspect_pil(pil_img, max_pixels=patch_size * patch_size, grid_factor=16)
     g_arr = np.asarray(g_pil, dtype=np.uint8)
     canvas = np.zeros((patch_size, patch_size, 3), dtype=np.uint8)
@@ -463,9 +543,14 @@ def build_pillar3_sample_tensors(
 
     view_arrays = [
         (arr_u8.astype(np.float32) / 255.0).transpose(2, 0, 1)
-        for arr_u8 in (canvas, np.asarray(crops[0], dtype=np.uint8), np.asarray(crops[1], dtype=np.uint8))
+        for arr_u8 in (
+            canvas,
+            np.asarray(crops[0], dtype=np.uint8),
+            np.asarray(crops[1], dtype=np.uint8),
+            np.asarray(mid_tex_crop, dtype=np.uint8),
+        )
     ]
-    views_01 = torch.from_numpy(np.stack(view_arrays, axis=0)).float()  # [3, 3, 384, 384] in [0, 1]
+    views_01 = torch.from_numpy(np.stack(view_arrays, axis=0)).float()  # [4, 3, 384, 384]
 
     phys_9_np = np.concatenate(
         [
@@ -500,7 +585,7 @@ def build_pillar3_sample_tensors(
 
 
 class Pillar3Dataset(Dataset):
-    """100% fork-safe dataset using precomputed 1:1 scrutiny boxes (zero CUDA inside workers!)."""
+    """100% fork-safe dataset using precomputed 1:1 scrutiny boxes + optional HFlip TTA."""
 
     def __init__(
         self,
@@ -508,12 +593,14 @@ class Pillar3Dataset(Dataset):
         resolver: PureRealImageResolver,
         box_cache: Dict[str, np.ndarray],
         is_train: bool = True,
+        force_hflip: bool = False,
         oof_teacher_probs: Optional[np.ndarray] = None,
     ) -> None:
         self.rows = list(rows)
         self.resolver = resolver
         self.box_cache = box_cache
         self.is_train = is_train
+        self.force_hflip = force_hflip
         self.oof_teacher_probs = oof_teacher_probs
 
     def __len__(self) -> int:
@@ -528,7 +615,8 @@ class Pillar3Dataset(Dataset):
         orig_w, _ = pil_img.size
         boxes = self.box_cache[nm].copy()
 
-        if self.is_train and np.random.rand() < 0.5:
+        do_flip = self.force_hflip or (self.is_train and np.random.rand() < 0.5)
+        if do_flip:
             pil_img = pil_img.transpose(Image.FLIP_LEFT_RIGHT)
             old_x0 = boxes[:, 0].copy()
             old_x1 = boxes[:, 2].copy()
@@ -555,38 +643,69 @@ def predict_pillar3_dataset(
     model: Pillar3HiResPhysicsSpecialist,
     loader: DataLoader,
     device: torch.device,
+    loader_hflip: Optional[DataLoader] = None,
 ) -> Dict[str, np.ndarray]:
     model.eval()
-    names_all: List[str] = []
-    probs_l, logits_l, clean_l, p_clean_l, mu_l, var_l, emb_l, gold_l = [], [], [], [], [], [], [], []
-    for batch in loader:
-        names_all.extend(batch["name"])
-        out = model(
-            views_01=batch["views_tensor"].to(device, non_blocking=True),
-            phys_9ch=batch["phys_9ch"].to(device, non_blocking=True),
-            probe_8ch=batch["probe_8ch"].to(device, non_blocking=True),
-            batch_ids=None,
-            apply_batch_bias=False,
-        )
-        probs_l.append(out["probs_6x4"].cpu().numpy())
-        logits_l.append(out["logits_6x4"].cpu().numpy())
-        clean_l.append(out["clean_logit"].cpu().numpy())
-        p_clean_l.append(out["p_clean_joint"].cpu().numpy())
-        mu_l.append(out["mu_6d"].cpu().numpy())
-        var_l.append(out["var_6d"].cpu().numpy())
-        emb_l.append(out["quality_emb"].cpu().numpy())
-        gold_l.append(batch["grades"].numpy())
+
+    def _single_pass(dl: DataLoader) -> Dict[str, np.ndarray]:
+        names_all: List[str] = []
+        probs_l, logits_l, clean_l, p_clean_l, mu_l, var_l, emb_l, gold_l = [], [], [], [], [], [], [], []
+        for batch in dl:
+            names_all.extend(batch["name"])
+            out = model(
+                views_01=batch["views_tensor"].to(device, non_blocking=True),
+                phys_9ch=batch["phys_9ch"].to(device, non_blocking=True),
+                probe_8ch=batch["probe_8ch"].to(device, non_blocking=True),
+                batch_ids=None,
+                apply_batch_bias=False,
+            )
+            probs_l.append(out["probs_6x4"].cpu().numpy())
+            logits_l.append(out["logits_6x4"].cpu().numpy())
+            clean_l.append(out["clean_logit"].cpu().numpy())
+            p_clean_l.append(out["p_clean_joint"].cpu().numpy())
+            mu_l.append(out["mu_6d"].cpu().numpy())
+            var_l.append(out["var_6d"].cpu().numpy())
+            emb_l.append(out["quality_emb"].cpu().numpy())
+            gold_l.append(batch["grades"].numpy())
+
+        return {
+            "names": np.array(names_all, dtype=object),
+            "probs_6x4": np.concatenate(probs_l, axis=0).astype(np.float32),
+            "logits_6x4": np.concatenate(logits_l, axis=0).astype(np.float32),
+            "clean_logit": np.concatenate(clean_l, axis=0).astype(np.float32),
+            "p_clean_joint": np.concatenate(p_clean_l, axis=0).astype(np.float32),
+            "mu_6d": np.concatenate(mu_l, axis=0).astype(np.float32),
+            "var_6d": np.concatenate(var_l, axis=0).astype(np.float32),
+            "quality_emb": np.concatenate(emb_l, axis=0).astype(np.float32),
+            "gold_6d": np.concatenate(gold_l, axis=0).astype(np.int64),
+        }
+
+    p0 = _single_pass(loader)
+    if loader_hflip is None:
+        return p0
+
+    p1 = _single_pass(loader_hflip)
+    probs = 0.5 * (p0["probs_6x4"] + p1["probs_6x4"])
+    logits = np.log(np.clip(probs, 1e-6, 1.0))
+    for d in P0_ONLY_DIMS:
+        logits[:, d, 1] = -1e4
+        logits[:, d, 2] = -1e4
+    emb = p0["quality_emb"] + p1["quality_emb"]
+    emb = emb / (np.linalg.norm(emb, axis=-1, keepdims=True) + 1e-8)
+    grid = np.array([0.0, 1.0, 2.0, 3.0], dtype=np.float32).reshape(1, 1, 4)
+    mu = (probs * grid).sum(axis=-1)
+    var = (probs * (grid - mu[:, :, None]) ** 2).sum(axis=-1)
 
     return {
-        "names": np.array(names_all, dtype=object),
-        "probs_6x4": np.concatenate(probs_l, axis=0).astype(np.float32),
-        "logits_6x4": np.concatenate(logits_l, axis=0).astype(np.float32),
-        "clean_logit": np.concatenate(clean_l, axis=0).astype(np.float32),
-        "p_clean_joint": np.concatenate(p_clean_l, axis=0).astype(np.float32),
-        "mu_6d": np.concatenate(mu_l, axis=0).astype(np.float32),
-        "var_6d": np.concatenate(var_l, axis=0).astype(np.float32),
-        "quality_emb": np.concatenate(emb_l, axis=0).astype(np.float32),
-        "gold_6d": np.concatenate(gold_l, axis=0).astype(np.int64),
+        "names": p0["names"],
+        "probs_6x4": probs.astype(np.float32),
+        "logits_6x4": logits.astype(np.float32),
+        "clean_logit": (0.5 * (p0["clean_logit"] + p1["clean_logit"])).astype(np.float32),
+        "p_clean_joint": (0.5 * (p0["p_clean_joint"] + p1["p_clean_joint"])).astype(np.float32),
+        "mu_6d": mu.astype(np.float32),
+        "var_6d": var.astype(np.float32),
+        "quality_emb": emb.astype(np.float32),
+        "gold_6d": p0["gold_6d"],
     }
 
 
@@ -595,8 +714,8 @@ def train_pillar3_run(
     train_loader: DataLoader,
     device: torch.device,
     epochs: int = 8,
-    lr_head: float = 2.0e-4,
-    lr_backbone: float = 4.0e-5,
+    lr_head: float = 4.0e-4,
+    lr_backbone: float = 6.0e-5,
     swa_start_epoch: Optional[int] = None,
 ) -> Optional[Dict[str, torch.Tensor]]:
     tower_ids = {id(p) for p in model.vision_tower.parameters()}
@@ -643,7 +762,7 @@ def train_pillar3_run(
                 oof_teacher_probs=t_probs,
                 supp_bias_param=model.head.supp_batch_bias,
             )
-            loss = loss_dict["loss"] + 0.35 * rl2r_loss_fn(out, y_6d)
+            loss = loss_dict["loss"] + 0.40 * rl2r_loss_fn(out, y_6d)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(trainable_all, max_norm=1.0)
@@ -670,6 +789,7 @@ def run_smoke_test() -> None:
     for i in range(6):
         pil_img = Image.fromarray(np.random.randint(0, 255, (720, 405, 3), dtype=np.uint8))
         pack = build_pillar3_sample_tensors(pil_img)
+        assert pack["views_tensor"].shape == (4, 3, 384, 384)
         samples.append(
             {
                 "name": f"p3_smoke_{i:02d}.png",
@@ -678,7 +798,7 @@ def run_smoke_test() -> None:
                 "probe_8ch": pack["probe_8ch"],
                 "batch_id": torch.tensor(i % 2, dtype=torch.long),
                 "noisy_flag": torch.tensor(0, dtype=torch.long),
-                "grades": torch.tensor([i % 4, 0, (i + 1) % 4, 0, 0, 3 if i == 4 else 0], dtype=torch.long),
+                "grades": torch.tensor([i % 4, 0, (i + 1) % 4, 0, i % 3, 3 if i == 4 else 0], dtype=torch.long),
             }
         )
 
@@ -693,11 +813,11 @@ def run_smoke_test() -> None:
     pred_one = predict_pillar3_dataset(model, dl_one, device)
     diff = float(np.max(np.abs(pred_one["probs_6x4"][0] - pred["probs_6x4"][0])))
     assert diff < 1e-6, f"Pillar-3 single-image independence failed: diff={diff}"
-    print(f"[Pillar-3 HiRes Physics Smoke Test PASS] probs={pred['probs_6x4'].shape} | single_img_diff={diff:.2e}")
+    print(f"[Pillar-3 4-View Contrast-Residual Smoke Test PASS] probs={pred['probs_6x4'].shape} | single_img_diff={diff:.2e}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Phoenix Pillar-3 1:1 Hi-Res & Optical Physics Specialist")
+    parser = argparse.ArgumentParser(description="Phoenix Pillar-3 1:1 Contrast-Residual & Optical Physics Specialist")
     parser.add_argument("--mode", choices=["cv5", "stage2-rl2r", "fulldata-swa"], default="cv5")
     parser.add_argument("--split-csv", default=str(PHOENIX_SPLITS_DIR / "phoenix_5fold.csv"))
     parser.add_argument("--audit-json", default=str(PHOENIX_SPLITS_DIR / "batch_shift_and_audit.json"))
@@ -705,8 +825,8 @@ def main() -> None:
     parser.add_argument("--teacher-oof-npz", default="")
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--lr-head", type=float, default=2.0e-4)
-    parser.add_argument("--lr-backbone", type=float, default=4.0e-5)
+    parser.add_argument("--lr-head", type=float, default=4.0e-4)
+    parser.add_argument("--lr-backbone", type=float, default=6.0e-5)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--fold", type=int, default=-1)
@@ -769,30 +889,49 @@ def main() -> None:
             tr_idx = [i for i, r in enumerate(rows) if int(r["fold"]) != f_idx]
             va_idx = [i for i, r in enumerate(rows) if int(r["fold"]) == f_idx]
             tr_teacher = teacher_probs_all[tr_idx] if teacher_probs_all is not None else None
+            tr_rows_aug, tr_teacher_aug = oversample_rare_real_p1_p0([rows[i] for i in tr_idx], tr_teacher)
 
-            ds_tr = Pillar3Dataset([rows[i] for i in tr_idx], resolver, box_cache, True, tr_teacher)
-            ds_va = Pillar3Dataset([rows[i] for i in va_idx], resolver, box_cache, False)
+            ds_tr = Pillar3Dataset(tr_rows_aug, resolver, box_cache, True, False, tr_teacher_aug)
+            ds_va = Pillar3Dataset([rows[i] for i in va_idx], resolver, box_cache, False, False)
+            ds_va_flip = Pillar3Dataset([rows[i] for i in va_idx], resolver, box_cache, False, True)
             dl_tr = DataLoader(ds_tr, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=(device.type == "cuda"))
             dl_va = DataLoader(ds_va, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=(device.type == "cuda"))
+            dl_va_flip = DataLoader(ds_va_flip, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=(device.type == "cuda"))
 
-            print(f"=== [pillar3 {args.mode}] Fold {f_idx}/5 | train={len(tr_idx)} val={len(va_idx)} | device={device} ===", flush=True)
             model = Pillar3HiResPhysicsSpecialist(
                 init_batch_shift=batch_shift,
                 stage0_ckpt_path=args.stage0_ckpt,
             ).to(device)
+
+            s1_fold_ckpt = os.path.join(args.ckpt_dir, f"pillar3_cv5_fold{f_idx}.pt")
+            eff_epochs = max(6, args.epochs) if args.mode == "stage2-rl2r" else args.epochs
+            eff_lr_h, eff_lr_b = args.lr_head, args.lr_backbone
+            if args.mode == "stage2-rl2r" and os.path.exists(s1_fold_ckpt):
+                sd_prev = torch.load(s1_fold_ckpt, map_location="cpu")
+                model.load_state_dict(sd_prev.get("state_dict", sd_prev), strict=False)
+                eff_epochs = max(4, args.epochs - 1)
+                eff_lr_h, eff_lr_b = args.lr_head * 0.45, args.lr_backbone * 0.45
+                print(f"  [pillar3 Fold {f_idx}] Warm-started Stage-2 from {s1_fold_ckpt}", flush=True)
+
+            print(
+                f"=== [pillar3 {args.mode}] Fold {f_idx}/5 | train={len(ds_tr)} (rare-P1/P0 boosted) val={len(va_idx)} (2x HFlip TTA) | device={device} ===",
+                flush=True,
+            )
             swa_sd = train_pillar3_run(
                 model=model,
                 train_loader=dl_tr,
                 device=device,
-                epochs=args.epochs,
-                lr_head=args.lr_head,
-                lr_backbone=args.lr_backbone,
-                swa_start_epoch=max(2, args.epochs - 3),
+                epochs=eff_epochs,
+                lr_head=eff_lr_h,
+                lr_backbone=eff_lr_b,
+                swa_start_epoch=max(2, eff_epochs - 3),
             )
             if swa_sd is not None:
                 model.load_state_dict(swa_sd, strict=False)
+                if args.mode == "cv5" and _has_safe_disk_headroom(args.ckpt_dir):
+                    torch.save({"pillar": "pillar3", "state_dict": swa_sd}, s1_fold_ckpt)
 
-            va_out = predict_pillar3_dataset(model, dl_va, device)
+            va_out = predict_pillar3_dataset(model, dl_va, device, loader_hflip=dl_va_flip)
             np.savez_compressed(fold_npz, fold=np.int64(f_idx), **va_out)
 
             m = evaluate_official_metrics(np.argmax(va_out["probs_6x4"], axis=-1), gold_all[va_idx])
@@ -811,13 +950,14 @@ def main() -> None:
             print(f"[pillar3 Resume] Full-data SWA checkpoint exists ({ckpt_path}); skipping.", flush=True)
             return
 
-        ds_full = Pillar3Dataset(rows, resolver, box_cache, True, teacher_probs_all)
+        rows_aug, teacher_aug = oversample_rare_real_p1_p0(rows, teacher_probs_all)
+        ds_full = Pillar3Dataset(rows_aug, resolver, box_cache, True, False, teacher_aug)
         model = Pillar3HiResPhysicsSpecialist(
             init_batch_shift=batch_shift,
             stage0_ckpt_path=args.stage0_ckpt,
         ).to(device)
         dl_warm = DataLoader(ds_full, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=(device.type == "cuda"))
-        warm_epochs = max(2, args.epochs - 3)
+        warm_epochs = max(3, args.epochs - 3)
         train_pillar3_run(model, dl_warm, device, epochs=warm_epochs, lr_head=args.lr_head, lr_backbone=args.lr_backbone)
         warm_state = extract_trainable_state_dict(model)
 

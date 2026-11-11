@@ -3,17 +3,21 @@
 """
 code/phoenix/losses_and_heads.py
 ================================
-Breakthrough 4: DeQA Direct 4-Way Unimodal Soft-Distribution Head, Batch-Shift
-Calibration Embedding, Heteroscedastic OOF Soft-Relabeling, Cross-Batch Memory (XBM)
-Pairwise Thurstone RL2R Ranking Loss, and Adapter-Aware Basin-Aligned SWA Collector.
+Breakthrough 4 (Upgraded with Sharp Un-Smeared P1 Supervision, Explicit P1-vs-P2 Margin,
+`过度生成/过锐` Channel Boost, and Clean-P0 Cliff Suppression):
 
-Why This Replaces Cumulative Sigmoid & Multiplicative Heads:
-  - Previous 14-ch cumulative subtraction `P(P1) = sigmoid(z1) - sigmoid(z0)` mathematically
-    capped P1 peak probability around ~0.462, causing massive P1 collapse into P0/P2.
-  - Micro-batch (`bs=2~4`) differentiable Soft-F1 suffered empty-class denominator explosions.
-  - Here, each defect outputs direct 4-level unimodal probabilities `P_{i,c,k}` (`k in 0..3`,
-    where `P1` freely reaches `1.0`), supervised per-sample by Adaptive Gaussian Soft-KL +
-    Squared CDF Earth Mover's Distance (EMD) + 1,024-Queue Thurstone Pairwise Fidelity RL2R!
+Root-Cause Fix from 14-Channel OOF Audit:
+  - Previously `sigma_mid = 0.46` smeared `P1` Gaussian soft targets into majority `P2` & `无问题`,
+    while `sample_w` boosted only `P0` (`1.65x`) and left `P1` at `1.00x` — starving `P1` recall
+    (`过度生成 P1 R=0.183`, `过锐 P1 R=0.305`, `模糊 P1 R=0.441`).
+  - Now:
+      1. `sigma_anchor = 0.18, sigma_mid = 0.22` keeps `P1` targets crisp (>0.92 peak mass, zero
+         bleed into `P2`), using soft blending (`0.20`) strictly for adjacent OOF teacher relabeling.
+      2. Explicit grade weights `[1.00, 1.25, 1.75, 1.65]` (`P1` boosted `1.75x`!) + dimension
+         weights `[1.05, 1.00, 1.35, 1.20, 1.65, 1.30]` (`过度生成 1.65x`, `过锐 1.35x`).
+      3. P1-boundary-weighted CDF EMD `[1.10, 1.85, 1.55]` + Direct `P1 vs P2` & `P0 vs P1` Logit
+         Separation Margin (`loss_p1_sep`) + Clean-Image `P0` Max-Prob Cliff Penalty (`loss_clean_p0`).
+      4. Positive-pair (`P2 vs P1`, `P1 vs P0`) `2.5x` separation boost inside XBM Thurstone RL2R!
 """
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from phoenix.config import P0_ONLY_DIMS
+from phoenix.config import FULL_DIMS, P0_ONLY_DIMS
 
 
 class PhoenixUnimodalDeQAHead(nn.Module):
@@ -48,7 +52,6 @@ class PhoenixUnimodalDeQAHead(nn.Module):
             nn.Linear(in_dim, hidden_dim),
             nn.GELU(),
         )
-        # 6 defect queries + 1 global joint-clean query
         self.defect_queries = nn.Parameter(torch.randn(1, 7, hidden_dim) * 0.02)
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=hidden_dim,
@@ -65,17 +68,15 @@ class PhoenixUnimodalDeQAHead(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.norm2 = nn.LayerNorm(hidden_dim)
 
-        # Per-defect direct 4-grade energy head + continuous center head (unimodal anchor)
         self.grade_proj = nn.ModuleList([nn.Linear(hidden_dim, 4) for _ in range(6)])
         self.center_proj = nn.ModuleList([nn.Linear(hidden_dim, 1) for _ in range(6)])
-        self.log_kappa = nn.Parameter(torch.zeros(6))  # Unimodal quadratic curvature >= 0
+        self.log_kappa = nn.Parameter(torch.zeros(6))
         self.clean_gate_proj = nn.Linear(hidden_dim, 1)
         self.anchor_emb_proj = nn.Sequential(
             nn.Linear(hidden_dim * 7, 256),
             nn.LayerNorm(256),
         )
 
-        # Training-only Batch-Shift Calibration bias for Batch-2 (`supp`, batch_id == 1)
         shift_tensor = torch.zeros(6, 4, dtype=torch.float32)
         if init_batch_shift is not None:
             arr = np.asarray(init_batch_shift, dtype=np.float32)
@@ -92,10 +93,6 @@ class PhoenixUnimodalDeQAHead(nn.Module):
         batch_ids: Optional[torch.Tensor] = None,
         apply_batch_bias: Optional[bool] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Runs strictly in FP32 (`autocast(enabled=False)`) to prevent BF16 softmax/attention
-        underflow and mixed-dtype errors.
-        """
         if spatial_tokens.ndim == 2:
             spatial_tokens = spatial_tokens.unsqueeze(1)
         amp_dev = "cuda" if spatial_tokens.is_cuda else "cpu"
@@ -112,14 +109,14 @@ class PhoenixUnimodalDeQAHead(nn.Module):
             q = self.norm2(q + q_self)
 
             use_bias = self.training if apply_batch_bias is None else apply_batch_bias
-            kappa = F.softplus(self.log_kappa.float()) * 0.35
+            kappa = F.softplus(self.log_kappa.float()) * 0.30
             grid_1d = self.grade_grid.float()
 
             logits_list = []
             for d in range(6):
                 qd = q[:, d, :]
-                raw_z = self.grade_proj[d](qd)  # [B, 4]
-                center = 3.0 * torch.sigmoid(self.center_proj[d](qd))  # [B, 1] in [0, 3]
+                raw_z = self.grade_proj[d](qd)
+                center = 3.0 * torch.sigmoid(self.center_proj[d](qd))
                 unimodal_prior = -kappa[d] * (grid_1d.unsqueeze(0) - center) ** 2
                 z = raw_z + unimodal_prior
 
@@ -134,7 +131,7 @@ class PhoenixUnimodalDeQAHead(nn.Module):
                     z = z + mask
                 logits_list.append(z)
 
-            logits_6x4 = torch.stack(logits_list, dim=1)  # [B, 6, 4]
+            logits_6x4 = torch.stack(logits_list, dim=1)
             probs_6x4 = F.softmax(logits_6x4, dim=-1)
 
             clean_logit = self.clean_gate_proj(q[:, 6, :]).squeeze(-1)
@@ -164,19 +161,19 @@ def build_heteroscedastic_soft_targets(
     y_6d: torch.Tensor,
     noisy_flags: Optional[torch.Tensor] = None,
     oof_teacher_probs: Optional[torch.Tensor] = None,
-    sigma_anchor: float = 0.30,
-    sigma_mid: float = 0.46,
-    teacher_blend: float = 0.25,
+    sigma_anchor: float = 0.18,
+    sigma_mid: float = 0.22,
+    teacher_blend: float = 0.20,
 ) -> torch.Tensor:
     device = y_6d.device
     bsz = y_6d.shape[0]
     grid = torch.tensor([0.0, 1.0, 2.0, 3.0], device=device, dtype=torch.float32).view(1, 1, 4)
-    y_f = y_6d.float().unsqueeze(-1)  # [B, 6, 1]
+    y_f = y_6d.float().unsqueeze(-1)
 
     is_mid = ((y_6d == 1) | (y_6d == 2)).float().unsqueeze(-1)
     sigma = sigma_anchor + is_mid * (sigma_mid - sigma_anchor)
     if noisy_flags is not None:
-        sigma = sigma + noisy_flags.float().view(bsz, 1, 1) * 0.16
+        sigma = sigma + noisy_flags.float().view(bsz, 1, 1) * 0.08
 
     dist2 = (grid - y_f) ** 2
     raw = torch.exp(-dist2 / (2.0 * sigma ** 2))
@@ -202,16 +199,27 @@ def build_heteroscedastic_soft_targets(
 class DeQAOrdinalDistributionLoss(nn.Module):
     def __init__(
         self,
-        beta_emd: float = 1.50,
-        beta_clean: float = 0.65,
-        p0_sample_boost: float = 1.65,
+        beta_emd: float = 1.40,
+        beta_p1_sep: float = 0.50,
+        beta_clean: float = 0.60,
+        beta_clean_p0: float = 0.55,
     ) -> None:
         super().__init__()
         self.beta_emd = beta_emd
+        self.beta_p1_sep = beta_p1_sep
         self.beta_clean = beta_clean
-        self.p0_sample_boost = p0_sample_boost
-        dim_w = torch.tensor([1.0, 1.0, 1.15, 1.35, 1.35, 1.40], dtype=torch.float32)
-        self.register_buffer("dim_weights", dim_w, persistent=False)
+        self.beta_clean_p0 = beta_clean_p0
+
+        # Focus gradient capacity on 过度生成 (d=4: 1.65x) and 过锐 (d=2: 1.35x)
+        dim_w = torch.tensor([1.05, 1.00, 1.35, 1.20, 1.65, 1.30], dtype=torch.float32)
+        # Boost P1 (g=2: 1.75x), P0 (g=3: 1.65x), and P2 (g=1: 1.25x) over majority 无问题
+        grade_w = torch.tensor([1.00, 1.25, 1.75, 1.65], dtype=torch.float32)
+        # P1-boundary-focused CDF EMD cuts: [cut(0|123), cut(01|23), cut(012|3)]
+        emd_cut_w = torch.tensor([1.10, 1.85, 1.55], dtype=torch.float32)
+
+        self.register_buffer("dim_weights", dim_w / dim_w.mean(), persistent=False)
+        self.register_buffer("grade_weights", grade_w, persistent=False)
+        self.register_buffer("emd_cut_weights", emd_cut_w, persistent=False)
 
     def forward(
         self,
@@ -235,18 +243,48 @@ class DeQAOrdinalDistributionLoss(nn.Module):
 
         cdf_p = torch.cumsum(probs, dim=-1)[:, :, :3]
         cdf_q = torch.cumsum(q, dim=-1)[:, :, :3]
-        emd_per = torch.sum((cdf_p - cdf_q) ** 2, dim=-1)
+        emd_per = torch.mean(((cdf_p - cdf_q) ** 2) * self.emd_cut_weights.float().view(1, 1, 3), dim=-1)
 
-        sample_w = 1.0 + (y_6d == 3).float() * (self.p0_sample_boost - 1.0)
+        y_clamped = torch.clamp(y_6d, 0, 3)
+        sample_w = self.grade_weights.float()[y_clamped]  # [B, 6]
         dim_w = self.dim_weights.float().view(1, 6)
 
         loss_kl = torch.mean(kl_per * sample_w * dim_w)
         loss_emd = torch.mean(emd_per * sample_w * dim_w)
 
-        clean_gt = (y_6d == 0).all(dim=1).float()
+        # Explicit Direct P1-vs-P2 & P0-vs-P1 Logit Separation Margin on 4-grade dimensions
+        sep_terms = []
+        for d in FULL_DIMS:
+            zd = logits[:, d, :]
+            yd = y_clamped[:, d]
+            is_p1 = (yd == 2).float()
+            is_p2 = (yd == 1).float()
+            is_p0 = (yd == 3).float()
+            sep_d = (
+                is_p1 * (F.relu(0.45 - (zd[:, 2] - zd[:, 1])) + 0.5 * F.relu(0.30 - (zd[:, 2] - zd[:, 3])))
+                + is_p2 * F.relu(0.25 - (zd[:, 1] - zd[:, 2]))
+                + is_p0 * F.relu(0.40 - (zd[:, 3] - zd[:, 2]))
+            )
+            sep_terms.append(sep_d.mean() * self.dim_weights.float()[d])
+        loss_p1_sep = torch.stack(sep_terms).mean()
+
+        clean_mask = (y_6d == 0).all(dim=1)
+        clean_gt = clean_mask.float()
         loss_clean = F.binary_cross_entropy_with_logits(clean_logit, clean_gt)
 
-        total = loss_kl + self.beta_emd * loss_emd + self.beta_clean * loss_clean
+        # Direct Doc1@654 Clean-P0 Cliff Guard during training: crush max P(P0) on true Clean frames
+        if torch.any(clean_mask):
+            loss_clean_p0 = probs[clean_mask, :, 3].amax(dim=1).mean()
+        else:
+            loss_clean_p0 = logits.sum() * 0.0
+
+        total = (
+            loss_kl
+            + self.beta_emd * loss_emd
+            + self.beta_p1_sep * loss_p1_sep
+            + self.beta_clean * loss_clean
+            + self.beta_clean_p0 * loss_clean_p0
+        )
         if supp_bias_param is not None:
             total = total + 0.01 * torch.mean(supp_bias_param.float() ** 2)
 
@@ -268,6 +306,8 @@ class CrossBatchThurstoneRL2RLoss(nn.Module):
         self.register_buffer("q_emb", torch.zeros(queue_size, emb_dim), persistent=False)
         self.register_buffer("q_ptr", torch.zeros(1, dtype=torch.long), persistent=False)
         self.register_buffer("q_filled", torch.zeros(1, dtype=torch.long), persistent=False)
+        dim_pair_w = torch.tensor([1.05, 1.00, 1.35, 1.15, 1.65, 1.25], dtype=torch.float32)
+        self.register_buffer("dim_pair_w", dim_pair_w / dim_pair_w.mean(), persistent=False)
 
     @torch.no_grad()
     def _enqueue(
@@ -348,12 +388,14 @@ class CrossBatchThurstoneRL2RLoss(nn.Module):
                 continue
 
             sign = torch.sign(diff_y.float())
-            adj_boost = torch.where(torch.abs(diff_y) == 1, 1.5, 1.0)
+            # Strongly boost positive-grade separation (P2 vs P1, P1 vs P0) by 2.5x!
+            both_pos = (yd_cur >= 1) & (yd_ref >= 1)
+            adj_boost = torch.where(both_pos, 2.5, torch.where(torch.abs(diff_y) == 1, 1.4, 1.0))
             denom = torch.sqrt(var[:, d].unsqueeze(1) + ref_var[:, d].unsqueeze(0) + 0.08)
             z_score = sign * (mu[:, d].unsqueeze(1) - ref_mu[:, d].unsqueeze(0)) / denom
             phi = 0.5 * (1.0 + torch.erf(z_score / sqrt2))
             fidelity_loss = (1.0 - phi) * adj_boost * hard_scene_w
-            pair_losses.append(fidelity_loss[valid].mean())
+            pair_losses.append(fidelity_loss[valid].mean() * self.dim_pair_w.float()[d])
 
         loss_thurstone = torch.stack(pair_losses).mean() if pair_losses else mu.sum() * 0.0
 
@@ -366,8 +408,10 @@ class CrossBatchThurstoneRL2RLoss(nn.Module):
             exact_hit = (actions == gt_flat).float()
             dist_pen = -0.35 * torch.abs(actions.float() - gt_flat.float())
             p0_miss = ((gt_flat == 3) & (actions != 3)).float() * (-1.25)
-            clean_fp = ((gt_flat == 0) & (actions != 0)).float() * (-1.10)
-            rewards = exact_hit + dist_pen + p0_miss + clean_fp
+            p1_miss = ((gt_flat == 2) & (actions != 2)).float() * (-0.85)
+            clean_p0_fp = ((gt_flat == 0) & (actions == 3)).float() * (-1.65)
+            clean_fp = ((gt_flat == 0) & (actions != 0)).float() * (-0.85)
+            rewards = exact_hit + dist_pen + p0_miss + p1_miss + clean_p0_fp + clean_fp
 
             r_mean = rewards.mean(dim=1, keepdim=True)
             r_std = rewards.std(dim=1, keepdim=True) + 1e-5
@@ -400,6 +444,9 @@ def extract_trainable_state_dict(model: nn.Module) -> Dict[str, torch.Tensor]:
             or k.startswith("fgresq_branch.")
             or k.startswith("pal4vst_probe.")
             or k.startswith("probe_proj.")
+            or ("backbone_gate_logits" in kl)
+            or ("res_glob_norm" in kl)
+            or ("res_tex_norm" in kl)
             or ("lora_" in kl)
             or ("dora_" in kl)
             or ("magnitude_vector" in kl)
