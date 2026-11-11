@@ -252,10 +252,17 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
       - Outputs `[B, 216, out_dim]` (`4` views * `36` + `2` explicit contrast-residual maps * `36`).
     """
 
-    def __init__(self, out_dim: int = 512, mock_backbone: bool = False) -> None:
+    def __init__(
+        self,
+        out_dim: int = 512,
+        mock_backbone: bool = False,
+        lora_rank: int = 24,
+        legacy_3view: bool = False,
+    ) -> None:
         super().__init__()
         self.out_dim = out_dim
         self.mock_backbone = mock_backbone
+        self.legacy_3view = bool(legacy_3view)
         self.has_pecore = False
         self.res_glob_norm = nn.LayerNorm(out_dim).float()
         self.res_tex_norm = nn.LayerNorm(out_dim).float()
@@ -270,7 +277,7 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
             self.backbone_gate_logits = nn.Parameter(torch.zeros(3, dtype=torch.float32))
             return
 
-        self.dinov3, self._dino_hook, d_dim = self._build_dinov3()
+        self.dinov3, self._dino_hook, d_dim = self._build_dinov3(lora_rank=lora_rank)
         self.proj_dino = nn.Sequential(nn.LayerNorm(d_dim * 4), nn.Linear(d_dim * 4, out_dim)).float()
 
         self.cradio, self._radio_hook, r_dim = self._build_cradio()
@@ -279,7 +286,7 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         self.convnext, c_dim = self._build_convnext()
         self.proj_convnext = nn.Sequential(nn.LayerNorm(c_dim), nn.Linear(c_dim, out_dim)).float()
 
-        pec_res = self._try_build_pecore()
+        pec_res = self._try_build_pecore(lora_rank=lora_rank)
         if pec_res is not None:
             self.pecore, self._pec_hook, p_dim = pec_res
             self.proj_pecore = nn.Sequential(nn.LayerNorm(p_dim * 4), nn.Linear(p_dim * 4, out_dim)).float()
@@ -295,7 +302,7 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         self.register_buffer("pec_std", torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1), persistent=False)
 
     @staticmethod
-    def _build_dinov3():
+    def _build_dinov3(lora_rank: int = 24):
         import timm
         from safetensors.torch import load_file
 
@@ -310,7 +317,7 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         dim = int(m.embed_dim)
         if torch.cuda.is_available():
             m = m.to(torch.bfloat16)
-        m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=24, use_dora=True)
+        m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=lora_rank, use_dora=True)
         return m, hook, dim
 
     @staticmethod
@@ -353,7 +360,7 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         return m, int(m.num_features)
 
     @staticmethod
-    def _try_build_pecore():
+    def _try_build_pecore(lora_rank: int = 24):
         p_cand = resolve_local_or_hf_model("pillar3_fgresq_adapter")
         w_file = p_cand if os.path.isfile(p_cand) else os.path.join(p_cand, "model.safetensors")
         if not os.path.exists(w_file) or "pe-core" not in w_file.lower():
@@ -368,19 +375,15 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
             dim = int(m.embed_dim)
             if torch.cuda.is_available():
                 m = m.to(torch.bfloat16)
-            m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=24, use_dora=True)
+            m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=lora_rank, use_dora=True)
             return m, hook, dim
         except Exception:
             return None
 
     def _append_contrast_residuals(self, per_view_tokens: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-          per_view_tokens: `[B, n_v, 36, D]` where views are `[Global, Peak0, Peak1, MidTex]`.
-        Returns:
-          `[B, (n_v + 2) * 36, D]` concatenating explicit `r_peak_glob` & `r_peak_tex`!
-        """
         bsz, n_v, l_tok, d_tok = per_view_tokens.shape
+        if self.legacy_3view:
+            return per_view_tokens.reshape(bsz, n_v * l_tok, d_tok)
         v_glob = per_view_tokens[:, 0]
         if n_v >= 4:
             edge_peak = torch.maximum(per_view_tokens[:, 1], per_view_tokens[:, 2])
@@ -441,12 +444,19 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
                     F.adaptive_avg_pool1d(cx_map.float().transpose(1, 2), output_size=36).transpose(1, 2)
                 )
 
-            w_bb = F.softmax(self.backbone_gate_logits.float(), dim=0)
-            if self.has_pecore and spatial_pec is not None:
-                hc_pec = self.proj_pecore(self._pec_hook.pop_pooled_hypercolumn(spatial_pec, (6, 6)))
-                fused = w_bb[0] * hc_dino + w_bb[1] * hc_radio + w_bb[2] * cx_tok + w_bb[3] * hc_pec
+            if self.legacy_3view:
+                if self.has_pecore and spatial_pec is not None:
+                    hc_pec = self.proj_pecore(self._pec_hook.pop_pooled_hypercolumn(spatial_pec, (6, 6)))
+                    fused = (hc_dino + hc_radio + cx_tok + hc_pec) / 4.0
+                else:
+                    fused = (hc_dino + hc_radio + cx_tok) / 3.0
             else:
-                fused = w_bb[0] * hc_dino + w_bb[1] * hc_radio + w_bb[2] * cx_tok
+                w_bb = F.softmax(self.backbone_gate_logits.float(), dim=0)
+                if self.has_pecore and spatial_pec is not None:
+                    hc_pec = self.proj_pecore(self._pec_hook.pop_pooled_hypercolumn(spatial_pec, (6, 6)))
+                    fused = w_bb[0] * hc_dino + w_bb[1] * hc_radio + w_bb[2] * cx_tok + w_bb[3] * hc_pec
+                else:
+                    fused = w_bb[0] * hc_dino + w_bb[1] * hc_radio + w_bb[2] * cx_tok
 
             v_tok = fused.reshape(bsz, n_v, 36, self.out_dim)
             return self._append_contrast_residuals(v_tok)
@@ -458,10 +468,18 @@ class Pillar3HiResPhysicsSpecialist(nn.Module):
         init_batch_shift: Optional[np.ndarray] = None,
         stage0_ckpt_path: Optional[str] = None,
         mock_backbone: bool = False,
+        lora_rank: int = 24,
+        legacy_3view: bool = False,
     ) -> None:
         super().__init__()
         token_dim = 512
-        self.vision_tower = MultiLayerHypercolumnVisionTower(out_dim=token_dim, mock_backbone=mock_backbone)
+        self.legacy_3view = bool(legacy_3view)
+        self.vision_tower = MultiLayerHypercolumnVisionTower(
+            out_dim=token_dim,
+            mock_backbone=mock_backbone,
+            lora_rank=lora_rank,
+            legacy_3view=legacy_3view,
+        )
         self.physics_stem = HaarWaveletCoCPhysicsStem(in_channels=9, out_dim=token_dim).float()
         self.fgresq_branch = FGResQDegradationProjector(in_channels=8, feat_dim=256).float()
         self.pal4vst_probe = PAL4VSTArtifactSaliencyProbe(in_channels=8, hidden_dim=192).float()
@@ -503,9 +521,10 @@ def build_pillar3_sample_tensors(
     coc_probe: Optional[CoCDepthDefocusProbe] = None,
     precomputed_boxes: Optional[np.ndarray] = None,
     patch_size: int = 384,
+    include_mid_tex: bool = True,
 ) -> Dict[str, object]:
     """
-    Constructs `[0, 1]` `views_01 [4, 3, 384, 384]` (`[Global, Peak0, Peak1, Mid_Interior_Tex]`)
+    Constructs `[0, 1]` `views_01` (`[4, 3, 384, 384]` default or `[3, 3, 384, 384]` in legacy mode)
     + `phys_9ch [9, 256, 256]` + `probe_8ch [8, 256, 256]`.
     """
     rgb_np = np.asarray(pil_img, dtype=np.uint8)
@@ -530,8 +549,6 @@ def build_pillar3_sample_tensors(
             num_patches=2,
         )
 
-    mid_tex_crop = _extract_median_interior_1to1_crop(pil_img, patch_size=patch_size)
-
     g_pil = resize_native_aspect_pil(pil_img, max_pixels=patch_size * patch_size, grid_factor=16)
     g_arr = np.asarray(g_pil, dtype=np.uint8)
     canvas = np.zeros((patch_size, patch_size, 3), dtype=np.uint8)
@@ -541,14 +558,14 @@ def build_pillar3_sample_tensors(
     x_off = (patch_size - ch_w) // 2
     canvas[y_off : y_off + ch_h, x_off : x_off + ch_w] = g_clip
 
+    raw_views = [canvas, np.asarray(crops[0], dtype=np.uint8), np.asarray(crops[1], dtype=np.uint8)]
+    if include_mid_tex:
+        mid_tex_crop = _extract_median_interior_1to1_crop(pil_img, patch_size=patch_size)
+        raw_views.append(np.asarray(mid_tex_crop, dtype=np.uint8))
+
     view_arrays = [
         (arr_u8.astype(np.float32) / 255.0).transpose(2, 0, 1)
-        for arr_u8 in (
-            canvas,
-            np.asarray(crops[0], dtype=np.uint8),
-            np.asarray(crops[1], dtype=np.uint8),
-            np.asarray(mid_tex_crop, dtype=np.uint8),
-        )
+        for arr_u8 in raw_views
     ]
     views_01 = torch.from_numpy(np.stack(view_arrays, axis=0)).float()  # [4, 3, 384, 384]
 

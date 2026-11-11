@@ -68,10 +68,19 @@ from phoenix.native_physics_and_views import (
 
 CONCISE_INSPECTION_PROMPT = (
     "请作为短视频无参考画质质检专家，综合图1（原生宽高比全局画面：判别景深关系、整体模糊与花屏）、"
-    "图2（主体解剖与景深边缘1:1原尺寸切片：判别五官手指文字畸变过度生成与抠图虚化突兀）、"
+    "图2（主体解剖与景深边缘1:1原尺寸切片：判别五官手指畸变过度生成与抠图虚化突兀）、"
     "图3（高频纹理与边缘1:1原尺寸切片：判别1至2像素过锐白边光晕与涂抹塑料感纹理损失），"
-    "严格区分P2轻微、P1明显与P0严重等级，输出6类画质缺陷客观状态。"
+    "直接形成6类画质缺陷的客观严重度状态。"
 )
+
+
+def detect_lora_rank_from_state_dict(sd: Dict[str, Any], default_rank: int = 32) -> int:
+    """Auto-detects PEFT LoRA/DoRA rank `r` from saved adapter state_dict (`lora_A` shape[0])."""
+    inner = sd.get("state_dict", sd) if isinstance(sd, dict) else {}
+    for k, v in inner.items():
+        if "lora_a" in str(k).lower() and hasattr(v, "ndim") and v.ndim == 2:
+            return int(v.shape[0])
+    return int(default_rank)
 
 
 def _has_safe_disk_headroom(path_dir: str, min_free_gb: float = 25.0) -> bool:
@@ -354,11 +363,13 @@ class NativeVLMPillarModel(nn.Module):
         init_batch_shift: Optional[np.ndarray] = None,
         quantize_4bit_infer: bool = False,
         apply_dora: bool = True,
+        lora_rank: int = 32,
         mock_backbone: bool = False,
     ) -> None:
         super().__init__()
         self.pillar_name = pillar_name
         self.mock_backbone = mock_backbone
+        self.lora_rank = int(lora_rank)
         self.processor = None
         self.image_token_id = 151655
 
@@ -379,6 +390,7 @@ class NativeVLMPillarModel(nn.Module):
                 resolved_path=resolved,
                 quantize_4bit_infer=quantize_4bit_infer,
                 apply_dora=apply_dora,
+                lora_rank=self.lora_rank,
             )
 
         self.head = PhoenixUnimodalDeQAHead(
@@ -394,6 +406,7 @@ class NativeVLMPillarModel(nn.Module):
         resolved_path: str,
         quantize_4bit_infer: bool,
         apply_dora: bool,
+        lora_rank: int = 32,
     ):
         import transformers
         from transformers import AutoConfig, AutoProcessor
@@ -508,8 +521,8 @@ class NativeVLMPillarModel(nn.Module):
 
                 use_dora_flag = not quantize_4bit_infer
                 lora_cfg = LoraConfig(
-                    r=32,
-                    lora_alpha=64,
+                    r=int(lora_rank),
+                    lora_alpha=int(lora_rank) * 2,
                     lora_dropout=0.05,
                     target_modules=exact_linear_paths if exact_linear_paths else ["q_proj", "v_proj"],
                     use_dora=use_dora_flag,

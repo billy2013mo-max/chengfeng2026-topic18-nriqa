@@ -50,7 +50,10 @@ from phoenix.native_physics_and_views import (
     resize_native_aspect_pil,
     select_scrutiny_1to1_patches,
 )
-from phoenix.train_pillar12_native_vlm import NativeVLMPillarModel
+from phoenix.train_pillar12_native_vlm import (
+    NativeVLMPillarModel,
+    detect_lora_rank_from_state_dict,
+)
 from phoenix.train_pillar3_hires_physics import (
     Pillar3HiResPhysicsSpecialist,
     build_pillar3_sample_tensors,
@@ -192,28 +195,46 @@ class Single4090PhoenixEngine:
             device=str(self.device),
         )
 
+        ckpts_loaded: Dict[str, dict] = {}
+        for name in ("pillar1_fulldata_swa.pt", "pillar2_fulldata_swa.pt", "pillar3_fulldata_swa.pt"):
+            p = os.path.join(ckpt_dir, name)
+            if os.path.exists(p) and not mock_backbones:
+                ckpts_loaded[name] = torch.load(p, map_location="cpu")
+
+        r1 = detect_lora_rank_from_state_dict(ckpts_loaded.get("pillar1_fulldata_swa.pt", {}), default_rank=32)
+        r2 = detect_lora_rank_from_state_dict(ckpts_loaded.get("pillar2_fulldata_swa.pt", {}), default_rank=32)
+        p3_raw = ckpts_loaded.get("pillar3_fulldata_swa.pt", {})
+        p3_inner = p3_raw.get("state_dict", p3_raw) if isinstance(p3_raw, dict) else {}
+        r3 = detect_lora_rank_from_state_dict(p3_inner, default_rank=24)
+        self.p3_legacy_3view = bool(p3_inner and ("vision_tower.backbone_gate_logits" not in p3_inner))
+
         self.pillar1 = NativeVLMPillarModel(
             pillar_name="pillar1",
             quantize_4bit_infer=not mock_backbones,
             apply_dora=not mock_backbones,
+            lora_rank=r1,
             mock_backbone=mock_backbones,
         ).to(self.device)
         self.pillar2 = NativeVLMPillarModel(
             pillar_name="pillar2",
             quantize_4bit_infer=not mock_backbones,
             apply_dora=not mock_backbones,
+            lora_rank=r2,
             mock_backbone=mock_backbones,
         ).to(self.device)
-        self.pillar3 = Pillar3HiResPhysicsSpecialist(mock_backbone=mock_backbones).to(self.device)
+        self.pillar3 = Pillar3HiResPhysicsSpecialist(
+            mock_backbone=mock_backbones,
+            lora_rank=r3,
+            legacy_3view=self.p3_legacy_3view,
+        ).to(self.device)
 
         for name, mod in (
             ("pillar1_fulldata_swa.pt", self.pillar1),
             ("pillar2_fulldata_swa.pt", self.pillar2),
             ("pillar3_fulldata_swa.pt", self.pillar3),
         ):
-            p = os.path.join(ckpt_dir, name)
-            if os.path.exists(p) and not mock_backbones:
-                sd = torch.load(p, map_location="cpu")
+            if name in ckpts_loaded:
+                sd = ckpts_loaded[name]
                 mod.load_state_dict(sd.get("state_dict", sd), strict=False)
             mod.eval()
 
@@ -253,7 +274,11 @@ class Single4090PhoenixEngine:
         out1 = self.pillar1(vlm_views, batch_ids=None, apply_batch_bias=False, device=self.device)
         out2 = self.pillar2(vlm_views, batch_ids=None, apply_batch_bias=False, device=self.device)
 
-        p3_pack = build_pillar3_sample_tensors(pil_img, coc_probe=self.coc_probe)
+        p3_pack = build_pillar3_sample_tensors(
+            pil_img,
+            coc_probe=self.coc_probe,
+            include_mid_tex=not self.p3_legacy_3view,
+        )
         out3 = self.pillar3(
             views_01=p3_pack["views_tensor"].unsqueeze(0).to(self.device),
             phys_9ch=p3_pack["phys_9ch"].unsqueeze(0).to(self.device),
