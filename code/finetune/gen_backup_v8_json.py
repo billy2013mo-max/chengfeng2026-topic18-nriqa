@@ -179,7 +179,7 @@ for i, name in enumerate(ordered_names):
             lbl = old_lbl.copy()
     out_entries.append({'image': name, 'label': lbl})
 
-out1 = 'pred_nriqa_dataset_test_v8_backup_p1p0boost.json'
+out1 = 'results/final/pred_nriqa_dataset_test_v8_backup_p1p0boost.json'
 out2 = 'results/v8_experts/pred_nriqa_dataset_test_v8_backup_p1p0boost.json'
 for p in [out1, out2]:
     with open(p, 'w', encoding='utf-8') as f:

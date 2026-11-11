@@ -36,6 +36,9 @@ IMG_DIRS = [
     'data/test_150',
     'data/test',
 ]
+# next55: final-eval images live outside the repo tree; prepend so they are found (and never silently zero-filled)
+if os.environ.get('NEXT55_EXTRA_IMG_DIR'):
+    IMG_DIRS.insert(0, os.environ['NEXT55_EXTRA_IMG_DIR'])
 
 
 def find_img_path(name):
@@ -266,20 +269,45 @@ def compute_one_image_feats(name):
 
 
 def extract_for_names(names, cache_path='results/v8_experts/native_phys_feats.npz'):
+    import fcntl
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    lock_path = cache_path + '.lock'
+
     existing = {}
     if os.path.exists(cache_path):
-        d = np.load(cache_path, allow_pickle=True)
-        if 'data' in d:
-            existing.update(d['data'].item())
+        try:
+            d = np.load(cache_path, allow_pickle=True)
+            if 'data' in d:
+                existing.update(d['data'].item())
+        except Exception as e:
+            print(f'[warning] cache load failed ({e}), will re-extract', flush=True)
 
     missing = [n for n in names if n not in existing]
     if missing:
         t0 = time.time()
-        with Pool(24) as pool:
+        n_workers = min(48, os.cpu_count() or 24)
+        with Pool(n_workers) as pool:
             for nm, vec in pool.imap_unordered(compute_one_image_feats, missing, chunksize=32):
                 existing[nm] = vec
-        np.savez_compressed(cache_path, data=existing)
+
+        # Atomic lock + read latest + merge + atomic write
+        with open(lock_path, 'w') as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                if os.path.exists(cache_path):
+                    try:
+                        latest = np.load(cache_path, allow_pickle=True)
+                        if 'data' in latest:
+                            merged = latest['data'].item()
+                            merged.update(existing)
+                            existing = merged
+                    except Exception:
+                        pass
+                tmp_path = f"{cache_path}.tmp.{os.getpid()}_{time.time()}.npz"
+                np.savez_compressed(tmp_path, data=existing)
+                os.replace(tmp_path, cache_path)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
         print(f'[{time.time()-t0:.1f}s] Extracted 60-dim native physical features for {len(missing)} images (total cached: {len(existing)})', flush=True)
     return existing
 

@@ -12,8 +12,8 @@ covering:
 import os
 from generate_task_and_dilemma_report_docx import write_docx, write_markdown
 
-SUPP_MD_PATH = "/wanqing-develop/luowenjing/18/NR_IQA_Supplement_Architecture_Threshold_and_Resolution_Analysis.md"
-SUPP_DOCX_PATH = "/wanqing-develop/luowenjing/18/NR_IQA_Supplement_Architecture_Threshold_and_Resolution_Analysis.docx"
+SUPP_MD_PATH = "/wanqing-develop/luowenjing/18/docs/reports/NR_IQA_Supplement_Architecture_Threshold_and_Resolution_Analysis.md"
+SUPP_DOCX_PATH = "/wanqing-develop/luowenjing/18/docs/reports/NR_IQA_Supplement_Architecture_Threshold_and_Resolution_Analysis.docx"
 
 
 def build_supplement_blocks():

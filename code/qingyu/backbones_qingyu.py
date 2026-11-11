@@ -454,7 +454,14 @@ class QingyuVisionQualityTower(nn.Module):
                 self._unfreeze_top_blocks(m, blocks, max(unfreeze_last_k, 6))
 
             raw_m = m.base_model.model if hasattr(m, "base_model") else m
-            raw_m.encoder.gradient_checkpointing = False
+            # next55: B*V=30 crops through 6B without checkpointing OOMs a 140GB H200 (logs/qingyu/tier2_*).
+            # Reentrant checkpoint drops LoRA grads unless the block input requires grad -> force it on embeddings.
+            use_ckpt = os.environ.get("QY_IV6B_GRAD_CKPT", "1") == "1"
+            raw_m.encoder.gradient_checkpointing = use_ckpt
+            if use_ckpt:
+                raw_m.embeddings.register_forward_hook(
+                    lambda _mod, _inp, out: out.requires_grad_(True) if (torch.is_grad_enabled() and not out.requires_grad) else out
+                )
             m.dual_tap = DualLayerTapWrapper(raw_m.encoder.layers, 3200).float()
             m.abmil = TokenGatedABMILPool(3200).float()
             _cur_grid = [int(getattr(cfg, "image_size", 448))]
