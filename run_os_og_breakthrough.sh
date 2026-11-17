@@ -5,7 +5,7 @@
 #   1) Method 1: 8-GPU Parallel Native 1:1 Spatial Salience x Artifact Extraction
 #      (8-fold leak-free OOF on 3,573 images + sharded full-fit on test_150)
 #   2) Method 2 + Joint (1+2): Strict 8-Fold Video-Grouped Nested CV Calibration,
-#      Ablation Scoreboard & Clean-Locked Column-Isolated Ordinal Decoder Fit
+#      Ablation Scoreboard & Clean-Shielded Column-Isolated Ordinal Decoder Fit
 #   3) Multi-GPU Data-Parallel Fresh Ensemble Inference on test_150 + N=1 Audit +
 #      Official Submission Schema Validation
 #
@@ -119,38 +119,42 @@ fi
 # Stage 1B: Sharded Multi-GPU Spatial Salience Extraction on test_150
 # ------------------------------------------------------------------------------
 SPATIAL_TGT_NPZ="${SPATIAL_DIR}/spatial_target.npz"
-rm -f "${SPATIAL_DIR}"/target_shard_*_of_*.npz
-echo "[Stage 1B/4] Extracting native 1:1 spatial salience features on '${TEMPLATE}' across ${NUM_GPUS} GPUs..."
-pids=()
-logs=()
-for (( s=0; s<NUM_GPUS; s++ )); do
-  gpu_id="${GPU_ARR[$s]}"
-  log_f="${OUT_DIR}/logs/spatial_target_s${s}_gpu${gpu_id}.log"
-  CUDA_VISIBLE_DEVICES="${gpu_id}" "${PYTHON_BIN}" -u code/r55/spatial_salience_probe.py \
-    --mode target \
-    --template "${TEMPLATE}" \
-    --img-dir "${IMG_DIR}" \
-    --shard "${s}" \
-    --num-shards "${NUM_GPUS}" \
-    --gpu "${gpu_id}" \
-    --out-dir "${SPATIAL_DIR}" > "${log_f}" 2>&1 &
-  pids+=("$!")
-  logs+=("${log_f}")
-done
-for idx_p in "${!pids[@]}"; do
-  if ! wait "${pids[$idx_p]}"; then
-    echo "[ERROR] Target Spatial Salience shard ${idx_p} failed (log=${logs[$idx_p]}):" >&2
-    tail -n 45 "${logs[$idx_p]}" >&2 || true
-    exit 1
-  fi
-done
+if [[ -f "${SPATIAL_TGT_NPZ}" && "${FORCE_SPATIAL}" != "1" ]]; then
+  echo "[Stage 1B/4] Found existing target spatial cache: ${SPATIAL_TGT_NPZ} (skip; set FORCE_SPATIAL=1 to recompute)"
+else
+  rm -f "${SPATIAL_DIR}"/target_shard_*_of_*.npz
+  echo "[Stage 1B/4] Extracting native 1:1 spatial salience features on '${TEMPLATE}' across ${NUM_GPUS} GPUs..."
+  pids=()
+  logs=()
+  for (( s=0; s<NUM_GPUS; s++ )); do
+    gpu_id="${GPU_ARR[$s]}"
+    log_f="${OUT_DIR}/logs/spatial_target_s${s}_gpu${gpu_id}.log"
+    CUDA_VISIBLE_DEVICES="${gpu_id}" "${PYTHON_BIN}" -u code/r55/spatial_salience_probe.py \
+      --mode target \
+      --template "${TEMPLATE}" \
+      --img-dir "${IMG_DIR}" \
+      --shard "${s}" \
+      --num-shards "${NUM_GPUS}" \
+      --gpu "${gpu_id}" \
+      --out-dir "${SPATIAL_DIR}" > "${log_f}" 2>&1 &
+    pids+=("$!")
+    logs+=("${log_f}")
+  done
+  for idx_p in "${!pids[@]}"; do
+    if ! wait "${pids[$idx_p]}"; then
+      echo "[ERROR] Target Spatial Salience shard ${idx_p} failed (log=${logs[$idx_p]}):" >&2
+      tail -n 45 "${logs[$idx_p]}" >&2 || true
+      exit 1
+    fi
+  done
 
-"${PYTHON_BIN}" -u code/r55/spatial_salience_probe.py \
-  --mode merge-target \
-  --template "${TEMPLATE}" \
-  --num-shards "${NUM_GPUS}" \
-  --out-dir "${SPATIAL_DIR}" \
-  --out-npz "${SPATIAL_TGT_NPZ}"
+  "${PYTHON_BIN}" -u code/r55/spatial_salience_probe.py \
+    --mode merge-target \
+    --template "${TEMPLATE}" \
+    --num-shards "${NUM_GPUS}" \
+    --out-dir "${SPATIAL_DIR}" \
+    --out-npz "${SPATIAL_TGT_NPZ}"
+fi
 
 # ------------------------------------------------------------------------------
 # Stage 2: Strict 8-Fold Nested OOF Calibration & Ablation (Method 2 vs 1 vs 1+2)
