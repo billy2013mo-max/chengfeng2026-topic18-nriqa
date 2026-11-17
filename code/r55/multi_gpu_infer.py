@@ -10,12 +10,12 @@ System & Competition Hardening:
      - Filters out GPUs with `< 26 GiB` free VRAM automatically so shared-cluster jobs on other cards
        never trigger `CUDA out of memory`.
      - Checks `/proc/meminfo` (`MemAvailable`) to bound concurrent `Qwen3-VL-8B` bf16->4bit loads if
-       container host RAM is constrained, and staggers worker launches by `5s` to warm Linux page cache
+       container host RAM is constrained, and staggers worker launches by `4.5s` to warm Linux page cache
        and prevent CephFS / HuggingFace file-lock contention.
   2. Live Heartbeat & Persistent Logs:
-     - Saves per-shard worker logs under `results/r55/os_og_breakthrough/logs/` and prints live progress
+     - Saves per-shard worker logs under `<out_dir>/logs/` and prints live progress
        every `15s` so `tail -f` never appears frozen.
-  3. Cross-Module Safe Unpickling + `N = 1 == N = 150` Verification (`0 / 900` diff) + Schema Validation.
+  3. Cross-Module Safe Unpickling + `N = 1 == N = Batch` Verification (`0` cell diff) + Schema Validation.
 """
 import argparse
 import json
@@ -160,6 +160,8 @@ def run_sharded_final_engine(
                     cmd.append("--half")
                 env = dict(os.environ)
                 env.pop("CUDA_VISIBLE_DEVICES", None)  # final_engine.py binds --gpu directly before importing torch
+                if img_dir:
+                    env["NEXT55_EXTRA_IMG_DIR"] = img_dir
                 log_fh = open(shard_log, "w", encoding="utf-8")
                 p = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=log_fh, stderr=subprocess.STDOUT)
                 procs.append((s_idx, gpu_id, len(shard_names), p, log_fh, shard_log))
@@ -241,7 +243,7 @@ def main():
     ap.add_argument("--template", default="results/v2_full/template_150.json")
     ap.add_argument("--img-dir", default="data/test_150")
     ap.add_argument("--bundle", default="", help="Path to <set>_os_og_bundle.pkl from deconfound_calibrator.py")
-    ap.add_argument("--spatial-target", default="results/r55/os_og_breakthrough/spatial_cache/spatial_target.npz")
+    ap.add_argument("--spatial-target", default="", help="Optional target spatial features npz (required only if bundle.mode in {spatial, joint})")
     ap.add_argument("--reuse-probs-npz", default="", help="Optional existing fresh member probs npz (default: run fresh multi-GPU inference)")
     ap.add_argument("--out", default="results/r55/os_og_breakthrough/pred_nriqa_dataset_test_os_og_breakthrough.json")
     ap.add_argument("--no-half", action="store_true")
@@ -285,9 +287,13 @@ def main():
     members = SETS[args.set]
     merged_npz = os.path.splitext(out_abs)[0] + "_member_probs.npz"
 
-    if args.reuse_probs_npz and os.path.exists(args.reuse_probs_npz):
-        print(f"[multi_gpu_infer] loading member probabilities from {args.reuse_probs_npz}", flush=True)
-        z = np.load(args.reuse_probs_npz, allow_pickle=True)
+    reuse_p = ""
+    if args.reuse_probs_npz:
+        reuse_p = args.reuse_probs_npz if os.path.isabs(args.reuse_probs_npz) else os.path.join(REPO, args.reuse_probs_npz)
+
+    if reuse_p and os.path.isfile(reuse_p):
+        print(f"[multi_gpu_infer] loading member probabilities from {reuse_p}", flush=True)
+        z = np.load(reuse_p, allow_pickle=True)
         mp_idx = {str(nm): i for i, nm in enumerate(z["names"])}
         P_dict = {m: np.stack([z[f"p_{m}"][mp_idx[str(n)]] for n in names], axis=0) for m in members}
     else:
@@ -303,13 +309,22 @@ def main():
         )
 
     sp_target = None
-    sp_abs = args.spatial_target if os.path.isabs(args.spatial_target) else os.path.join(REPO, args.spatial_target)
+    sp_arg = args.spatial_target.strip()
+    sp_abs = (sp_arg if os.path.isabs(sp_arg) else os.path.join(REPO, sp_arg)) if sp_arg else ""
     if bundle.mode in ("spatial", "joint"):
-        assert os.path.exists(sp_abs), f"Bundle requires spatial features ({bundle.mode}) but {sp_abs} is missing!"
-    if os.path.exists(sp_abs):
+        assert sp_abs and os.path.isfile(sp_abs), (
+            f"Bundle mode={bundle.mode!r} requires --spatial-target for {tmpl_abs}, got {sp_abs!r}"
+        )
+    if sp_abs and os.path.isfile(sp_abs):
         z_sp = np.load(sp_abs, allow_pickle=True)
         mp_sp = {str(nm): fv for nm, fv in zip(z_sp["names"], z_sp["feats"])}
-        sp_target = np.stack([mp_sp[str(n)] for n in names], axis=0).astype(np.float64)
+        if all(str(n) in mp_sp for n in names):
+            sp_target = np.stack([mp_sp[str(n)] for n in names], axis=0).astype(np.float64)
+        elif bundle.mode in ("spatial", "joint"):
+            missing_sp = [str(n) for n in names if str(n) not in mp_sp]
+            raise KeyError(f"spatial_target {sp_abs} missing {len(missing_sp)}/{len(names)} template IDs (e.g. {missing_sp[:3]})")
+        else:
+            print(f"[multi_gpu_infer] note: bundle.mode={bundle.mode!r} does not use spatial_target; ignoring mismatched cache {sp_abs}", flush=True)
 
     batch_res = bundle.predict_all(P_dict, spatial_feats=sp_target)
 
@@ -359,8 +374,8 @@ def main():
             flush=True,
         )
 
-    if rep_meta.get("recommended_submission"):
-        print(f"[multi_gpu_infer] OOF-recommended top submission file: {rep_meta['recommended_submission']}", flush=True)
+    rec_file = out_bal if rep_meta.get("balanced_dominates_doc2", False) else out_abs
+    print(f"[multi_gpu_infer] OOF-recommended top submission file: {rec_file}", flush=True)
 
     np.savez_compressed(
         stem + "_calibrated_probs.npz",
