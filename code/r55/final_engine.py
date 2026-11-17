@@ -65,12 +65,14 @@ SETS = {
     "resident_v6": ["cradio_v3", "pe_v3", "peg", "sig_v3", "v16", "p3_qy", "ntg_pe", "p12_pe", "p1_qy"],
     "resident_v6_core": ["cradio_v3", "peg", "v16", "ntg_pe", "p12_pe", "p1_qy"],
     "resident_v7": ["cradio_v3", "pe_v3", "peg", "sig_v3", "v16", "p3_qy", "ntg_pe", "p12_pe", "p1_qy", "pe_bkseg1", "ntg_convnext"],
+    "resident_v7_core": ["cradio_v3", "peg", "v16", "ntg_pe", "p12_pe", "p1_qy", "pe_bkseg1", "ntg_convnext"],
 }
 
 V16_CHUNK_BY_SET = {
     "resident_v6": 2,
     "resident_v6_core": 2,
     "resident_v7": 2,
+    "resident_v7_core": 2,
 }
 CLEAN_FOOTPRINT_N = 24          # clean training frames used for the PE-operator footprint (unchanged from the runtime version)
 CLEAN_PHYS_N = 160              # clean training frames for the measured-physics percentiles
