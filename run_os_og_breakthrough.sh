@@ -34,7 +34,6 @@ SPATIAL_DIR="${OUT_DIR}/spatial_cache"
 FINAL_JSON="${FINAL_JSON:-${OUT_DIR}/pred_nriqa_dataset_test_os_og_breakthrough.json}"
 FORCE_SPATIAL="${FORCE_SPATIAL:-0}"
 
-# Auto-detect GPUs if GPUS is not explicitly passed
 if [[ -z "${GPUS:-}" ]]; then
   if command -v nvidia-smi >/dev/null 2>&1; then
     GPUS="$(nvidia-smi --query-gpu=index --format=csv,noheader | tr '\n' ',' | sed 's/,$//')"
@@ -80,6 +79,7 @@ else
   fold_idx=0
   while [[ "${fold_idx}" -lt 8 ]]; do
     pids=()
+    logs=()
     for (( slot=0; slot<NUM_GPUS && fold_idx<8; slot++, fold_idx++ )); do
       gpu_id="${GPU_ARR[$slot]}"
       fold_npz="${SPATIAL_DIR}/oof_fold_${fold_idx}.npz"
@@ -89,18 +89,20 @@ else
       fi
       log_f="${OUT_DIR}/logs/spatial_oof_fold_${fold_idx}_gpu${gpu_id}.log"
       echo "  - Launching OOF Fold ${fold_idx} on GPU ${gpu_id} -> ${log_f}"
-      "${PYTHON_BIN}" -u code/r55/spatial_salience_probe.py \
+      CUDA_VISIBLE_DEVICES="${gpu_id}" "${PYTHON_BIN}" -u code/r55/spatial_salience_probe.py \
         --mode oof \
         --fold "${fold_idx}" \
         --gpu "${gpu_id}" \
         --out-dir "${SPATIAL_DIR}" \
         --out-npz "${fold_npz}" > "${log_f}" 2>&1 &
       pids+=("$!")
+      logs+=("${log_f}")
     done
     if [[ "${#pids[@]}" -gt 0 ]]; then
       for idx_p in "${!pids[@]}"; do
         if ! wait "${pids[$idx_p]}"; then
-          echo "[ERROR] OOF Spatial Salience worker failed (PID=${pids[$idx_p]}). Check ${OUT_DIR}/logs/" >&2
+          echo "[ERROR] OOF Spatial Salience worker failed (PID=${pids[$idx_p]}, log=${logs[$idx_p]}):" >&2
+          tail -n 45 "${logs[$idx_p]}" >&2 || true
           exit 1
         fi
       done
@@ -120,10 +122,11 @@ SPATIAL_TGT_NPZ="${SPATIAL_DIR}/spatial_target.npz"
 rm -f "${SPATIAL_DIR}"/target_shard_*_of_*.npz
 echo "[Stage 1B/4] Extracting native 1:1 spatial salience features on '${TEMPLATE}' across ${NUM_GPUS} GPUs..."
 pids=()
+logs=()
 for (( s=0; s<NUM_GPUS; s++ )); do
   gpu_id="${GPU_ARR[$s]}"
   log_f="${OUT_DIR}/logs/spatial_target_s${s}_gpu${gpu_id}.log"
-  "${PYTHON_BIN}" -u code/r55/spatial_salience_probe.py \
+  CUDA_VISIBLE_DEVICES="${gpu_id}" "${PYTHON_BIN}" -u code/r55/spatial_salience_probe.py \
     --mode target \
     --template "${TEMPLATE}" \
     --img-dir "${IMG_DIR}" \
@@ -132,10 +135,12 @@ for (( s=0; s<NUM_GPUS; s++ )); do
     --gpu "${gpu_id}" \
     --out-dir "${SPATIAL_DIR}" > "${log_f}" 2>&1 &
   pids+=("$!")
+  logs+=("${log_f}")
 done
 for idx_p in "${!pids[@]}"; do
   if ! wait "${pids[$idx_p]}"; then
-    echo "[ERROR] Target Spatial Salience shard ${idx_p} failed. Check ${OUT_DIR}/logs/" >&2
+    echo "[ERROR] Target Spatial Salience shard ${idx_p} failed (log=${logs[$idx_p]}):" >&2
+    tail -n 45 "${logs[$idx_p]}" >&2 || true
     exit 1
   fi
 done

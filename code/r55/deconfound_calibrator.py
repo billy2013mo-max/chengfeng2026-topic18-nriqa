@@ -693,9 +693,9 @@ def summarize_oof_variant(
         "doc2_orig": float(sc_orig["doc2_strict_total"]),
         "doc2_supp": float(sc_supp["doc2_strict_total"]),
         "orig_parts": {
-            "pos": float(sc_orig.get("doc2_strict_pos", 0.0)),
-            "p0": float(sc_orig.get("doc2_strict_p0", 0.0)),
-            "clean": float(sc_orig.get("doc2_clean2", sc_orig.get("clean2", 0.0))),
+            "pos": float(sc_orig.get("doc2_S_pos", 0.0)),
+            "p0": float(sc_orig.get("doc2_S_p0", 0.0)),
+            "clean": float(sc_orig.get("doc2_Clean2", 0.0)),
         },
         "rps_all": rps_all,
         "os": dim_stats["过锐"],
@@ -837,7 +837,8 @@ def run_nested_ablation_and_fit(
             if active_dims:
                 eu_k = TrueGateConstrainedEU(
                     lams_cl=dec_k.lams_cl,
-                    p0_scales=dec_k.p0_scales,
+                    p0_scales=dec_k.eu.p0_scales,
+                    w_supp=dec_k.eu.w_supp,
                 ).fit(q_tr_cal, gold[tr], is_orig=is_orig[tr], groups=groups[tr])
             else:
                 eu_k = dec_k.eu
@@ -910,7 +911,8 @@ def run_nested_ablation_and_fit(
     if chosen_active_dims and (0.5 * (se_best["doc2_all"] + se_best["doc2_orig"]) >= base_doc2_mid - 0.01):
         eu_full = TrueGateConstrainedEU(
             lams_cl=base_dec_full.lams_cl,
-            p0_scales=base_dec_full.p0_scales,
+            p0_scales=base_dec_full.eu.p0_scales,
+            w_supp=base_dec_full.eu.w_supp,
         ).fit(Q_honest_cal, gold, is_orig=is_orig, groups=groups)
     else:
         eu_full = base_dec_full.eu
