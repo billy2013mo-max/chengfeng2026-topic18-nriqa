@@ -1,0 +1,37 @@
+calibration of the held-out probabilities (transform fitted on other folds): mean per-dim NLL, top-label ECE, argmax score
+  member cradio   NLL 0.5515  ECE 0.0749  argmax 48.52
+  member pe       NLL 0.5212  ECE 0.0730  argmax 49.28
+  member sig      NLL 0.5515  ECE 0.0706  argmax 47.83
+  member v16      NLL 0.4129  ECE 0.0370  argmax 50.18
+  member p3       NLL 0.4025  ECE 0.0218  argmax 49.45
+  arith family-balanced (shipped)          NLL 0.3651  ECE 0.0094  argmax 51.10
+  arith equal member weights               NLL 0.3700  ECE 0.0171  argmax 50.88
+  geometric family-balanced                NLL 0.3828  ECE 0.0371  argmax 51.02
+  per-member per-dim temperature, arith    NLL 0.3719  ECE 0.0301  argmax 51.18
+  pooled per-dim temperature               NLL 0.3638  ECE 0.0042  argmax 51.10
+  geometric + pooled temperature           NLL 0.3655  ECE 0.0058  argmax 51.02
+  per-dim NLL weights, shrink 0.5          NLL 0.3648  ECE 0.0099  argmax 51.13
+  per-dim NLL weights, no shrink           NLL 0.3652  ECE 0.0109  argmax 51.10
+  rank-average (quantile-mapped)           NLL 0.3832  ECE 0.0102  argmax 50.89
+
+[pooling / calibration, nested, decoded by Decoder55 4 starts] all rows: score, delta vs 'arith family-balanced (shipped)' [CI90], P(delta>0)
+  arith family-balanced (shipped)             51.28  +0.00 [+0.00, +0.00]  0.00   (pos 15.47 p0 16.20 cl 19.61)
+  arith equal member weights                  51.27  -0.02 [-0.36, +0.36]  0.50   (pos 15.58 p0 16.23 cl 19.45)
+  geometric family-balanced                   51.19  -0.09 [-0.34, +0.17]  0.29   (pos 15.42 p0 16.20 cl 19.57)
+  per-member per-dim temperature, arith       51.09  -0.19 [-0.41, +0.02]  0.07   (pos 15.40 p0 16.13 cl 19.57)
+  pooled per-dim temperature                  51.26  -0.03 [-0.22, +0.15]  0.41   (pos 15.55 p0 16.17 cl 19.53)
+  geometric + pooled temperature              51.19  -0.09 [-0.34, +0.18]  0.29   (pos 15.44 p0 16.22 cl 19.53)
+  per-dim NLL weights, shrink 0.5             51.32  +0.04 [-0.19, +0.27]  0.62   (pos 15.59 p0 16.15 cl 19.57)
+  per-dim NLL weights, no shrink              51.36  +0.07 [-0.15, +0.31]  0.72   (pos 15.54 p0 16.21 cl 19.61)
+  rank-average (quantile-mapped)              51.14  -0.14 [-0.43, +0.12]  0.20   (pos 15.48 p0 16.13 cl 19.53)
+
+[pooling / calibration, nested, decoded by Decoder55 4 starts] first batch: score, delta vs 'arith family-balanced (shipped)' [CI90], P(delta>0)
+  arith family-balanced (shipped)             52.12  +0.00 [+0.00, +0.00]  0.00   (pos 15.88 p0 16.63 cl 19.61)
+  arith equal member weights                  51.81  -0.31 [-0.75, +0.12]  0.12   (pos 15.77 p0 16.58 cl 19.45)
+  geometric family-balanced                   51.64  -0.48 [-0.84, -0.10]  0.02   (pos 15.70 p0 16.37 cl 19.57)
+  per-member per-dim temperature, arith       51.66  -0.46 [-0.85, -0.12]  0.02   (pos 15.68 p0 16.41 cl 19.57)
+  pooled per-dim temperature                  51.93  -0.19 [-0.44, +0.04]  0.10   (pos 15.86 p0 16.54 cl 19.53)
+  geometric + pooled temperature              51.71  -0.41 [-0.77, -0.03]  0.04   (pos 15.72 p0 16.46 cl 19.53)
+  per-dim NLL weights, shrink 0.5             51.88  -0.24 [-0.56, +0.08]  0.11   (pos 15.86 p0 16.45 cl 19.57)
+  per-dim NLL weights, no shrink              52.14  +0.01 [-0.30, +0.33]  0.54   (pos 15.91 p0 16.62 cl 19.61)
+  rank-average (quantile-mapped)              51.29  -0.83 [-1.23, -0.46]  0.00   (pos 15.57 p0 16.19 cl 19.53)

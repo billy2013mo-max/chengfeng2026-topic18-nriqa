@@ -1,0 +1,242 @@
+{
+  "question": "Could a closed-source frontier vision-language model (GPT-5-class, Gemini 2.5/3-class, Claude-class) or a very large open-weight VLM (e.g. Qwen-VL 72B-class, InternVL 78B-class) used with prompting (zero-shot, rubric prompts, few-shot in-context exemplars) improve a no-reference image-quality defect grader beyond what fine-tuned vision encoders achieve, and if so is it better used (a) as a teacher whose labels or soft scores are distilled into small student models, or (b) as a judge / grading model that adjudicates severity or re-labels noisy training labels?\n\nContext to hold fixed: the task is single-frame no-reference quality assessment of processed/enhanced short-video frames. Six defect types are labelled independently: blur, texture loss, over-sharpening, corruption/glitch, \"over-generation\" (hallucinated or painted-looking texture invented by AI restoration / super-resolution), and abrupt artificial background blur (cut-out look). Each has an ordinal severity grade (severe / medium / mild / none). Only about 3,500 human-labelled frames exist; an ensemble of fine-tuned vision encoders (RADIO, PE-Core, SigLIP2-class towers plus a fine-tuned 8B VLM) already detects the defects well (detection AUC about 0.95) but grades severity poorly (adjacent-grade AUC about 0.80; about 0.70 for over-generation), and human annotators themselves are inconsistent on adjacent grades. The metric is a macro-F1 over defect-by-severity labels plus a recall-weighted score for the severe grade. The deployed model must run on one 24 GB GPU within 15 seconds per image, so a very large or API model could realistically only be used offline (labelling, distillation, adjudication) unless evidence says it is worth the deployment cost.\n\nQuestions to answer with published evidence (2023-2026): \n1. How accurate are frontier closed-source VLMs and the largest open-weight VLMs, zero-shot or few-shot, at low-level visual perception: identifying distortion type and, separately, grading distortion severity (Q-Bench / Q-Bench+, Q-Instruct, Co-Instruct, DepictQA / DepictQA-Wild, Q-Align, DistortBench, AIGC / super-resolution artifact benchmarks, NTIRE 2024-2025 quality-assessment and AIGC-quality challenges)? How do they compare with humans and with fine-tuned specialist IQA models, especially for fine-grained severity and for AI-restoration artifacts?\n2. Is there evidence that pseudo-labels, soft scores or rationales from a large VLM, distilled into a small student, improve quality-assessment or fine-grained ordinal grading when a few thousand human labels already exist? Under what conditions does VLM-teacher distillation fail (teacher weaker than the fine-tuned student, label-convention mismatch)?\n3. Is there evidence for VLM-as-judge use: adjudicating between two candidate grades, pairwise comparison of two images (\"which is more degraded\"), re-labelling or filtering noisy ordinal labels, or few-shot in-context grading with labelled exemplars and a written rubric? Does pairwise / comparative prompting work better than absolute grading for VLMs?\n4. Practical constraints: cost and latency of API VLMs at image resolutions that preserve fine texture (does down-scaling by the API destroy the evidence?), known failure modes of VLMs on low-level detail, and whether fine-tuning a large open VLM on a few thousand labels beats prompting.\nConclude with which use (none, teacher/distillation, judge/adjudicator, in-context grader) has the strongest evidence of adding accuracy in this setting, and what a cheap pilot experiment to test it would look like.",
+  "summary": "Published evidence from 2023-2026 does not show that a closed-source frontier VLM, or a larger open VLM, grades defect severity better by prompting than a fine-tuned ensemble. On the one benchmark that tests joint distortion type and severity with current models (DistortBench, April 2026), the best model is a Qwen-family 27B at 61.9%, about level with individual humans, while GPT-5.4 scores 51.6%. Accuracy is lowest at the middle grades and on restoration-type artifacts, which is where this project is already weak. Wherever in-domain labels exist, fine-tuned specialists (small encoders or 7-8B VLMs) beat prompted frontier models by wide margins. Of the offline uses, the best supported is a pairwise judge that adjudicates adjacent-grade labels against anchor frames; teacher distillation has evidence only where no human labels existed, and in-context grading has no surviving evidence, so a small held-out pilot should come before any labelling or distillation spend.",
+  "findings": [
+    {
+      "claim": "Zero-shot, current VLMs identify distortion type and severity at roughly untrained-human level, not above it, and neither closed-source status nor parameter count predicts who does best. No published result shows a closed-source model beating a Qwen-family 27B on this skill.",
+      "confidence": "medium",
+      "vote": "3-0 on merged claims 0, 2, 3 and 8; 2-1 on claim 1 (closed-source gives no advantage)",
+      "sources": [
+        "https://arxiv.org/abs/2604.19966",
+        "https://arxiv.org/abs/2402.07116v2",
+        "https://arxiv.org/abs/2609.08316",
+        "https://arxiv.org/abs/2601.18346"
+      ],
+      "evidence": "DistortBench (13,500 four-choice questions, 27 synthetic distortions, 5 severity levels, 18 VLMs): the best model, Qwen3.5 27B, reaches 61.9%. Human majority vote is 65.7% (95% CI 59.4-71.5; 3 annotators, 256 images) and the average individual human 60.2%. GPT-5.4, the only proprietary model tested, scores 51.6% and ranks 11th of 18, below ten open-weight configurations including Qwen3.5 4B (56.1%). Size is a weak predictor: Kimi-VL (about 3B active parameters) at 52.4% ties InternVL3.5 38B at 52.6%, although within each dense family the largest model is the best, so family and training data matter more than size. Q-Bench+ (GPT-4V era): GPT-4V 74.10%, untrained humans 74.31%, experienced humans 81.74%. Corroboration from verifier notes only, not separately voted: GS-IQA severity accuracy is 0.677 for Qwen3-VL-235B, 0.563 for Gemini-3-Pro, 0.400 for GPT-5 and 0.363 for Gemini-2.5-Pro; Q-Bench-Portrait puts Qwen3-VL-32B (64.00) ahead of Grok-4 (62.51), Claude Sonnet 4.5 (60.42) and GPT-5.2 (56.67). Project note: the local pilot script /wanqing-develop/luowenjing/18/code/decision_eval/run_vllm_judge_pilot.py names its model qwen38-27b, so the 27B already tried appears to be in the family and size class that tops this benchmark (inferred from the script name only)."
+    },
+    {
+      "claim": "Severity grading, especially at adjacent and middle grades, is the weakest low-level skill of prompted VLMs. Their exact-grade error is about that of one human annotator, so a prompted VLM adds another noisy rater and does not resolve adjacent-grade ambiguity. They are most reliable at the severe end.",
+      "confidence": "high",
+      "vote": "3-0 on merged claims 3, 9, 12, 15 and 18",
+      "sources": [
+        "https://arxiv.org/abs/2604.19966",
+        "https://arxiv.org/pdf/2511.11410v1.pdf",
+        "https://arxiv.org/abs/2507.14367",
+        "https://arxiv.org/abs/2402.07116v2",
+        "https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/9400_ECCV_2024_paper.php"
+      ],
+      "evidence": "DistortBench: the best model drops to 55.7% and 54.4% at severity levels 2-3 against 73.0% at level 5; GPT-5.4 scores 38.4% at level 1 and 72.9% at level 5 (parity with the best model at the severe end); human consensus also dips at level 2 (53.8%). Q-Doc: zero-shot 3-level severity grading of a named distortion peaks at 68.89% raw / 50.86% balanced accuracy (GPT-4o), and no model of six exceeds 70% on any split. Hallucination Score: rubric-prompted GPT-4o on a 1-5 scale matches the human majority grade on 29.0% of samples and is within one grade on 79.7%; its Spearman with the human mean is 0.56 against inter-human 0.54, and human-human exact agreement is 34.1%. Q-Bench+: graded 'How' questions are the lowest-scoring type for GPT-4V (66.45%) and for humans (60.29% untrained, 72.02% experienced). Wu et al. (ECCV 2024): GPT-4V is weak at discriminating fine-grained quality variations. None of these tests per-defect ordinal grading under a human labelling convention, so the transfer to this task is by proxy."
+    },
+    {
+      "claim": "AI-restoration and over-generation artifacts are the hardest case for prompted models and for off-the-shelf quality scorers, and the only human-level prompted result needed the ground-truth image. The no-reference setting of this project is worse.",
+      "confidence": "medium",
+      "vote": "3-0 on merged claims 3, 15, 20 and 21",
+      "sources": [
+        "https://arxiv.org/abs/2606.02535",
+        "https://arxiv.org/abs/2507.14367",
+        "https://arxiv.org/abs/2604.19966"
+      ],
+      "evidence": "Hallucination Score: GPT-4o reaches Spearman 0.56 with the human mean when given the low-resolution input, the super-resolved output and the ground truth; without the ground truth it falls to 0.47 (human mean) and 0.42 (majority). LL-Bench: zero-shot 7-8B open VLMs reach only 0.56-0.64 accuracy on binary hallucination detection across five restoration tasks, against 0.61-0.82 for the fine-tuned LL-Score; per-task test sets are tiny (about 28-49 images). Off-the-shelf scorers Q-Align, DeQA-Score and FGResQ reach overall SRCC 0.33-0.35 with human preference against 0.66 for LL-Score, though on the super-resolution task the gap is smaller (FGResQ 0.656 vs LL-Score 0.735). DistortBench: denoising artifacts are the hardest distortion, 26.2% mean accuracy across models against 25% chance, while humans scored 5 of 6 on them. No frontier closed-source model has been tested no-reference on over-generation, and no source covers cut-out background blur."
+    },
+    {
+      "claim": "Where in-domain labels exist, fine-tuned specialists beat prompted frontier VLMs by wide margins, and fine-tuning a 7-8B open VLM beats prompting a closed model. A small encoder trained with pair supervision can match or beat fine-tuned VLM scorers.",
+      "confidence": "high",
+      "vote": "3-0 on merged claims 4, 5, 11, 14, 17, 22 and 23",
+      "sources": [
+        "https://arxiv.org/html/2405.18842v2",
+        "https://arxiv.org/abs/2402.07116v2",
+        "https://arxiv.org/abs/2507.14367",
+        "https://arxiv.org/abs/2606.02535",
+        "https://arxiv.org/abs/2508.14475",
+        "https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/9400_ECCV_2024_paper.php"
+      ],
+      "evidence": "DepictQA-Wild (7B + LoRA): distortion-type accuracy 97.9% / 94.7% against GPT-4V 46.7% / 45.2% (82.1% / 73.2% on held-out distortion types); pairwise 'which is better' 90.3% / 89.8% against GPT-4V 77.8% / 75.2%, which is below PSNR (80.2%) and MUSIQ (76.9%). Co-Instruct (7B) reaches 77.12% single and 80.18% pair on Q-Bench+ against GPT-4V 74.10% and 78.07%, and against 62.68% and 48.94% for the same model untuned. Hallucination Score: Qwen2.5-VL-7B goes from Spearman 0.43 untuned to 0.70 fine-tuned, against 0.56 for GPT-4o. LL-Score is Qwen3-VL-8B with LoRA; the same model zero-shot scores 0.50-0.64 on hallucination detection. On NR-KADID, in-domain LIQE reaches SRCC 0.866 against GPT-4V 0.513. FGResQ (CLIP ViT-B/16 with a comparison head) reaches 0.752 fine-grained pair accuracy against 0.680 for DeQA-Score and 0.648 for Q-Align; excluding deraining the gap is about 1.6 points and on super-resolution it is a tie. Limits: these models trained on 30K-495K samples, not 3,500; most closed baselines are GPT-4V or GPT-4o; project memory records that FGResQ was already tried here without gain."
+    },
+    {
+      "claim": "Teacher distillation from a VLM has evidence only where no human labels existed and the teacher was at human level. There is no evidence it helps when a few thousand human labels and a strong fine-tuned student already exist, and there is a documented case of the VLM being too weak to serve as a perceptual labeller.",
+      "confidence": "medium",
+      "vote": "3-0 on merged claims 6, 11, 16 and 17",
+      "sources": [
+        "https://arxiv.org/abs/2507.14367",
+        "https://arxiv.org/html/2405.18842v2",
+        "https://arxiv.org/abs/2402.07116v2",
+        "https://arxiv.org/abs/2402.16641"
+      ],
+      "evidence": "Hallucination Score: students trained only on 30,245 GPT-4o-labelled tuples correlate better with humans than the teacher (DINO-HS 0.71 / 0.63 and Qwen-HS 0.70 / 0.62 Spearman against human mean / majority, teacher 0.56 / 0.51). The setting is full-reference, the test set is 276 images, there is no baseline trained on human labels, and the untuned DINO feature distance already reaches 0.57. Co-Instruct's training set includes about 260K GPT-4V teacher responses and the student outperforms its teacher. Failure case: the DepictQA-Wild authors did not trust GPT-4V for low-level labels. They gave it ground-truth distortion labels and used it for wording, and trained their own assistant model for comparison labels, which beat GPT-4V on three unseen datasets (TID2013 94.9 / 94.6 vs 84.4 / 88.1; LIVE-MD 93.1 / 92.8 vs 79.6 / 72.7; MDID2013 90.1 / 89.8 vs 70.6 / 67.6). Inference for this project: the ensemble already detects at AUC about 0.95 and a prompted teacher's exact-grade noise equals human noise, so distilled grades would likely add noise unless the teacher first beats the ensemble's adjacent-grade AUC on held-out frames."
+    },
+    {
+      "claim": "Pairwise comparison is the prompted mode with the most support: the strongest closed model and humans are both more accurate comparing two images than judging one. It still did not reach fine-tuned specialists, and it remained weak on fine-grained pairs.",
+      "confidence": "medium",
+      "vote": "3-0 on merged claims 5, 7, 10, 12 and 13",
+      "sources": [
+        "https://arxiv.org/abs/2402.07116v2",
+        "https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/9400_ECCV_2024_paper.php",
+        "https://arxiv.org/html/2405.18842v2",
+        "https://arxiv.org/abs/2402.01162"
+      ],
+      "evidence": "Q-Bench+: GPT-4V scores 78.07% on image pairs against 74.10% on single images, and 81.00% on the Compare subset against 80.26% for untrained and 86.55% for experienced humans; humans also improve on pairs (74.31% to 80.12%). Gemini-Pro and Qwen-VL-Max got worse on pairs, and untuned open models of that era were poor comparators (best 53.15% against 39.82% chance) until fine-tuned on comparison data (Co-Instruct 80.18%). Wu et al. (ECCV 2024): GPT-4V's best protocol is pairwise presentation with chain-of-thought (NR-KADID SRCC 0.639 vs 0.517 single; AGIQA-3K 0.771 vs 0.677), open models do best with single images, and showing several images at once degrades sharply. Against specialists, pairwise GPT-4V stays behind (77.8% / 75.2% vs 90.3% / 89.8%); on ranking restoration outputs it scores 74.5% against MUSIQ 77.3% and DepictQA-Wild 82.7% on about five test cases, with a spread of ±0.27 in rank across shuffled runs at temperature 0. A verifier note cites the 2AFC study where GPT-4V scored 0.244 against a human's 0.692 on fine-grained CSIQ pairs. All of this is GPT-4V era and not a controlled pairwise-versus-absolute test; no current frontier model has been tested on pairwise severity."
+    },
+    {
+      "claim": "In-context grading with labelled exemplars and a written rubric has no surviving evidence for or against, and the practical questions on cost, latency and API image resolution are not answered by any verified claim.",
+      "confidence": "low",
+      "vote": "In-context claim rejected 0-3; resolution and variance points come from claims 7 and 9 (3-0)",
+      "sources": [
+        "https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/9400_ECCV_2024_paper.php",
+        "https://arxiv.org/abs/2402.07116v2",
+        "https://arxiv.org/abs/2604.19966",
+        "https://arxiv.org/html/2405.18842v2"
+      ],
+      "evidence": "The only claim about few-shot in-context exemplars (that they did not help GPT-4V) was rejected in verification, so this option is untested by the evidence base; the nearest result is rubric-prompted zero-shot GPT-4o in the severity finding above. On resolution, the Q-Bench+ authors attribute weak distortion perception partly to input down-sampling, but as a hypothesis with no ablation. On reasoning mode, DistortBench found thinking variants scored lower than base in 4 of 5 open-model pairs (Qwen3.5 27B 61.9% base vs 58.2% thinking), and GPT-5.4's reasoning setting was not reported. On stability, GPT-4V's answers varied across order-shuffled runs at temperature 0. Full pairwise protocols need a number of calls that grows with the square of the image count unless comparisons are made against a fixed set of anchors."
+    },
+    {
+      "claim": "Conclusion: direct prompted grading and blind teacher distillation are the least supported uses; an offline anchored pairwise judge for adjacent-grade adjudication is the most defensible, and it should be gated by a pilot of under roughly ten thousand calls per model on held-out validation frames. This finding is a recommendation derived from the evidence above, not a published result.",
+      "confidence": "medium",
+      "vote": "Derived from the findings above; not separately voted",
+      "sources": [
+        "https://arxiv.org/abs/2604.19966",
+        "https://arxiv.org/abs/2402.07116v2",
+        "https://arxiv.org/abs/2507.14367",
+        "https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/9400_ECCV_2024_paper.php"
+      ],
+      "evidence": "Pilot design. Data: 300-400 human-labelled frames from validation folds only (never the 150-frame test set, per project rule 2), stratified toward adjacent-grade boundaries where the ensemble's out-of-fold prediction is uncertain and over-sampling over-generation; about 100 of them re-labelled by a second annotator to measure the human ceiling. Candidates: the local 27B as baseline plus two or three HTTP models chosen by measured low-level results, not size (the largest Qwen3-VL / Qwen3.5 variant, Gemini 3 Pro, one GPT-5.x, one Claude), each with reasoning off and on. Modes: (a) absolute rubric grade per defect; (b) rubric plus two or three labelled exemplars per grade; (c) anchored pairwise, where the test frame is compared with three or four anchor frames of known grade ('which shows more of defect X'), in both orders, aggregated to a score. Inputs: native-resolution tiles plus a full-frame view, each query repeated three times to measure consistency. Metrics: per-defect adjacent-grade AUC against the ensemble's out-of-fold score on the same frames (0.80 overall, 0.70 for over-generation); the gain from stacking the VLM score onto the ensemble logit under nested cross-validation with bootstrap intervals and three control seeds; agreement with the second annotator. Gates: use the model as judge or re-labeller only if it alone matches the ensemble's adjacent-grade AUC or the stacking gain exceeds seed noise and holds on a blind split; consider distillation only after that gate passes; otherwise stop. Size: 300 frames x 6 defects for modes (a) and (b), plus pairwise on the two weakest defects at about 8 calls each, is about 8,400 calls per model. A harness for this already exists at /wanqing-develop/luowenjing/18/code/decision_eval/run_http_judge_pilot.py; its header says results are comparable with the local 27B and the ensemble's out-of-fold predictions and that nothing is sent without an explicit flag. I read only its header, not its logic."
+    }
+  ],
+  "caveats": "Coverage of current models is thin. Most comparisons with specialists use GPT-4V or GPT-4o; only DistortBench covers a GPT-5-class model, and no voted claim tests Gemini 2.5/3, Claude, or any open model above 38B. The conclusion is therefore absence of evidence that a closed-source or larger model helps, not proof that it cannot.\n\nTask mismatch is large. The benchmarks are multiple-choice questions on synthetic KADID-style distortions or correlations with overall quality scores. None grades six defects on an ordinal scale under a human labelling convention, none uses enhanced short-video frames, none covers cut-out background blur, and the over-generation evidence comes from super-resolution hallucination scored with a reference image.\n\nSource quality varies. DistortBench is a workshop preprint; LL-Bench, Q-Doc and Hallucination Score are preprints in which authors evaluate their own methods. Several test sets are very small (276 images; about 28-49 per task in LL-Bench; about five cases for restoration ranking). The claim that closed-source status gives no advantage passed 2-1, not unanimously.\n\nSome supporting numbers (GS-IQA, Q-Bench-Portrait, the 2AFC study, Co-Instruct details) come from verifier notes and were not voted on as separate claims; treat them as indicative.\n\nThe fine-tuning evidence used 30K-495K training samples, far more than the 3,500 labelled frames here, so the size of the gain may not transfer.\n\nThe question on API cost, latency and image-resolution limits is unanswered: no verified claim covers it. The in-context grading option is also unanswered, because its only claim was rejected.\n\nThe identification of the project's 27B pilot model as Qwen-family rests on a script name only.\n\nSending frames to an external HTTP endpoint is a data-handling decision for the owner, and any pilot must keep thresholds and model selection on validation and blind splits, not the 150-frame test set.\n\nThis field moves quickly; results for models released after mid-2026 could change the ranking.",
+  "openQuestions": [
+    "Do Gemini 3-class, Claude or GPT-5.x models, given native-resolution crops and anchor frames, beat the ensemble's adjacent-grade AUC (0.80 overall, 0.70 for over-generation) on this project's held-out frames? No publication tests this.",
+    "Does anchored pairwise judging work for over-generation without a reference image, given that the only human-level prompted result (GPT-4o, Spearman 0.56) needed the ground truth and fell to 0.47 without it?",
+    "What resolution do the candidate HTTP endpoints actually pass to the model, and does tiling at native resolution recover the fine-texture evidence that down-scaling is suspected of destroying?",
+    "Is the adjacent-grade ceiling set by label noise and not by model capacity, so that double-annotating a subset would show the ensemble is already near human-human agreement and no judge model could add much?"
+  ],
+  "refuted": [
+    {
+      "claim": "Few-shot in-context exemplars did not improve quality assessment: in-context prompting did not help GPT-4V under single-stimulus prompting, was unlikely to help the three open-source MLLMs, and caused a sharp performance drop in the multiple-stimulus setting with eight images. This weakens the case for an in-context grader with labelled exemplars (as of GPT-4V-era models).",
+      "vote": "0-3",
+      "source": "https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/9400_ECCV_2024_paper.php"
+    }
+  ],
+  "unverified": [],
+  "sources": [
+    {
+      "url": "https://arxiv.org/abs/2604.19966",
+      "quality": "primary",
+      "angle": "Benchmarks: zero-shot low-level perception and severity grading",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/html/2405.18842v2",
+      "quality": "primary",
+      "angle": "Benchmarks: zero-shot low-level perception and severity grading",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2402.07116v2",
+      "quality": "primary",
+      "angle": "Benchmarks: zero-shot low-level perception and severity grading",
+      "claimCount": 5
+    },
+    {
+      "url": "https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/9400_ECCV_2024_paper.php",
+      "quality": "primary",
+      "angle": "Benchmarks: zero-shot low-level perception and severity grading",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2507.14367",
+      "quality": "primary",
+      "angle": "Benchmarks: zero-shot low-level perception and severity grading",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/pdf/2511.11410v1.pdf",
+      "quality": "primary",
+      "angle": "Benchmarks: zero-shot low-level perception and severity grading",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2606.02535",
+      "quality": "primary",
+      "angle": "AI-restoration / super-resolution artifact and hallucination assessment",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2508.14475",
+      "quality": "primary",
+      "angle": "AI-restoration / super-resolution artifact and hallucination assessment",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2605.18984",
+      "quality": "primary",
+      "angle": "AI-restoration / super-resolution artifact and hallucination assessment",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2510.16752",
+      "quality": "primary",
+      "angle": "AI-restoration / super-resolution artifact and hallucination assessment",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2511.12363",
+      "quality": "primary",
+      "angle": "AI-restoration / super-resolution artifact and hallucination assessment",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2601.20689",
+      "quality": "primary",
+      "angle": "Teacher/distillation: VLM pseudo-labels into small IQA students",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2512.09573",
+      "quality": "primary",
+      "angle": "Teacher/distillation: VLM pseudo-labels into small IQA students",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2506.05384",
+      "quality": "primary",
+      "angle": "Teacher/distillation: VLM pseudo-labels into small IQA students",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2505.03631",
+      "quality": "primary",
+      "angle": "Teacher/distillation: VLM pseudo-labels into small IQA students",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2402.01162",
+      "quality": "primary",
+      "angle": "Judge/adjudicator: pairwise vs absolute, in-context grading, noisy-label relabelling",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2403.10854",
+      "quality": "primary",
+      "angle": "Judge/adjudicator: pairwise vs absolute, in-context grading, noisy-label relabelling",
+      "claimCount": 5
+    },
+    {
+      "url": "https://arxiv.org/abs/2405.19298",
+      "quality": "primary",
+      "angle": "Judge/adjudicator: pairwise vs absolute, in-context grading, noisy-label relabelling",
+      "claimCount": 5
+    }
+  ],
+  "stats": {
+    "angles": 5,
+    "sourcesFetched": 18,
+    "claimsExtracted": 90,
+    "claimsVerified": 25,
+    "confirmed": 24,
+    "killed": 1,
+    "unverified": 0,
+    "afterSynthesis": 8,
+    "urlDupes": 6,
+    "budgetDropped": 6,
+    "agentCalls": 100
+  }
+}

@@ -118,7 +118,22 @@ bash run_r55.sh prep               # ≈25 min; launched by the author for the E
 **PASS:** `results/r55/aux_teacher.npz` exists with `probs_folds` of shape (8, N, 6, 4), N = images in the manifest.
 Rerun `prep` every time the manifest grows (Steps 4 and 5).
 
-### Step 2 — E1 `rank` and E6 `tag` (no extra data needed)
+### Step 2 — E1 `rank` and E6 `tag` (no extra data needed) — **DONE 2026-11-11: both FAIL, do not rerun**
+| run | seeds | Doc2S | Δ vs same-seed base | CI90 |
+|---|---|---|---|---|
+| `rank` (λ=0.5) | 2026+2027 | 49.48 | −0.72 | [−1.13, −0.30] |
+| `rank25` (λ=0.25) | 2026 | 48.70 | −0.90 | [−1.42, −0.39] |
+| `tag` (λ=0.2) | 2026 | 48.39 | −1.20 | [−1.72, −0.70] |
+
+S_pos, S_p0 and S_clean all went down in every run; the ranking loss fell to 0.006 (trivially satisfied). Halving the
+weight did not reduce the harm, so E1 is closed and Step 3 (E2 `rankkd`) is skipped.
+
+**One-seed screen procedure (use it for every later experiment):** run seed 2026 only, then
+`python code/r55/gate_r55.py --name <exp>_screen --base results/qingyu/pe_core_large --exp results/next55/towers/r55_<exp>_s2026/pe_core_large`.
+Run seed 2027 and the full gate only if the screen delta is ≥ 0. A one-seed screen can never PASS on its own
+(single seeds of the same recipe spread over 48.9–49.8).
+
+Original commands, for the record:
 ```bash
 bash run_r55.sh exp rank 2026 & bash run_r55.sh exp rank 2027 & wait      # 16 jobs = 2 per GPU, ≈60 min
 bash run_r55.sh gate rank
@@ -138,12 +153,16 @@ bash run_r55.sh exp rankkd 2026 & bash run_r55.sh exp rankkd 2027 & wait && bash
 ### Step 4 — E3 过度生成 ladder
 ```bash
 df -h . ; bash run_r55.sh gen_overgen 400     # 8 GPUs, venv_flux; needs the GPUs free of training jobs
-ls data/r55_aux/images | grep -c r55og_       # expect ≈1200
+ls data/r55_aux/images | grep -c r55og_       # expect ≈1200 files; the manifest keeps fewer (see below)
 bash run_r55.sh prep
 bash run_r55.sh exp og 2026 & bash run_r55.sh exp og 2027 & wait && bash run_r55.sh gate og
 ```
 Before training, open 10 random `r55og_L1/L2/L3` triples next to their seeds. **Stop and report** if L3 is not
 visibly more re-rendered than L1, or if layout/text changed — do not train on a broken ladder.
+Measured on a 3-seed smoke test: the instruction strength does NOT order the outputs reliably (one L2 was fully
+re-drawn while its L3 was almost untouched). `--merge` therefore re-assigns levels by the measured departure from
+the seed (mean abs difference at 512 px), drops levels closer than 1.15× to the previous one, and keeps tuples with
+≥ 2 levels; it prints how many tuples survived. Fewer than 150 surviving tuples = skip E3.
 Extra acceptance for `og`: the 过度生成 per-label deltas must be positive on at least 2 of 3 grades.
 
 ### Step 5 — E4 `ext` and E5 `clean` (external pool)

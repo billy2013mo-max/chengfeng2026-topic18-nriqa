@@ -1,0 +1,11 @@
+{
+  "recipe": "benign1",
+  "n": 1600,
+  "kind": "label_preserving",
+  "tv": 0.03066731236294661,
+  "flip_any": 0.180625,
+  "acc_seed": 0.8392708333333333,
+  "acc_syn": 0.8354166666666667,
+  "clean_flagged_seed": 0.05737704918032787,
+  "clean_flagged_syn": 0.06967213114754098
+}

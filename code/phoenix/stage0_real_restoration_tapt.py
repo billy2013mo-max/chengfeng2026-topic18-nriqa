@@ -74,8 +74,8 @@ class PAL4VSTArtifactSaliencyProbe(nn.Module):
         self.token_proj = nn.Linear(hidden_dim, 256)
 
     @staticmethod
-    def build_input_tensor(rgb_uint8: np.ndarray) -> torch.Tensor:
-        phys = compute_1to1_wavelet_and_artifact_maps(rgb_uint8)
+    def build_input_tensor(rgb_uint8: np.ndarray, phys_maps: Optional[Dict[str, np.ndarray]] = None) -> torch.Tensor:
+        phys = phys_maps if phys_maps is not None else compute_1to1_wavelet_and_artifact_maps(rgb_uint8)
         h2, w2 = phys["luma_half"].shape
         rgb_half = np.asarray(rgb_uint8, dtype=np.float32)[: h2 * 2 : 2, : w2 * 2 : 2] / 255.0
         stacked = np.concatenate(

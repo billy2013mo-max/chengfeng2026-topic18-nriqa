@@ -35,6 +35,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+# Audit 2026-11-14 (P3): PHOENIX_P3_FIX=1 switches on four fixes, default off so the shipped p3 is unchanged:
+#   native-aspect letterbox for the global view (was clipped to its top-left 384x384), antialiased resizes,
+#   fp32 master weights (backbones were cast to bf16 and trained in bf16), true 2-D 6x6 pooling of ViT token grids.
+P3_FIX = os.environ.get("PHOENIX_P3_FIX", "0") == "1"
+_BB_DTYPE = torch.float32 if P3_FIX else torch.bfloat16
 if os.path.dirname(THIS_DIR) not in sys.path:
     sys.path.insert(0, os.path.dirname(THIS_DIR))
 
@@ -173,6 +178,10 @@ class _FourStageBlockHook:
                     c_f = c_f[:, -l_ref:, :]
             if c_f.ndim == 4:
                 p = F.adaptive_avg_pool2d(c_f, output_size=grid_hw).flatten(2).transpose(1, 2)
+            elif P3_FIX and int(round(c_f.shape[1] ** 0.5)) ** 2 == c_f.shape[1]:
+                s_ = int(round(c_f.shape[1] ** 0.5))
+                g_ = c_f.transpose(1, 2).reshape(c_f.shape[0], c_f.shape[2], s_, s_)
+                p = F.adaptive_avg_pool2d(g_, output_size=grid_hw).flatten(2).transpose(1, 2)
             else:
                 p = F.adaptive_avg_pool1d(c_f.transpose(1, 2), output_size=target_len).transpose(1, 2)
             chunks.append(p)
@@ -264,8 +273,9 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         self.mock_backbone = mock_backbone
         self.legacy_3view = bool(legacy_3view)
         self.has_pecore = False
-        self.res_glob_norm = nn.LayerNorm(out_dim).float()
-        self.res_tex_norm = nn.LayerNorm(out_dim).float()
+        if not self.legacy_3view:
+            self.res_glob_norm = nn.LayerNorm(out_dim).float()
+            self.res_tex_norm = nn.LayerNorm(out_dim).float()
 
         if mock_backbone:
             self.mock_conv = nn.Sequential(
@@ -274,7 +284,8 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
                 nn.Conv2d(128, out_dim, kernel_size=3, stride=2, padding=1),
                 nn.AdaptiveAvgPool2d((6, 6)),
             )
-            self.backbone_gate_logits = nn.Parameter(torch.zeros(3, dtype=torch.float32))
+            if not self.legacy_3view:
+                self.backbone_gate_logits = nn.Parameter(torch.zeros(3, dtype=torch.float32))
             return
 
         self.dinov3, self._dino_hook, d_dim = self._build_dinov3(lora_rank=lora_rank)
@@ -294,7 +305,8 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
             init_prior = torch.log(torch.tensor([0.12, 0.36, 0.18, 0.34], dtype=torch.float32))
         else:
             init_prior = torch.log(torch.tensor([0.16, 0.54, 0.30], dtype=torch.float32))
-        self.backbone_gate_logits = nn.Parameter(init_prior)
+        if not self.legacy_3view:
+            self.backbone_gate_logits = nn.Parameter(init_prior)
 
         self.register_buffer("imnet_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False)
         self.register_buffer("imnet_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), persistent=False)
@@ -316,7 +328,7 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         hook = _FourStageBlockHook(m.blocks)
         dim = int(m.embed_dim)
         if torch.cuda.is_available():
-            m = m.to(torch.bfloat16)
+            m = m.to(_BB_DTYPE)
         m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=lora_rank, use_dora=True)
         return m, hook, dim
 
@@ -325,7 +337,7 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         from transformers import AutoModel
 
         repo = resolve_local_or_hf_model("pillar3_cradio_v4_h")
-        dt = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        dt = _BB_DTYPE if torch.cuda.is_available() else torch.float32
         try:
             m = AutoModel.from_pretrained(repo, trust_remote_code=True, dtype=dt)
         except TypeError:
@@ -354,7 +366,7 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         else:
             m = timm.create_model("convnextv2_base.fcmae_ft_in22k_in1k", pretrained=True, num_classes=0)
         if torch.cuda.is_available():
-            m = m.to(torch.bfloat16)
+            m = m.to(_BB_DTYPE)
         for p in m.parameters():
             p.requires_grad = True
         return m, int(m.num_features)
@@ -374,7 +386,7 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
             hook = _FourStageBlockHook(m.blocks)
             dim = int(m.embed_dim)
             if torch.cuda.is_available():
-                m = m.to(torch.bfloat16)
+                m = m.to(_BB_DTYPE)
             m = _attach_linear_only_dora_or_unfreeze(m, m.blocks, rank=lora_rank, use_dora=True)
             return m, hook, dim
         except Exception:
@@ -422,7 +434,7 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
             cx_map = self.convnext.forward_features(imnet_x)
 
             if self.has_pecore:
-                pec_in = F.interpolate((flat_01 - self.pec_mean) / self.pec_std, size=(336, 336), mode="bilinear", align_corners=False)
+                pec_in = F.interpolate((flat_01 - self.pec_mean) / self.pec_std, size=(336, 336), mode="bilinear", align_corners=False, antialias=P3_FIX)
                 pec_base = self.pecore.get_base_model() if hasattr(self.pecore, "get_base_model") else self.pecore
                 raw_pec = pec_base.forward_features(pec_in)
                 p_pref = int(getattr(pec_base, "num_prefix_tokens", 1))
@@ -549,7 +561,13 @@ def build_pillar3_sample_tensors(
             num_patches=2,
         )
 
-    g_pil = resize_native_aspect_pil(pil_img, max_pixels=patch_size * patch_size, grid_factor=16)
+    if P3_FIX:
+        from PIL import Image as _Im
+        w0, h0 = pil_img.size
+        sc = patch_size / float(max(w0, h0))
+        g_pil = pil_img.resize((max(1, round(w0 * sc)), max(1, round(h0 * sc))), resample=_Im.Resampling.LANCZOS)
+    else:
+        g_pil = resize_native_aspect_pil(pil_img, max_pixels=patch_size * patch_size, grid_factor=16)
     g_arr = np.asarray(g_pil, dtype=np.uint8)
     canvas = np.zeros((patch_size, patch_size, 3), dtype=np.uint8)
     g_clip = g_arr[:patch_size, :patch_size]
@@ -584,13 +602,15 @@ def build_pillar3_sample_tensors(
         size=(256, 256),
         mode="bilinear",
         align_corners=False,
+        antialias=P3_FIX,
     ).squeeze(0)
 
     probe_8_t = F.interpolate(
-        PAL4VSTArtifactSaliencyProbe.build_input_tensor(rgb_np).unsqueeze(0),
+        PAL4VSTArtifactSaliencyProbe.build_input_tensor(rgb_np, phys_maps=phys_maps).unsqueeze(0),
         size=(256, 256),
         mode="bilinear",
         align_corners=False,
+        antialias=P3_FIX,
     ).squeeze(0)
 
     return {
@@ -612,6 +632,7 @@ class Pillar3Dataset(Dataset):
         is_train: bool = True,
         force_hflip: bool = False,
         oof_teacher_probs: Optional[np.ndarray] = None,
+        include_mid_tex: bool = True,
     ) -> None:
         self.rows = list(rows)
         self.resolver = resolver
@@ -619,6 +640,7 @@ class Pillar3Dataset(Dataset):
         self.is_train = is_train
         self.force_hflip = force_hflip
         self.oof_teacher_probs = oof_teacher_probs
+        self.include_mid_tex = bool(include_mid_tex)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -640,7 +662,9 @@ class Pillar3Dataset(Dataset):
             boxes[:, 0] = np.maximum(0, orig_w - old_x1)
             boxes[:, 2] = boxes[:, 0] + 384
 
-        pack = build_pillar3_sample_tensors(pil_img, coc_probe=None, precomputed_boxes=boxes)
+        pack = build_pillar3_sample_tensors(
+            pil_img, coc_probe=None, precomputed_boxes=boxes, include_mid_tex=self.include_mid_tex
+        )
         item: Dict[str, object] = {
             "name": nm,
             "views_tensor": pack["views_tensor"],
@@ -833,9 +857,31 @@ def run_smoke_test() -> None:
     print(f"[Pillar-3 4-View Contrast-Residual Smoke Test PASS] probs={pred['probs_6x4'].shape} | single_img_diff={diff:.2e}")
 
 
+def aggregate_kfold_oof(rows: Sequence[Dict[str, object]], pillar_name: str, mode: str, out_dir: str) -> str:
+    all_folds = sorted({int(r["fold"]) for r in rows})
+    by_name: Dict[str, Dict[str, np.ndarray]] = {}
+    keys_arr = ["probs_6x4", "logits_6x4", "clean_logit", "p_clean_joint", "mu_6d", "var_6d", "quality_emb", "gold_6d"]
+    for f_idx in all_folds:
+        p = os.path.join(out_dir, f"{pillar_name}_{mode}_fold{f_idx}.npz")
+        assert os.path.exists(p), f"Missing fold file: {p}"
+        d = np.load(p, allow_pickle=True)
+        for i, nm in enumerate(d["names"]):
+            by_name[str(nm)] = {k: d[k][i] for k in keys_arr}
+    names_ord = [str(r["name"]) for r in rows]
+    assert len(by_name) == len(names_ord), f"Aggregated {len(by_name)} != {len(names_ord)}"
+    out_pack = {"names": np.array(names_ord, dtype=object)}
+    for k in keys_arr:
+        out_pack[k] = np.stack([by_name[nm][k] for nm in names_ord], axis=0)
+    out_path = os.path.join(out_dir, f"{pillar_name}_{mode}_oof.npz")
+    np.savez_compressed(out_path, **out_pack)
+    m = evaluate_official_metrics(np.argmax(out_pack["probs_6x4"], axis=-1), out_pack["gold_6d"])
+    print(f"[{pillar_name} {mode} {len(all_folds)}-Fold OOF] Strict={m['strict_total']:.2f} | saved -> {out_path}", flush=True)
+    return out_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phoenix Pillar-3 1:1 Contrast-Residual & Optical Physics Specialist")
-    parser.add_argument("--mode", choices=["cv5", "stage2-rl2r", "fulldata-swa"], default="cv5")
+    parser.add_argument("--mode", choices=["cv5", "stage2-rl2r", "fulldata-swa", "fulldata-cv", "fold-swa"], default="cv5")
     parser.add_argument("--split-csv", default=str(PHOENIX_SPLITS_DIR / "phoenix_5fold.csv"))
     parser.add_argument("--audit-json", default=str(PHOENIX_SPLITS_DIR / "batch_shift_and_audit.json"))
     parser.add_argument("--stage0-ckpt", default=str(PHOENIX_CKPT_DIR / "stage0_tapt" / "stage0_fgresq_tapt.pt"))
@@ -847,6 +893,9 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--fold", type=int, default=-1)
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--legacy-3view", action="store_true", help="Exact shipped p3 recipe (3 views, lora_rank=16, no oversampling)")
+    parser.add_argument("--no-val-tta", action="store_true")
     parser.add_argument("--aggregate-cv5", action="store_true")
     parser.add_argument("--out-dir", default=str(PHOENIX_OOF_DIR))
     parser.add_argument("--ckpt-dir", default=str(PHOENIX_CKPT_DIR))
@@ -862,18 +911,24 @@ def main() -> None:
     os.makedirs(args.ckpt_dir, exist_ok=True)
 
     if args.aggregate_cv5:
-        aggregate_5fold_oof(rows, "pillar3", args.mode, args.out_dir)
+        aggregate_kfold_oof(rows, "pillar3", args.mode, args.out_dir)
         return
 
-    set_deterministic_seed(2026 + max(0, args.fold))
+    set_deterministic_seed(args.seed + max(0, args.fold))
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.gpu}")
         torch.cuda.set_device(device)
     else:
         device = torch.device("cpu")
 
+    eff_lora_rank = 16 if args.legacy_3view else 24
+    inc_mid = not args.legacy_3view
+
     resolver = PureRealImageResolver()
     box_cache_path = os.path.join(args.out_dir, "scrutiny_boxes_384_cache.npz")
+    shared_box_cache = os.path.join(str(PHOENIX_OOF_DIR), "scrutiny_boxes_384_cache.npz")
+    if not os.path.exists(box_cache_path) and os.path.exists(shared_box_cache):
+        shutil.copyfile(shared_box_cache, box_cache_path)
     box_cache = get_or_build_scrutiny_box_cache(
         names=[str(r["name"]) for r in rows],
         resolver=resolver,
@@ -888,13 +943,15 @@ def main() -> None:
         t_map = {str(nm): i for i, nm in enumerate(t_npz["names"])}
         teacher_probs_all = np.stack([t_npz["probs_6x4"][t_map[str(r["name"])]] for r in rows], axis=0)
 
+    all_folds = sorted({int(r["fold"]) for r in rows})
+
     if args.mode in ("cv5", "stage2-rl2r"):
         full_oof_path = os.path.join(args.out_dir, f"pillar3_{args.mode}_oof.npz")
         if args.fold < 0 and os.path.exists(full_oof_path):
             print(f"[pillar3 Resume] {full_oof_path} already exists; skipping.", flush=True)
             return
 
-        target_folds = list(range(5)) if args.fold < 0 else [args.fold]
+        target_folds = all_folds if args.fold < 0 else [args.fold]
         gold_all = np.array([r["grades"] for r in rows], dtype=np.int64)
 
         for f_idx in target_folds:
@@ -906,32 +963,37 @@ def main() -> None:
             tr_idx = [i for i, r in enumerate(rows) if int(r["fold"]) != f_idx]
             va_idx = [i for i, r in enumerate(rows) if int(r["fold"]) == f_idx]
             tr_teacher = teacher_probs_all[tr_idx] if teacher_probs_all is not None else None
-            tr_rows_aug, tr_teacher_aug = oversample_rare_real_p1_p0([rows[i] for i in tr_idx], tr_teacher)
+            if args.legacy_3view:
+                tr_rows_aug, tr_teacher_aug = [rows[i] for i in tr_idx], tr_teacher
+            else:
+                tr_rows_aug, tr_teacher_aug = oversample_rare_real_p1_p0([rows[i] for i in tr_idx], tr_teacher)
 
-            ds_tr = Pillar3Dataset(tr_rows_aug, resolver, box_cache, True, False, tr_teacher_aug)
-            ds_va = Pillar3Dataset([rows[i] for i in va_idx], resolver, box_cache, False, False)
-            ds_va_flip = Pillar3Dataset([rows[i] for i in va_idx], resolver, box_cache, False, True)
+            ds_tr = Pillar3Dataset(tr_rows_aug, resolver, box_cache, True, False, tr_teacher_aug, include_mid_tex=inc_mid)
+            ds_va = Pillar3Dataset([rows[i] for i in va_idx], resolver, box_cache, False, False, include_mid_tex=inc_mid)
+            ds_va_flip = None if args.no_val_tta else Pillar3Dataset([rows[i] for i in va_idx], resolver, box_cache, False, True, include_mid_tex=inc_mid)
             dl_tr = DataLoader(ds_tr, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=(device.type == "cuda"))
             dl_va = DataLoader(ds_va, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=(device.type == "cuda"))
-            dl_va_flip = DataLoader(ds_va_flip, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=(device.type == "cuda"))
+            dl_va_flip = None if ds_va_flip is None else DataLoader(ds_va_flip, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=(device.type == "cuda"))
 
             model = Pillar3HiResPhysicsSpecialist(
                 init_batch_shift=batch_shift,
                 stage0_ckpt_path=args.stage0_ckpt,
+                lora_rank=eff_lora_rank,
+                legacy_3view=args.legacy_3view,
             ).to(device)
 
             s1_fold_ckpt = os.path.join(args.ckpt_dir, f"pillar3_cv5_fold{f_idx}.pt")
-            eff_epochs = max(6, args.epochs) if args.mode == "stage2-rl2r" else args.epochs
+            eff_epochs = max(5, args.epochs) if args.mode == "stage2-rl2r" else args.epochs
             eff_lr_h, eff_lr_b = args.lr_head, args.lr_backbone
             if args.mode == "stage2-rl2r" and os.path.exists(s1_fold_ckpt):
                 sd_prev = torch.load(s1_fold_ckpt, map_location="cpu")
                 model.load_state_dict(sd_prev.get("state_dict", sd_prev), strict=False)
-                eff_epochs = max(4, args.epochs - 1)
+                eff_epochs = args.epochs
                 eff_lr_h, eff_lr_b = args.lr_head * 0.45, args.lr_backbone * 0.45
                 print(f"  [pillar3 Fold {f_idx}] Warm-started Stage-2 from {s1_fold_ckpt}", flush=True)
 
             print(
-                f"=== [pillar3 {args.mode}] Fold {f_idx}/5 | train={len(ds_tr)} (rare-P1/P0 boosted) val={len(va_idx)} (2x HFlip TTA) | device={device} ===",
+                f"=== [pillar3 {args.mode}] Fold {f_idx}/{len(all_folds)} | legacy={args.legacy_3view} rank={eff_lora_rank} | train={len(ds_tr)} val={len(va_idx)} | device={device} ===",
                 flush=True,
             )
             swa_sd = train_pillar3_run(
@@ -959,7 +1021,65 @@ def main() -> None:
                 torch.cuda.empty_cache()
 
         if args.fold < 0:
-            aggregate_5fold_oof(rows, "pillar3", args.mode, args.out_dir)
+            aggregate_kfold_oof(rows, "pillar3", args.mode, args.out_dir)
+
+    elif args.mode == "fold-swa":
+        assert args.fold >= 0, "--fold is required"
+        fold_npz = os.path.join(args.out_dir, f"pillar3_fold-swa_fold{args.fold}.npz")
+        if os.path.exists(fold_npz):
+            print(f"[pillar3 Resume] {fold_npz} exists; skipping.", flush=True)
+            return
+        gold_all = np.array([r["grades"] for r in rows], dtype=np.int64)
+        tr_idx = [i for i, r in enumerate(rows) if int(r["fold"]) != args.fold]
+        va_idx = [i for i, r in enumerate(rows) if int(r["fold"]) == args.fold]
+        tr_teacher = teacher_probs_all[tr_idx] if teacher_probs_all is not None else None
+        if args.legacy_3view:
+            rows_aug, teacher_aug = [rows[i] for i in tr_idx], tr_teacher
+        else:
+            rows_aug, teacher_aug = oversample_rare_real_p1_p0([rows[i] for i in tr_idx], tr_teacher)
+        ds_full = Pillar3Dataset(rows_aug, resolver, box_cache, True, False, teacher_aug, include_mid_tex=inc_mid)
+        model = Pillar3HiResPhysicsSpecialist(
+            init_batch_shift=batch_shift, stage0_ckpt_path=args.stage0_ckpt, lora_rank=eff_lora_rank, legacy_3view=args.legacy_3view
+        ).to(device)
+        print(f"=== [pillar3 fold-swa] fold {args.fold} | legacy={args.legacy_3view} rank={eff_lora_rank} | train={len(ds_full)} val={len(va_idx)} | P3_FIX={P3_FIX} ===", flush=True)
+        dl_warm = DataLoader(ds_full, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True)
+        train_pillar3_run(model, dl_warm, device, epochs=max(3, args.epochs - 3), lr_head=args.lr_head, lr_backbone=args.lr_backbone)
+        warm_state = extract_trainable_state_dict(model)
+        basin_swa = BasinAlignedSWACollector()
+        for b_idx, seed in enumerate((args.seed, args.seed + 1, args.seed + 2)):
+            set_deterministic_seed(seed)
+            model.load_state_dict(warm_state, strict=False)
+            dl_b = DataLoader(ds_full, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True)
+            train_pillar3_run(model, dl_b, device, epochs=3, lr_head=args.lr_head * 0.30, lr_backbone=args.lr_backbone * 0.30)
+            basin_swa.update(model, weight=1.0)
+        model.load_state_dict(basin_swa.export_state_dict(), strict=False)
+        ds_va = Pillar3Dataset([rows[i] for i in va_idx], resolver, box_cache, False, False, include_mid_tex=inc_mid)
+        ds_va_flip = None if args.no_val_tta else Pillar3Dataset([rows[i] for i in va_idx], resolver, box_cache, False, True, include_mid_tex=inc_mid)
+        dl_va = DataLoader(ds_va, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
+        dl_va_flip = None if ds_va_flip is None else DataLoader(ds_va_flip, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
+        va_out = predict_pillar3_dataset(model, dl_va, device, loader_hflip=dl_va_flip)
+        np.savez_compressed(fold_npz, fold=np.int64(args.fold), **va_out)
+        m = evaluate_official_metrics(np.argmax(va_out["probs_6x4"], axis=-1), gold_all[va_idx])
+        print(f"[pillar3 fold-swa {args.fold}] argmax strict={m['strict_total']:.2f}", flush=True)
+
+    elif args.mode == "fulldata-cv":
+        ckpt_path = os.path.join(args.ckpt_dir, "pillar3_fulldata_swa.pt")
+        if os.path.exists(ckpt_path):
+            print(f"[pillar3 Resume] Full-data checkpoint exists ({ckpt_path}); skipping.", flush=True)
+            return
+        rows_aug, teacher_aug = (list(rows), teacher_probs_all) if args.legacy_3view else oversample_rare_real_p1_p0(rows, teacher_probs_all)
+        ds_full = Pillar3Dataset(rows_aug, resolver, box_cache, True, False, teacher_aug, include_mid_tex=inc_mid)
+        model = Pillar3HiResPhysicsSpecialist(
+            init_batch_shift=batch_shift, stage0_ckpt_path=args.stage0_ckpt, lora_rank=eff_lora_rank, legacy_3view=args.legacy_3view
+        ).to(device)
+        dl_tr = DataLoader(ds_full, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=(device.type == "cuda"))
+        print(f"=== [pillar3 fulldata-cv] legacy={args.legacy_3view} rank={eff_lora_rank} | train={len(ds_full)} epochs={args.epochs} ===", flush=True)
+        swa_sd = train_pillar3_run(
+            model, dl_tr, device, epochs=args.epochs, lr_head=args.lr_head, lr_backbone=args.lr_backbone, swa_start_epoch=max(2, args.epochs - 3)
+        )
+        assert swa_sd is not None
+        torch.save({"pillar": "pillar3", "state_dict": swa_sd}, ckpt_path)
+        print(f"[pillar3] Exported SINGLE FullData-CV SWA checkpoint -> {ckpt_path}", flush=True)
 
     elif args.mode == "fulldata-swa":
         ckpt_path = os.path.join(args.ckpt_dir, "pillar3_fulldata_swa.pt")
@@ -967,11 +1087,13 @@ def main() -> None:
             print(f"[pillar3 Resume] Full-data SWA checkpoint exists ({ckpt_path}); skipping.", flush=True)
             return
 
-        rows_aug, teacher_aug = oversample_rare_real_p1_p0(rows, teacher_probs_all)
-        ds_full = Pillar3Dataset(rows_aug, resolver, box_cache, True, False, teacher_aug)
+        rows_aug, teacher_aug = (list(rows), teacher_probs_all) if args.legacy_3view else oversample_rare_real_p1_p0(rows, teacher_probs_all)
+        ds_full = Pillar3Dataset(rows_aug, resolver, box_cache, True, False, teacher_aug, include_mid_tex=inc_mid)
         model = Pillar3HiResPhysicsSpecialist(
             init_batch_shift=batch_shift,
             stage0_ckpt_path=args.stage0_ckpt,
+            lora_rank=eff_lora_rank,
+            legacy_3view=args.legacy_3view,
         ).to(device)
         dl_warm = DataLoader(ds_full, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=(device.type == "cuda"))
         warm_epochs = max(3, args.epochs - 3)
@@ -979,7 +1101,7 @@ def main() -> None:
         warm_state = extract_trainable_state_dict(model)
 
         basin_swa = BasinAlignedSWACollector()
-        for b_idx, seed in enumerate((2026, 2027, 2028)):
+        for b_idx, seed in enumerate((args.seed, args.seed + 1, args.seed + 2)):
             set_deterministic_seed(seed)
             model.load_state_dict(warm_state, strict=False)
             dl_b = DataLoader(ds_full, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=(device.type == "cuda"))

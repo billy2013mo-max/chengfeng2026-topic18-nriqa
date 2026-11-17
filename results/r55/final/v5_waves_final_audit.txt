@@ -1,0 +1,30 @@
+============================================================================================
+1. WAVE A1 — `--fast-fixed` Equivalence Check on Folds 0-1 (E8, seed 2026)
+============================================================================================
+  Standalone F0+F1 RPS: ref_ntg=0.04818 vs fast_fixed=0.04980 | dRPS=+0.00163 [-0.00006, +0.00314] | mean|diff|=0.03047
+
+============================================================================================
+2. WAVE A2 — 8-Fold `ntg_pe` Epoch Sweep (E4 vs E6 vs E8) inside `resident_v5`
+============================================================================================
+  [E8 baseline] standalone_RPS=0.04978 | pool_RPS_all=0.04217 orig=0.03813 | Doc2_all=51.703 Doc2_orig=51.943 | Perm654<15=0.76%
+  [E4 vs E8]  standalone_RPS=0.04673 | pool_RPS_all=0.04242 (dRPS=+0.00025 [+0.00012, +0.00038]) | orig=0.03833 (dRPS=+0.00020 [+0.00002, +0.00039]) | Doc2_all=51.539 Doc2_orig=51.879 | Perm654<15=1.14% | BEAT_E8_GATE=False
+  [E6 vs E8]  standalone_RPS=0.04830 | pool_RPS_all=0.04230 (dRPS=+0.00013 [+0.00001, +0.00026]) | orig=0.03812 (dRPS=-0.00001 [-0.00020, +0.00020]) | Doc2_all=50.926 Doc2_orig=51.053 | Perm654<15=52.20% | BEAT_E8_GATE=False
+
+============================================================================================
+3. WAVE B1 — Multi-Backbone Native-Tile 2-Fold Screen (Gate: dRPS <= -0.00015 vs Seed Ctrl)
+============================================================================================
+  [Seed Control: ntg_pe_s2027] standalone_RPS=0.04950 | prior_pool dRPS vs v5=+0.00000 [-0.00016, +0.00016]
+  [ntg_cradio_e4   ] standalone_RPS=0.04831 | vs_v5=+0.00008 [-0.00011,+0.00025] | vs_ctrl(fam)=+0.00008 [-0.00009,+0.00024] | vs_ctrl(cv)=+0.00040 [+0.00012,+0.00068] | PASS_GATE=False
+  [ntg_dinov3_e6   ] standalone_RPS=0.05270 | vs_v5=+0.00006 [-0.00016,+0.00028] | vs_ctrl(fam)=+0.00006 [-0.00014,+0.00027] | vs_ctrl(cv)=+0.00029 [-0.00002,+0.00063] | PASS_GATE=False
+  [ntg_convnext_e8 ] standalone_RPS=0.05361 | vs_v5=-0.00001 [-0.00027,+0.00024] | vs_ctrl(fam)=-0.00001 [-0.00022,+0.00019] | vs_ctrl(cv)=+0.00024 [-0.00011,+0.00058] | PASS_GATE=False
+
+============================================================================================
+4. WAVE B2 — P12 Conditional-b1 (2 Seeds) vs Same-Teacher Controls (2 Seeds) on Folds 0-1
+============================================================================================
+  [condb1_s2026  ] standalone_RPS=0.04639
+  [condb1_s2027  ] standalone_RPS=0.04683
+  [ctrl_s2027    ] standalone_RPS=0.04758
+  [ctrl_s2028    ] standalone_RPS=0.04724
+  ==> [2-Seed Mean Comparison: condb1(2026,2027) vs ctrl(2027,2028)]
+      Standalone dRPS = -0.00052 [-0.00130, +0.00022]
+      In-Pool (fam)   = -0.00010 [-0.00022, +0.00002] | In-Pool (cv) = -0.00008 [-0.00021, +0.00004] | PASS_GATE=False

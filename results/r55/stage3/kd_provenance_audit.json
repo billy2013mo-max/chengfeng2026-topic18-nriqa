@@ -1,0 +1,19 @@
+{
+  "clean_cv8_npz": "/wanqing-develop/luowenjing/18/results/r55/clean_honest_kd_teacher_cv8.npz",
+  "clean_fullfit_npz": "/wanqing-develop/luowenjing/18/results/r55/clean_honest_kd_teacher_fullfit.npz",
+  "uses_pillar3": false,
+  "zero_fold_leakage": true,
+  "mae_vs_existing_nested_kd_per_fold": [
+    6.234371880964318e-07,
+    6.263709906306758e-07,
+    6.219247552508023e-07,
+    6.18222088633047e-07,
+    6.221874286893581e-07,
+    6.229827249626396e-07,
+    6.238405489966681e-07,
+    6.207378646649886e-07
+  ],
+  "mae_vs_existing_fullfit_kd": 0.02340017445385456,
+  "p12_pe_zero_kd_oof_rps": 0.04906849756250424,
+  "p12_pe_kd_oof_rps": 0.04756069941378089
+}

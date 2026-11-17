@@ -1,0 +1,112 @@
+{
+ "n_images": 2010,
+ "dim": "过锐",
+ "label_counts": {
+  "0": 1157,
+  "1": 509,
+  "2": 199,
+  "3": 145
+ },
+ "single_feature": [
+  {
+   "feature": "tenengrad",
+   "spearman_vs_grade": 0.3255,
+   "auc_pos": 0.6569,
+   "auc_p0": 0.8509
+  },
+  {
+   "feature": "hf_p98",
+   "spearman_vs_grade": 0.3112,
+   "auc_pos": 0.6502,
+   "auc_p0": 0.8401
+  },
+  {
+   "feature": "lap_var",
+   "spearman_vs_grade": 0.2725,
+   "auc_pos": 0.6307,
+   "auc_p0": 0.8053
+  },
+  {
+   "feature": "overshoot_max",
+   "spearman_vs_grade": 0.0663,
+   "auc_pos": 0.5322,
+   "auc_p0": 0.5734
+  },
+  {
+   "feature": "overshoot_med",
+   "spearman_vs_grade": 0.064,
+   "auc_pos": 0.5251,
+   "auc_p0": 0.5828
+  },
+  {
+   "feature": "sfr_near_nyq_max",
+   "spearman_vs_grade": 0.0628,
+   "auc_pos": 0.5205,
+   "auc_p0": 0.6008
+  },
+  {
+   "feature": "sfr_near_nyq_med",
+   "spearman_vs_grade": 0.0628,
+   "auc_pos": 0.5205,
+   "auc_p0": 0.6008
+  },
+  {
+   "feature": "undershoot_med",
+   "spearman_vs_grade": 0.0613,
+   "auc_pos": 0.5238,
+   "auc_p0": 0.5889
+  },
+  {
+   "feature": "undershoot_max",
+   "spearman_vs_grade": 0.0538,
+   "auc_pos": 0.5271,
+   "auc_p0": 0.5757
+  },
+  {
+   "feature": "ringing_max",
+   "spearman_vs_grade": -0.0511,
+   "auc_pos": 0.4828,
+   "auc_p0": 0.4257
+  },
+  {
+   "feature": "f30_max",
+   "spearman_vs_grade": 0.0441,
+   "auc_pos": 0.5215,
+   "auc_p0": 0.5352
+  },
+  {
+   "feature": "f30_med",
+   "spearman_vs_grade": 0.0441,
+   "auc_pos": 0.5215,
+   "auc_p0": 0.5352
+  },
+  {
+   "feature": "ringing_med",
+   "spearman_vs_grade": -0.0317,
+   "auc_pos": 0.4859,
+   "auc_p0": 0.4445
+  },
+  {
+   "feature": "f50_max",
+   "spearman_vs_grade": 0.0027,
+   "auc_pos": 0.4987,
+   "auc_p0": 0.517
+  },
+  {
+   "feature": "f50_med",
+   "spearman_vs_grade": 0.0027,
+   "auc_pos": 0.4987,
+   "auc_p0": 0.517
+  }
+ ],
+ "cv_AP_group5fold": {
+  "base_cheap_phys": {
+   "AP_pos_median": 0.6022,
+   "AP_p0_median": 0.4247
+  },
+  "base_plus_imatest": {
+   "AP_pos_median": 0.5903,
+   "AP_p0_median": 0.4189
+  }
+ }
+}

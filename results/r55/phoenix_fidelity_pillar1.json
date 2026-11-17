@@ -1,0 +1,98 @@
+{
+  "pillar": "pillar1",
+  "n": 120,
+  "modes": {
+    "ref": {
+      "four_bit": false,
+      "dora": true,
+      "unexpected": 0,
+      "unexpected_magnitude": 0,
+      "missing_adapter_or_head": 0,
+      "dropped_size_mismatch": 0,
+      "gpu_gb": 15.56
+    },
+    "merged": {
+      "gpu_gb": 15.23
+    },
+    "q4merged": {
+      "quantized_linears": 252,
+      "gpu_gb": 5.64
+    },
+    "lora": {
+      "four_bit": false,
+      "dora": false,
+      "unexpected": 368,
+      "unexpected_magnitude": 368,
+      "missing_adapter_or_head": 0,
+      "dropped_size_mismatch": 0,
+      "gpu_gb": 15.55
+    },
+    "deploy_dropmismatch": {
+      "four_bit": true,
+      "dora": false,
+      "unexpected": 368,
+      "unexpected_magnitude": 368,
+      "missing_adapter_or_head": 0,
+      "dropped_size_mismatch": 8,
+      "gpu_gb": 5.45
+    }
+  },
+  "vs_ref": {
+    "merged": {
+      "mean_abs": 0.001294436166062951,
+      "max_abs": 0.05633363127708435,
+      "tv_mean": 0.002588872332125902,
+      "img_any_flip": 0.03333333333333333,
+      "flip_per_dim": [
+        0.016666666666666666,
+        0.008333333333333333,
+        0.0,
+        0.008333333333333333,
+        0.0,
+        0.0
+      ]
+    },
+    "q4merged": {
+      "mean_abs": 0.004349421709775925,
+      "max_abs": 0.21440881490707397,
+      "tv_mean": 0.00869884341955185,
+      "img_any_flip": 0.11666666666666667,
+      "flip_per_dim": [
+        0.06666666666666667,
+        0.03333333333333333,
+        0.008333333333333333,
+        0.008333333333333333,
+        0.0,
+        0.0
+      ]
+    },
+    "lora": {
+      "mean_abs": 0.008328198455274105,
+      "max_abs": 0.21325582265853882,
+      "tv_mean": 0.01665639691054821,
+      "img_any_flip": 0.13333333333333333,
+      "flip_per_dim": [
+        0.08333333333333333,
+        0.041666666666666664,
+        0.008333333333333333,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "deploy_dropmismatch": {
+      "mean_abs": 0.08001399040222168,
+      "max_abs": 0.948907732963562,
+      "tv_mean": 0.16002799570560455,
+      "img_any_flip": 0.7333333333333333,
+      "flip_per_dim": [
+        0.525,
+        0.5,
+        0.1,
+        0.008333333333333333,
+        0.025,
+        0.008333333333333333
+      ]
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "midblock_4x4": {
+    "n_eval": 200,
+    "pointing_game_acc": 0.74,
+    "peak_cell_hit_acc": 0.9,
+    "mean_peak_sev_drop": 0.4252,
+    "h200_sec_per_img": 0.1637,
+    "extra_vram_gb": 0.744
+  },
+  "midblock_hier8": {
+    "n_eval": 200,
+    "pointing_game_acc": 0.81,
+    "peak_cell_hit_acc": 0.9,
+    "mean_peak_sev_drop": 0.4781,
+    "h200_sec_per_img": 0.1908,
+    "extra_vram_gb": 0.9046
+  },
+  "best_mode": "midblock_hier8",
+  "overgen60_audit": {
+    "n": 60,
+    "positive_causal_drop_rate": 1.0,
+    "beats_random_cell_rate": 1.0,
+    "contact_sheet": "/wanqing-develop/luowenjing/18/results/r55/attr_maps/gate_g4_overgen60_sheet.jpg"
+  }
+}

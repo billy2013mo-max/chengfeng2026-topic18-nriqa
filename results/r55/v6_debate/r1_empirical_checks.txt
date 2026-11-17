@@ -1,0 +1,55 @@
+=== [1/3] Running 8-GPU parallel OOF screen on existing InternViT-6B Epoch-2 checkpoints ===
+/opt/conda/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/opt/conda/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/opt/conda/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/opt/conda/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/opt/conda/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/opt/conda/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/opt/conda/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/opt/conda/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+[transformers] `use_return_dict` is deprecated! Use `return_dict` instead!
+[transformers] `use_return_dict` is deprecated! Use `return_dict` instead!
+[transformers] `use_return_dict` is deprecated! Use `return_dict` instead!
+[transformers] `use_return_dict` is deprecated! Use `return_dict` instead!
+[transformers] `use_return_dict` is deprecated! Use `return_dict` instead!
+[transformers] `use_return_dict` is deprecated! Use `return_dict` instead!
+[transformers] `use_return_dict` is deprecated! Use `return_dict` instead!
+[transformers] `use_return_dict` is deprecated! Use `return_dict` instead!
+[IV6B Screen] Fold 1 done (438 rows) -> /wanqing-develop/luowenjing/18/results/r55/v6_debate/iv6b_ep2_f1.npz
+[IV6B Screen] Fold 0 done (434 rows) -> /wanqing-develop/luowenjing/18/results/r55/v6_debate/iv6b_ep2_f0.npz
+[IV6B Screen] Fold 5 done (452 rows) -> /wanqing-develop/luowenjing/18/results/r55/v6_debate/iv6b_ep2_f5.npz
+[IV6B Screen] Fold 6 done (443 rows) -> /wanqing-develop/luowenjing/18/results/r55/v6_debate/iv6b_ep2_f6.npz
+[IV6B Screen] Fold 4 done (443 rows) -> /wanqing-develop/luowenjing/18/results/r55/v6_debate/iv6b_ep2_f4.npz
+[IV6B Screen] Fold 7 done (448 rows) -> /wanqing-develop/luowenjing/18/results/r55/v6_debate/iv6b_ep2_f7.npz
+[IV6B Screen] Fold 2 done (459 rows) -> /wanqing-develop/luowenjing/18/results/r55/v6_debate/iv6b_ep2_f2.npz
+[IV6B Screen] Fold 3 done (456 rows) -> /wanqing-develop/luowenjing/18/results/r55/v6_debate/iv6b_ep2_f3.npz
+Saved full 8-fold IV6B Epoch-2 OOF (236.3s) -> /wanqing-develop/luowenjing/18/results/r55/v6_debate/iv6b_ep2_8fold_oof.npz
+
+=== [InternViT-6B Epoch-2 8-Fold OOF Screen] ===
+Standalone IV6B Ep2: RPS_ALL=0.05423 | RPS_ORIG=0.04991 | mAP14=0.5724 | OG_AP=0.3481
+  v5 + 0.08*IV6B_Ep2: dRPS_ALL=+0.00007 [+0.00000, +0.00014] | dRPS_ORIG=-0.00004 [-0.00013, +0.00005]
+  v5 + 0.12*IV6B_Ep2: dRPS_ALL=+0.00003 [-0.00007, +0.00014] | dRPS_ORIG=-0.00012 [-0.00025, +0.00001]
+  v5 + 0.16*IV6B_Ep2: dRPS_ALL=-0.00004 [-0.00018, +0.00009] | dRPS_ORIG=-0.00024 [-0.00041, -0.00006]
+
+=== [G2 Pruning Check: drop pe_v3 + sig_v3] ===
+  v5_pruned vs v5: dRPS_ALL=-0.00004 [-0.00009, +0.00001] | dRPS_ORIG=-0.00001 [-0.00008, +0.00007]
+
+=== [2/3] Phoenix 5-Fold Group Audit & Sibling-Label Noise Ceiling ===
+phoenix_5fold.csv vs qingyu canon_group: 11/3049 multi-fold groups (100/3573 rows); strict zero-sibling rows=3473 (orig=1807)
+Multi-frame subset (N=844): Sibling-label-as-prediction Doc2_Strict=47.26 (Pos=13.83, P0=14.07, Clean=19.36) vs Current v5=52.14 (Pos=15.76, P0=16.38, Clean=20.00)
+
+=== [3/3] Honest Nested RoutedGateEUDecoder Check on Strict Zero-Sibling Rows (N=3473, ORIG=1807) ===
+  resident_v5 (8m)                    : Nested Doc2S ALL=51.696 ORIG=51.960 (Pos=15.81, P0=16.38, Cln=19.76) | RPS_ALL=0.04326 RPS_ORIG=0.04008 mAP14=0.6637
+  v5_pruned (6m: -pe_v3 -sig_v3)      : Nested Doc2S ALL=51.355 ORIG=51.479 (Pos=15.36, P0=16.36, Cln=19.76) | RPS_ALL=0.04330 RPS_ORIG=0.04008 mAP14=0.6634
+  v5_pruned + p1_cv5 (7m)             : Nested Doc2S ALL=51.255 ORIG=51.513 (Pos=15.37, P0=16.38, Cln=19.76) | RPS_ALL=0.04303 RPS_ORIG=0.03969 mAP14=0.6647
+  v5_pruned + p2_cv5 (7m)             : Nested Doc2S ALL=51.111 ORIG=51.383 (Pos=15.21, P0=16.51, Cln=19.67) | RPS_ALL=0.04307 RPS_ORIG=0.03966 mAP14=0.6660
+  v5_pruned + p1_cv5 + p2_cv5 (8m)    : Nested Doc2S ALL=51.199 ORIG=51.418 (Pos=15.24, P0=16.42, Cln=19.76) | RPS_ALL=0.04298 RPS_ORIG=0.03958 mAP14=0.6662
+  v5_pruned + p1_cv5 + iv6b_ep2 (8m)  : Nested Doc2S ALL=51.071 ORIG=51.304 (Pos=15.16, P0=16.33, Cln=19.81) | RPS_ALL=0.04299 RPS_ORIG=0.03974 mAP14=0.6648

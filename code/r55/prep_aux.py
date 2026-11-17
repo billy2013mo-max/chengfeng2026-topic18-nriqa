@@ -43,13 +43,22 @@ def main():
     ap.add_argument("--steps", nargs="*", default=["template", "meta", "teachers", "merge"])
     ap.add_argument("--gpus", type=int, default=8)
     ap.add_argument("--tag", default="r55aux")
+    ap.add_argument("--manifest", default="", help="alternative manifest (default data/r55_aux/manifest.csv)")
+    ap.add_argument("--suffix", default="", help="suffix for template / meta / teacher outputs, e.g. _kvq")
+    ap.add_argument("--gpu-list", type=int, nargs="*", default=None, help="physical GPU ids for the teacher jobs (default 0..gpus-1)")
     a = ap.parse_args()
+    global AUX_TEMPLATE, AUX_META, AUX_TEACHER
+    if a.suffix:
+        AUX_TEMPLATE = AUX_TEMPLATE.replace(".json", a.suffix + ".json")
+        AUX_META = AUX_META.replace(".npz", a.suffix + ".npz")
+        AUX_TEACHER = AUX_TEACHER.replace(".npz", a.suffix + ".npz")
     os.chdir(REPO)
     os.makedirs(R55_OUT, exist_ok=True)
     py = sys.executable
 
     if "template" in a.steps:
-        names = [r["name"] for r in read_manifest() if os.path.exists(os.path.join(AUX_IMG, r["name"]))]
+        names = [r["name"] for r in (read_manifest(a.manifest) if a.manifest else read_manifest())
+                 if os.path.exists(os.path.join(AUX_IMG, r["name"]))]
         assert names, "auxiliary manifest is empty — run build_rank_tuples.py / ingest_external_pool.py first"
         assert len(names) == len(set(names))
         json.dump([{"image": n} for n in names], open(AUX_TEMPLATE, "w", encoding="utf-8"), ensure_ascii=False)
@@ -72,7 +81,8 @@ def main():
         cmds, logs = [], []
         for i, (bb, d) in enumerate(TEACHER_TOWERS):
             cmds.append([py, "-u", "code/next55/infer_tier1_ckpt.py", "--backbone", bb, "--tower-dir", d,
-                         "--template", AUX_TEMPLATE, "--img-dir", AUX_IMG, "--tag", a.tag, "--gpu", str(i % a.gpus),
+                         "--template", AUX_TEMPLATE, "--img-dir", AUX_IMG, "--tag", a.tag,
+                         "--gpu", str(a.gpu_list[i % len(a.gpu_list)] if a.gpu_list else i % a.gpus),
                          "--dual-engine-npz", AUX_META])
             logs.append(os.path.join(R55_OUT, f"logs/teacher_{i}_{bb}.log"))
         run_parallel(cmds, logs)

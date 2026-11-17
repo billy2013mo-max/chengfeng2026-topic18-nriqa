@@ -1,0 +1,1 @@
+python3 -u code/r55/train_testbed.py --backbone pe_core_large --fold 1 --gpu 0 --seed 2026 --out-dir results/next55/towers/r55_sp_pe_focus_s2026 --select fixed --fast-fixed --skip-t150 --no-save-ckpt --workers 6 --epochs 8 --batch-size 12 --dim-w 0.15,0.15,1,0.15,1,0.15 > results/r55/sprint_os_og/logs/r55_sp_pe_focus_s2026_f1.log 2>&1

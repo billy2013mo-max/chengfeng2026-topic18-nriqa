@@ -334,10 +334,14 @@ class CrossBatchMemoryThurstoneLoss(nn.Module):
       L_XBM^(d) = (1 / |P_d|) * sum_{(i,j) in P_d} w(y_{i,d}, y_{j,d}) * [1 - sqrt(Phi((s_{i,d} - s_{j,d}) / (sqrt(2)*sigma_0)))]
     Strictly excludes same-scene pairs (`group_i != group_j`).
     """
-    def __init__(self, capacity: int = 512, sigma0: float = 1.0):
+    def __init__(self, capacity: int = 512, sigma0: float = 1.0, adj_weight: float = 2.0, same_group: bool = False):
         super().__init__()
         self.capacity = int(capacity)
         self.sigma0 = float(sigma0)
+        # audit 2026-11-14 (P4b): weight of adjacent-grade pairs (2.0 = original) and whether pairs of frames from the
+        # same video may be compared (False = original)
+        self.adj_weight = float(adj_weight)
+        self.same_group = bool(same_group)
         self.register_buffer("mem_s", torch.zeros(capacity, 6, dtype=torch.float32))
         self.register_buffer("mem_y", torch.zeros(capacity, 6, dtype=torch.long))
         self.register_buffer("mem_g", torch.full((capacity,), -1, dtype=torch.long))
@@ -407,6 +411,8 @@ class CrossBatchMemoryThurstoneLoss(nn.Module):
             g_ref = g_cur
 
         diff_group = g_cur.unsqueeze(1) != g_ref.unsqueeze(0)  # [B, M_tot]
+        if self.same_group:
+            diff_group = torch.ones_like(diff_group)
         inv_denom = 1.0 / (2.0 * self.sigma0)  # (s_i - s_j)/(sqrt(2)*sigma0) divided by sqrt(2) inside erf -> / (2*sigma0)
 
         dim_losses = []
@@ -427,7 +433,7 @@ class CrossBatchMemoryThurstoneLoss(nn.Module):
             gap = torch.abs(yi - yj)
             # Adjacent hard boundaries (gap == 1 on full dims, or (3,0) on binary dims) get weight 2.0
             if d in FULL_DIMS:
-                w = torch.where(gap == 1, 2.0, 1.0)
+                w = torch.where(gap == 1, self.adj_weight, 1.0)
             else:
                 w = torch.full_like(sign, 1.5)
 
@@ -460,6 +466,10 @@ class QingyuUnimodalCompositeLoss(nn.Module):
         lambda_clean: float = 0.25,
         xbm_capacity: int = 512,
         kd_temp: float = 1.5,
+        noise_T=None,
+        noise_alpha: float = 0.0,
+        rank_adj_weight: float = 2.0,
+        rank_same_group: bool = False,
     ):
         super().__init__()
         self.soft_sigma = float(soft_sigma)
@@ -468,7 +478,8 @@ class QingyuUnimodalCompositeLoss(nn.Module):
         self.lambda_delta = float(lambda_delta)
         self.lambda_clean = float(lambda_clean)
         self.kd_temp = float(kd_temp)
-        self.xbm = CrossBatchMemoryThurstoneLoss(capacity=xbm_capacity, sigma0=1.0)
+        self.xbm = CrossBatchMemoryThurstoneLoss(capacity=xbm_capacity, sigma0=1.0, adj_weight=rank_adj_weight,
+                                                 same_group=rank_same_group)
 
         # Precompute [4, 4] narrow Gaussian soft target table q_y^{soft}(k) for y in {0, 1, 2, 3}
         q_table = torch.zeros(4, 4, dtype=torch.float32)
@@ -487,6 +498,15 @@ class QingyuUnimodalCompositeLoss(nn.Module):
             else:
                 q_table[yv, yv] = 1.0
         self.register_buffer("q_soft_full", q_table)
+        # audit 2026-11-14 (P4a): per-dimension soft targets mixed with the grade-transition matrix measured between
+        # sibling frames of one video (row y = distribution of a sibling's label given label y; clean rows stay crisp)
+        q6 = q_table.unsqueeze(0).repeat(6, 1, 1)
+        if noise_T is not None and noise_alpha > 0:
+            T = torch.as_tensor(np.asarray(noise_T), dtype=torch.float32)
+            for d in FULL_DIMS:
+                for yv in (1, 2, 3):
+                    q6[d, yv] = (1.0 - noise_alpha) * q_table[yv] + noise_alpha * T[d, yv]
+        self.register_buffer("q_soft_6", q6)
 
         # Moderate inverse-sqrt rarity weights per (dim, grade) so rare P0s/OverGen get crisp recall without calibration distortion
         cls_w = torch.ones(6, 4, dtype=torch.float32)
@@ -518,7 +538,7 @@ class QingyuUnimodalCompositeLoss(nn.Module):
 
         for d in FULL_DIMS:
             yd = y[:, d].clamp(0, 3)
-            q_tgt = self.q_soft_full[yd]  # [B, 4]
+            q_tgt = self.q_soft_6[d][yd]  # [B, 4] (== q_soft_full[yd] unless noise targets are on)
             log_p = F.log_softmax(logits_6x4[:, d, :], dim=-1)
             # KL(q_tgt || p) = sum_k q_tgt * (log q_tgt - log_p); drop constant entropy or include exact KL
             kl_per_i = torch.sum(q_tgt * (torch.log(q_tgt.clamp(min=1e-8)) - log_p), dim=-1)
@@ -547,8 +567,15 @@ class QingyuUnimodalCompositeLoss(nn.Module):
             kl_losses.append((kl_b * w_b).sum() / w_b.sum().clamp(min=1.0))
             rps_losses.append(((probs_6x4[:, d, 3] - yd_bin.float()) ** 2).mean())
 
-        loss_kl = torch.stack(kl_losses).mean()
-        loss_rps = torch.stack(rps_losses).mean()
+        dim_w = getattr(self, "dim_w", None)   # sprint: optional per-dim loss weights (canonical dim order), default off
+        if dim_w is not None:
+            order = list(FULL_DIMS) + list(P0_ONLY_DIMS)
+            wv = torch.as_tensor([float(dim_w[d]) for d in order], device=logits_6x4.device)
+            loss_kl = (torch.stack(kl_losses) * wv).sum() / wv.sum()
+            loss_rps = (torch.stack(rps_losses) * wv).sum() / wv.sum()
+        else:
+            loss_kl = torch.stack(kl_losses).mean()
+            loss_rps = torch.stack(rps_losses).mean()
         loss_rank = self.xbm(s_all, y, group_hashes, update_memory=self.training)
         loss_delta = (delta_res ** 2).mean()
         loss_clean = F.binary_cross_entropy_with_logits(clean_logit, is_clean_img.float())

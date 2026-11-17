@@ -1,0 +1,48 @@
+
+[fallback partition=canonical] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.28  +0.00 [+0.00, +0.00]  0.00   (pos 15.47 p0 16.20 cl 19.61)
+  EU                                          51.54  +0.26 [-0.07, +0.61]  0.89   (pos 15.42 p0 16.16 cl 19.96)
+  EU + fitted clean lambda                    51.69  +0.40 [+0.10, +0.72]  0.99   (pos 15.62 p0 16.22 cl 19.84)
+  vote(shipped,ordinal,EU)                    51.52  +0.24 [+0.08, +0.42]  0.99   (pos 15.52 p0 16.28 cl 19.73)
+
+[fallback partition=canonical] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     52.12  +0.00 [+0.00, +0.00]  0.00   (pos 15.88 p0 16.63 cl 19.61)
+  EU                                          52.15  +0.03 [-0.41, +0.48]  0.56   (pos 15.76 p0 16.43 cl 19.96)
+  EU + fitted clean lambda                    52.22  +0.10 [-0.33, +0.52]  0.67   (pos 15.89 p0 16.48 cl 19.84)
+  vote(shipped,ordinal,EU)                    52.30  +0.18 [-0.02, +0.39]  0.93   (pos 15.93 p0 16.64 cl 19.73)
+
+[fallback partition=random0] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.15  +0.00 [+0.00, +0.00]  0.00   (pos 15.47 p0 16.11 cl 19.57)
+  EU                                          51.69  +0.53 [+0.22, +0.88]  1.00   (pos 15.49 p0 16.23 cl 19.96)
+  EU + fitted clean lambda                    51.76  +0.60 [+0.32, +0.92]  1.00   (pos 15.68 p0 16.28 cl 19.81)
+  vote(shipped,ordinal,EU)                    51.41  +0.26 [+0.09, +0.44]  0.99   (pos 15.50 p0 16.18 cl 19.73)
+
+[fallback partition=random0] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.91  +0.00 [+0.00, +0.00]  0.00   (pos 15.81 p0 16.54 cl 19.57)
+  EU                                          52.30  +0.38 [-0.07, +0.85]  0.93   (pos 15.82 p0 16.52 cl 19.96)
+  EU + fitted clean lambda                    52.34  +0.43 [+0.03, +0.84]  0.96   (pos 15.98 p0 16.55 cl 19.81)
+  vote(shipped,ordinal,EU)                    52.21  +0.30 [+0.09, +0.51]  0.99   (pos 15.90 p0 16.59 cl 19.73)
+
+[fallback partition=random1] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.07  +0.00 [+0.00, +0.00]  0.00   (pos 15.46 p0 16.09 cl 19.53)
+  EU                                          51.56  +0.48 [+0.14, +0.83]  0.99   (pos 15.43 p0 16.16 cl 19.96)
+  EU + fitted clean lambda                    51.68  +0.60 [+0.30, +0.90]  1.00   (pos 15.61 p0 16.22 cl 19.84)
+  vote(shipped,ordinal,EU)                    51.40  +0.33 [+0.14, +0.53]  1.00   (pos 15.50 p0 16.17 cl 19.73)
+
+[fallback partition=random1] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.80  +0.00 [+0.00, +0.00]  0.00   (pos 15.83 p0 16.44 cl 19.53)
+  EU                                          52.12  +0.32 [-0.08, +0.78]  0.90   (pos 15.74 p0 16.42 cl 19.96)
+  EU + fitted clean lambda                    52.23  +0.43 [+0.06, +0.86]  0.97   (pos 15.91 p0 16.48 cl 19.84)
+  vote(shipped,ordinal,EU)                    52.14  +0.34 [+0.13, +0.58]  1.00   (pos 15.92 p0 16.50 cl 19.73)
+
+[fallback partition=random2] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.30  +0.00 [+0.00, +0.00]  0.00   (pos 15.55 p0 16.18 cl 19.57)
+  EU                                          51.65  +0.35 [+0.03, +0.72]  0.97   (pos 15.46 p0 16.23 cl 19.96)
+  EU + fitted clean lambda                    51.77  +0.47 [+0.17, +0.79]  1.00   (pos 15.62 p0 16.30 cl 19.84)
+  vote(shipped,ordinal,EU)                    51.51  +0.22 [+0.05, +0.40]  0.99   (pos 15.58 p0 16.21 cl 19.73)
+
+[fallback partition=random2] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     52.06  +0.00 [+0.00, +0.00]  0.00   (pos 15.95 p0 16.54 cl 19.57)
+  EU                                          52.19  +0.13 [-0.32, +0.64]  0.69   (pos 15.75 p0 16.48 cl 19.96)
+  EU + fitted clean lambda                    52.25  +0.19 [-0.23, +0.66]  0.77   (pos 15.88 p0 16.52 cl 19.84)
+  vote(shipped,ordinal,EU)                    52.37  +0.31 [+0.11, +0.53]  0.99   (pos 16.03 p0 16.62 cl 19.73)

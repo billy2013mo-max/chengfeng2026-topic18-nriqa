@@ -1,0 +1,8 @@
+{
+  "gate_g1_passed": true,
+  "new_legacy3view_f0_rps": 0.05371,
+  "stored_cv5_f0_rps": 0.053445,
+  "stored_stage2_f0_rps": 0.049592,
+  "rel_diff_vs_cv5_pct": 0.497,
+  "rel_diff_vs_stage2_pct": 8.304
+}

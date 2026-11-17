@@ -1,0 +1,20 @@
+{
+  "n_multiframe_videos": 320,
+  "n_clean_videos": 100,
+  "n_video_defect_p0_instances": 238,
+  "legacy_cusum_hysteresis": {
+    "video_p0_recall": 0.6008,
+    "clean_video_specificity": 1.0,
+    "video_doc2_strict": 45.615
+  },
+  "naive_uncalibrated_or": {
+    "video_p0_recall": 0.8361,
+    "clean_video_specificity": 1.0,
+    "video_doc2_strict": 51.741
+  },
+  "compliant_meff_or": {
+    "video_p0_recall": 0.8445,
+    "clean_video_specificity": 0.99,
+    "video_doc2_strict": 51.382
+  }
+}
