@@ -1,0 +1,704 @@
+{
+  "port": 8056,
+  "backend": "stdlib",
+  "started": "2026-11-16 06:48:01",
+  "ready_after_s": 150.0,
+  "healthz_start": {
+    "status": "ok",
+    "set": "resident_v6_core",
+    "members": [
+      "cradio_v3",
+      "peg",
+      "v16",
+      "ntg_pe",
+      "p12_pe",
+      "p1_qy"
+    ],
+    "decoder": "routed_gate_eu",
+    "attribution": true,
+    "load_s": 145.5,
+    "warmup_s": 4.88,
+    "torch_peak_gb": 18.798,
+    "torch_allocated_gb": 15.691,
+    "torch_reserved_gb": 16.705,
+    "nvidia_smi_mib": 18423.6,
+    "nvidia_smi_peak_mib": 20667.6,
+    "params_b": 9.656,
+    "requests": 0,
+    "uptime_s": 2.9,
+    "clean_footprint": "results/r55/final/resident_v6_core_clean_footprint.npz",
+    "pytorch_cuda_alloc_conf": "expandable_segments:True"
+  },
+  "example_infer_response": {
+    "image": "137212400938_frame14.png",
+    "label": {
+      "模糊": "P2",
+      "纹理损失": "P2",
+      "过锐": "无问题",
+      "花屏": "P0",
+      "过度生成": "无问题",
+      "虚化突兀": "无问题"
+    },
+    "pred_6d": [
+      1,
+      1,
+      0,
+      3,
+      0,
+      0
+    ],
+    "probs_6x4": [
+      [
+        0.67766,
+        0.27843,
+        0.04221,
+        0.0017
+      ],
+      [
+        0.08163,
+        0.49481,
+        0.39551,
+        0.02805
+      ],
+      [
+        0.93524,
+        0.05787,
+        0.00627,
+        0.00061
+      ],
+      [
+        0.00782,
+        0.0,
+        0.0,
+        0.99218
+      ],
+      [
+        0.99175,
+        0.00549,
+        0.0017,
+        0.00106
+      ],
+      [
+        0.9996,
+        0.0,
+        0.0,
+        0.0004
+      ]
+    ],
+    "latency_ms": {
+      "infer": 2707.15,
+      "decode": 0.65,
+      "attr": 265.92,
+      "total": 2990.86,
+      "request": 2991.75
+    },
+    "attribution": {
+      "is_clean": false,
+      "summary_40ch": "画面右上区P0级花屏：实测8px块边界跳变比1.18（洁净P94）",
+      "causal_uncertainty": true,
+      "defects": [
+        {
+          "defect": "模糊",
+          "severity": "P2",
+          "confidence": 0.2784,
+          "location": "画面中上区",
+          "box_xyxy": [
+            0,
+            0,
+            448,
+            448
+          ],
+          "concentration_ratio": 6.291,
+          "active_area_frac": 0.25,
+          "evidence": {
+            "scope": "box",
+            "measurements": [
+              {
+                "metric": "lapvar",
+                "name": "拉普拉斯方差",
+                "direction": "low",
+                "value": 0.05968,
+                "clean_pct": 99.0,
+                "supports": false,
+                "verdict": "contradicts",
+                "global_value": 0.03014
+              }
+            ],
+            "measured_support": false,
+            "verdict": "contradicts"
+          },
+          "reason_40ch": "画面中上区P2级模糊：拉普拉斯方差洁净P99反向，物理证据不支持，待复核",
+          "causal_uncertainty": true,
+          "uncertainty_note": "实测物理指标与该缺陷方向相反（落在洁净训练帧分布的另一侧），该判级完全来自模型语义特征，像素统计不支持此成因，建议人工复核；单帧仅能确认高频衰减，无法区分运动模糊、失焦或码率平滑成因（需相邻帧时序确证）；后验置信度0.28处于P2与无问题相邻等级临界区间"
+        },
+        {
+          "defect": "纹理损失",
+          "severity": "P2",
+          "confidence": 0.4948,
+          "location": "画面中上区",
+          "box_xyxy": [
+            38,
+            0,
+            486,
+            448
+          ],
+          "concentration_ratio": 6.028,
+          "active_area_frac": 0.188,
+          "evidence": {
+            "scope": "box",
+            "measurements": [
+              {
+                "metric": "tex_hf",
+                "name": "纹理高频能量",
+                "direction": "low",
+                "value": 0.12387,
+                "clean_pct": 99.7,
+                "supports": false,
+                "verdict": "contradicts",
+                "global_value": 0.03278
+              }
+            ],
+            "measured_support": false,
+            "verdict": "contradicts"
+          },
+          "reason_40ch": "画面中上区P2级纹理损失：纹理高频能量洁净P>99反向，物理证据不支持，待复核",
+          "causal_uncertainty": true,
+          "uncertainty_note": "实测物理指标与该缺陷方向相反（落在洁净训练帧分布的另一侧），该判级完全来自模型语义特征，像素统计不支持此成因，建议人工复核；后验置信度0.49处于P2与P1相邻等级临界区间"
+        },
+        {
+          "defect": "花屏",
+          "severity": "P0",
+          "confidence": 0.9922,
+          "location": "画面右上区",
+          "box_xyxy": [
+            96,
+            190,
+            544,
+            638
+          ],
+          "concentration_ratio": 9.92,
+          "active_area_frac": 0.125,
+          "evidence": {
+            "scope": "box",
+            "measurements": [
+              {
+                "metric": "blocky",
+                "name": "8px块边界跳变比",
+                "direction": "high",
+                "value": 1.1778,
+                "clean_pct": 93.8,
+                "supports": true,
+                "verdict": "supports",
+                "global_value": 1.38542
+              },
+              {
+                "metric": "chroma",
+                "name": "色度跳变比",
+                "direction": "high",
+                "value": 0.27288,
+                "clean_pct": 65.2,
+                "supports": false,
+                "verdict": "inconclusive",
+                "global_value": 0.28402
+              }
+            ],
+            "measured_support": true,
+            "verdict": "supports"
+          },
+          "reason_40ch": "画面右上区P0级花屏：实测8px块边界跳变比1.18（洁净P94）",
+          "causal_uncertainty": false,
+          "uncertainty_note": "实测物理证据与判级一致，单帧无成因歧义"
+        }
+      ]
+    },
+    "tat_jimu_payload": {
+      "image": "137212400938_frame14.png",
+      "label": {
+        "模糊": "P2",
+        "纹理损失": "P2",
+        "过锐": "无问题",
+        "花屏": "P0",
+        "过度生成": "无问题",
+        "虚化突兀": "无问题"
+      },
+      "tat_jimu_ext": {
+        "media_type": "image",
+        "is_badcase": true,
+        "worst_severity": "P0",
+        "p0_alert": true,
+        "clean_prob": 0.0004,
+        "latency_ms": 2990.86,
+        "attribution": {
+          "is_clean": false,
+          "summary_40ch": "画面右上区P0级花屏：实测8px块边界跳变比1.18（洁净P94）",
+          "causal_uncertainty": true,
+          "defects": [
+            {
+              "defect": "模糊",
+              "severity": "P2",
+              "confidence": 0.2784,
+              "location": "画面中上区",
+              "box_xyxy": [
+                0,
+                0,
+                448,
+                448
+              ],
+              "concentration_ratio": 6.291,
+              "active_area_frac": 0.25,
+              "evidence": {
+                "scope": "box",
+                "measurements": [
+                  {
+                    "metric": "lapvar",
+                    "name": "拉普拉斯方差",
+                    "direction": "low",
+                    "value": 0.05968,
+                    "clean_pct": 99.0,
+                    "supports": false,
+                    "verdict": "contradicts",
+                    "global_value": 0.03014
+                  }
+                ],
+                "measured_support": false,
+                "verdict": "contradicts"
+              },
+              "reason_40ch": "画面中上区P2级模糊：拉普拉斯方差洁净P99反向，物理证据不支持，待复核",
+              "causal_uncertainty": true,
+              "uncertainty_note": "实测物理指标与该缺陷方向相反（落在洁净训练帧分布的另一侧），该判级完全来自模型语义特征，像素统计不支持此成因，建议人工复核；单帧仅能确认高频衰减，无法区分运动模糊、失焦或码率平滑成因（需相邻帧时序确证）；后验置信度0.28处于P2与无问题相邻等级临界区间"
+            },
+            {
+              "defect": "纹理损失",
+              "severity": "P2",
+              "confidence": 0.4948,
+              "location": "画面中上区",
+              "box_xyxy": [
+                38,
+                0,
+                486,
+                448
+              ],
+              "concentration_ratio": 6.028,
+              "active_area_frac": 0.188,
+              "evidence": {
+                "scope": "box",
+                "measurements": [
+                  {
+                    "metric": "tex_hf",
+                    "name": "纹理高频能量",
+                    "direction": "low",
+                    "value": 0.12387,
+                    "clean_pct": 99.7,
+                    "supports": false,
+                    "verdict": "contradicts",
+                    "global_value": 0.03278
+                  }
+                ],
+                "measured_support": false,
+                "verdict": "contradicts"
+              },
+              "reason_40ch": "画面中上区P2级纹理损失：纹理高频能量洁净P>99反向，物理证据不支持，待复核",
+              "causal_uncertainty": true,
+              "uncertainty_note": "实测物理指标与该缺陷方向相反（落在洁净训练帧分布的另一侧），该判级完全来自模型语义特征，像素统计不支持此成因，建议人工复核；后验置信度0.49处于P2与P1相邻等级临界区间"
+            },
+            {
+              "defect": "花屏",
+              "severity": "P0",
+              "confidence": 0.9922,
+              "location": "画面右上区",
+              "box_xyxy": [
+                96,
+                190,
+                544,
+                638
+              ],
+              "concentration_ratio": 9.92,
+              "active_area_frac": 0.125,
+              "evidence": {
+                "scope": "box",
+                "measurements": [
+                  {
+                    "metric": "blocky",
+                    "name": "8px块边界跳变比",
+                    "direction": "high",
+                    "value": 1.1778,
+                    "clean_pct": 93.8,
+                    "supports": true,
+                    "verdict": "supports",
+                    "global_value": 1.38542
+                  },
+                  {
+                    "metric": "chroma",
+                    "name": "色度跳变比",
+                    "direction": "high",
+                    "value": 0.27288,
+                    "clean_pct": 65.2,
+                    "supports": false,
+                    "verdict": "inconclusive",
+                    "global_value": 0.28402
+                  }
+                ],
+                "measured_support": true,
+                "verdict": "supports"
+              },
+              "reason_40ch": "画面右上区P0级花屏：实测8px块边界跳变比1.18（洁净P94）",
+              "causal_uncertainty": false,
+              "uncertainty_note": "实测物理证据与判级一致，单帧无成因歧义"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "infer": [
+    {
+      "image": "196160772653_10.03s.png",
+      "mode": "image_path",
+      "status": 200,
+      "label_match": true,
+      "latency_ms": {
+        "infer": 3532.83,
+        "decode": 0.71,
+        "attr": 0.07,
+        "total": 3577.96,
+        "request": 3583.58
+      },
+      "client_ms": 3584.8,
+      "summary": "六维均未达P2阈值，判定无明显画质缺陷"
+    },
+    {
+      "image": "137212400938_frame14.png",
+      "mode": "image_path",
+      "status": 200,
+      "label_match": true,
+      "latency_ms": {
+        "infer": 2707.15,
+        "decode": 0.65,
+        "attr": 265.92,
+        "total": 2990.86,
+        "request": 2991.75
+      },
+      "client_ms": 2993.3,
+      "summary": "画面右上区P0级花屏：实测8px块边界跳变比1.18（洁净P94）"
+    },
+    {
+      "image": "151918507262_000175.png",
+      "mode": "image_path",
+      "status": 200,
+      "label_match": true,
+      "latency_ms": {
+        "infer": 3163.58,
+        "decode": 0.63,
+        "attr": 252.21,
+        "total": 3452.02,
+        "request": 3453.5
+      },
+      "client_ms": 3455.1,
+      "summary": "全图P2级纹理损失：纹理高频能量洁净P91反向，物理证据不支持，待复核"
+    },
+    {
+      "image": "152861394819_53.png",
+      "mode": "image_path",
+      "status": 200,
+      "label_match": true,
+      "latency_ms": {
+        "infer": 3223.36,
+        "decode": 0.61,
+        "attr": 291.29,
+        "total": 3539.32,
+        "request": 3545.37
+      },
+      "client_ms": 3546.8,
+      "summary": "画面中心区P0级过度生成：实测局部/全局高频比2.1（洁净P90）"
+    },
+    {
+      "image": "152861394819_53.png",
+      "mode": "image_base64",
+      "status": 200,
+      "label_match": true,
+      "latency_ms": {
+        "infer": 3193.16,
+        "decode": 0.6,
+        "attr": 287.58,
+        "total": 3506.24,
+        "request": 3531.11
+      },
+      "client_ms": 3541.1,
+      "summary": "画面中心区P0级过度生成：实测局部/全局高频比2.1（洁净P90）"
+    }
+  ],
+  "infer_batch": {
+    "auto_group": {
+      "status": 200,
+      "n": 4,
+      "label_match": "4/4",
+      "client_ms": 9675.5,
+      "latency_ms": {
+        "request": 9673.02,
+        "per_image_mean": 2415.22,
+        "per_image_max": 3011.49
+      },
+      "videos": [
+        {
+          "video_id": "152863271821",
+          "num_frames": 1,
+          "frames": [
+            "152863271821_302.png"
+          ],
+          "video_label": {
+            "模糊": "P0",
+            "纹理损失": "P0",
+            "过锐": "无问题",
+            "花屏": "无问题",
+            "过度生成": "P0",
+            "虚化突兀": "无问题"
+          },
+          "trigger_frames": {
+            "模糊": [
+              0
+            ],
+            "纹理损失": [
+              0
+            ],
+            "过锐": [],
+            "花屏": [],
+            "过度生成": [
+              0
+            ],
+            "虚化突兀": []
+          },
+          "m_eff_p0": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "video_id": "164190196424",
+          "num_frames": 1,
+          "frames": [
+            "164190196424_337.png"
+          ],
+          "video_label": {
+            "模糊": "P2",
+            "纹理损失": "P1",
+            "过锐": "无问题",
+            "花屏": "无问题",
+            "过度生成": "P2",
+            "虚化突兀": "无问题"
+          },
+          "trigger_frames": {
+            "模糊": [
+              0
+            ],
+            "纹理损失": [
+              0
+            ],
+            "过锐": [],
+            "花屏": [],
+            "过度生成": [
+              0
+            ],
+            "虚化突兀": []
+          },
+          "m_eff_p0": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "video_id": "165065099488",
+          "num_frames": 1,
+          "frames": [
+            "165065099488_516.png"
+          ],
+          "video_label": {
+            "模糊": "无问题",
+            "纹理损失": "P2",
+            "过锐": "无问题",
+            "花屏": "P0",
+            "过度生成": "无问题",
+            "虚化突兀": "无问题"
+          },
+          "trigger_frames": {
+            "模糊": [],
+            "纹理损失": [
+              0
+            ],
+            "过锐": [],
+            "花屏": [
+              0
+            ],
+            "过度生成": [],
+            "虚化突兀": []
+          },
+          "m_eff_p0": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "video_id": "167282867920_v7HighV2",
+          "num_frames": 1,
+          "frames": [
+            "167282867920_v7HighV2_014.png"
+          ],
+          "video_label": {
+            "模糊": "无问题",
+            "纹理损失": "P2",
+            "过锐": "无问题",
+            "花屏": "P0",
+            "过度生成": "无问题",
+            "虚化突兀": "无问题"
+          },
+          "trigger_frames": {
+            "模糊": [],
+            "纹理损失": [
+              0
+            ],
+            "过锐": [],
+            "花屏": [
+              0
+            ],
+            "过度生成": [],
+            "虚化突兀": []
+          },
+          "m_eff_p0": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      ],
+      "video_aggregator": "results/r55/final/resident_v6_core_video_aggregator.pkl"
+    },
+    "video_id": {
+      "status": 200,
+      "n": 6,
+      "label_match": "6/6",
+      "client_ms": 15889.1,
+      "latency_ms": {
+        "request": 15886.21,
+        "per_image_mean": 2643.09,
+        "per_image_max": 4587.85
+      },
+      "videos": [
+        {
+          "video_id": "demo_clip_M6",
+          "num_frames": 6,
+          "frames": [
+            "152863271821_302.png",
+            "196353222258_v8MdHiV1_3.04s.png",
+            "196400640680_v8L3UtV1_7.05s.png",
+            "180798402816_v7L3HiV2_1.png",
+            "181204643103_v7L3HiV2_18101.png",
+            "181258970129_v7L3HiV2_7164.png"
+          ],
+          "video_label": {
+            "模糊": "P0",
+            "纹理损失": "P0",
+            "过锐": "P2",
+            "花屏": "无问题",
+            "过度生成": "P0",
+            "虚化突兀": "P0"
+          },
+          "trigger_frames": {
+            "模糊": [
+              0,
+              5
+            ],
+            "纹理损失": [
+              0,
+              5
+            ],
+            "过锐": [
+              3,
+              4
+            ],
+            "花屏": [],
+            "过度生成": [
+              0
+            ],
+            "虚化突兀": [
+              3,
+              5
+            ]
+          },
+          "m_eff_p0": [
+            4.098,
+            3.642,
+            4.991,
+            5.25,
+            4.137,
+            4.953
+          ]
+        }
+      ],
+      "video_aggregator": "results/r55/final/resident_v6_core_video_aggregator.pkl"
+    }
+  },
+  "error_missing_path": {
+    "status": 404,
+    "body": {
+      "error": "image_path not found: /wanqing-develop/luowenjing/18/data/test_150/does_not_exist.png"
+    }
+  },
+  "error_bad_request": {
+    "status": 400,
+    "body": {
+      "error": "need image_path or image_base64"
+    }
+  },
+  "healthz_end": {
+    "status": "ok",
+    "set": "resident_v6_core",
+    "members": [
+      "cradio_v3",
+      "peg",
+      "v16",
+      "ntg_pe",
+      "p12_pe",
+      "p1_qy"
+    ],
+    "decoder": "routed_gate_eu",
+    "attribution": true,
+    "load_s": 145.5,
+    "warmup_s": 4.88,
+    "torch_peak_gb": 18.798,
+    "torch_allocated_gb": 15.722,
+    "torch_reserved_gb": 18.041,
+    "nvidia_smi_mib": 19875.6,
+    "nvidia_smi_peak_mib": 20667.6,
+    "params_b": 9.656,
+    "requests": 15,
+    "uptime_s": 45.7,
+    "clean_footprint": "results/r55/final/resident_v6_core_clean_footprint.npz",
+    "pytorch_cuda_alloc_conf": "expandable_segments:True"
+  },
+  "spool_leftovers": [],
+  "shutdown": {
+    "signal": "SIGTERM",
+    "returncode": 0,
+    "gpu0_mib_before": 19261.0,
+    "gpu0_mib_after": 0.0,
+    "log_tail": [
+      "[serve] resident_v6_core ['cradio_v3', 'peg', 'v16', 'ntg_pe', 'p12_pe', 'p1_qy'] decoder=routed_gate_eu loaded in 146s | torch peak 18.80 GB | nvidia-smi 18424 MiB",
+      "[serve] stdlib ThreadingHTTPServer on http://127.0.0.1:8056",
+      "[serve] shut down cleanly"
+    ]
+  }
+}

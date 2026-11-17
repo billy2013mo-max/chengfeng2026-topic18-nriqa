@@ -1,0 +1,128 @@
+
+[pool=fallback partition=canonical] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.28  +0.00 [+0.00, +0.00]  0.00   (pos 15.47 p0 16.20 cl 19.61)
+  ordinal                                     51.59  +0.31 [+0.11, +0.53]  0.99   (pos 15.61 p0 16.29 cl 19.69)
+  EU                                          51.54  +0.26 [-0.07, +0.61]  0.89   (pos 15.42 p0 16.16 cl 19.96)
+  ordinal single start                        51.59  +0.31 [+0.11, +0.53]  0.99   (pos 15.61 p0 16.29 cl 19.69)
+  ordinal fine grid                           51.61  +0.33 [+0.09, +0.57]  0.99   (pos 15.66 p0 16.22 cl 19.73)
+  ordinal + EU clean rule                     51.55  +0.26 [+0.01, +0.56]  0.96   (pos 15.39 p0 16.20 cl 19.96)
+
+[pool=fallback partition=canonical] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     52.12  +0.00 [+0.00, +0.00]  0.00   (pos 15.88 p0 16.63 cl 19.61)
+  ordinal                                     52.41  +0.29 [-0.01, +0.58]  0.94   (pos 16.06 p0 16.67 cl 19.69)
+  EU                                          52.15  +0.03 [-0.41, +0.48]  0.56   (pos 15.76 p0 16.43 cl 19.96)
+  ordinal single start                        52.41  +0.29 [-0.01, +0.58]  0.94   (pos 16.06 p0 16.67 cl 19.69)
+  ordinal fine grid                           52.41  +0.29 [-0.05, +0.64]  0.92   (pos 16.10 p0 16.59 cl 19.73)
+  ordinal + EU clean rule                     52.34  +0.22 [-0.14, +0.59]  0.84   (pos 15.82 p0 16.56 cl 19.96)
+
+[pool=fallback partition=random0] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.15  +0.00 [+0.00, +0.00]  0.00   (pos 15.47 p0 16.11 cl 19.57)
+  ordinal                                     51.50  +0.35 [+0.12, +0.58]  0.99   (pos 15.58 p0 16.20 cl 19.73)
+  EU                                          51.69  +0.53 [+0.22, +0.88]  1.00   (pos 15.49 p0 16.23 cl 19.96)
+
+[pool=fallback partition=random0] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.91  +0.00 [+0.00, +0.00]  0.00   (pos 15.81 p0 16.54 cl 19.57)
+  ordinal                                     52.25  +0.33 [+0.05, +0.62]  0.97   (pos 15.97 p0 16.55 cl 19.73)
+  EU                                          52.30  +0.38 [-0.07, +0.85]  0.93   (pos 15.82 p0 16.52 cl 19.96)
+
+[pool=fallback partition=random1] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.07  +0.00 [+0.00, +0.00]  0.00   (pos 15.46 p0 16.09 cl 19.53)
+  ordinal                                     51.36  +0.29 [+0.04, +0.54]  0.97   (pos 15.50 p0 16.17 cl 19.69)
+  EU                                          51.56  +0.48 [+0.14, +0.83]  0.99   (pos 15.43 p0 16.16 cl 19.96)
+
+[pool=fallback partition=random1] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.80  +0.00 [+0.00, +0.00]  0.00   (pos 15.83 p0 16.44 cl 19.53)
+  ordinal                                     52.10  +0.29 [-0.04, +0.61]  0.93   (pos 15.88 p0 16.53 cl 19.69)
+  EU                                          52.12  +0.32 [-0.08, +0.78]  0.90   (pos 15.74 p0 16.42 cl 19.96)
+
+[pool=fallback partition=random2] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.30  +0.00 [+0.00, +0.00]  0.00   (pos 15.55 p0 16.18 cl 19.57)
+  ordinal                                     51.40  +0.10 [-0.13, +0.34]  0.79   (pos 15.55 p0 16.16 cl 19.69)
+  EU                                          51.65  +0.35 [+0.03, +0.72]  0.97   (pos 15.46 p0 16.23 cl 19.96)
+
+[pool=fallback partition=random2] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     52.06  +0.00 [+0.00, +0.00]  0.00   (pos 15.95 p0 16.54 cl 19.57)
+  ordinal                                     52.16  +0.09 [-0.20, +0.40]  0.68   (pos 15.91 p0 16.55 cl 19.69)
+  EU                                          52.19  +0.13 [-0.32, +0.64]  0.69   (pos 15.75 p0 16.48 cl 19.96)
+
+[pool=member cradio partition=canonical] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     49.00  +0.00 [+0.00, +0.00]  0.00   (pos 14.55 p0 15.31 cl 19.14)
+  ordinal                                     49.46  +0.45 [+0.19, +0.73]  1.00   (pos 14.65 p0 15.55 cl 19.26)
+  EU                                          49.86  +0.86 [+0.53, +1.17]  1.00   (pos 14.95 p0 15.30 cl 19.61)
+
+[pool=member cradio partition=canonical] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     49.25  +0.00 [+0.00, +0.00]  0.00   (pos 14.52 p0 15.59 cl 19.14)
+  ordinal                                     49.88  +0.63 [+0.30, +0.98]  1.00   (pos 14.74 p0 15.88 cl 19.26)
+  EU                                          50.24  +1.00 [+0.64, +1.37]  1.00   (pos 14.90 p0 15.73 cl 19.61)
+
+[pool=member pe partition=canonical] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     49.55  +0.00 [+0.00, +0.00]  0.00   (pos 14.79 p0 15.58 cl 19.18)
+  ordinal                                     49.69  +0.14 [-0.02, +0.30]  0.92   (pos 14.84 p0 15.63 cl 19.22)
+  EU                                          50.41  +0.86 [+0.53, +1.18]  1.00   (pos 15.26 p0 15.54 cl 19.61)
+
+[pool=member pe partition=canonical] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     49.58  +0.00 [+0.00, +0.00]  0.00   (pos 14.77 p0 15.63 cl 19.18)
+  ordinal                                     49.91  +0.33 [+0.13, +0.54]  1.00   (pos 14.96 p0 15.72 cl 19.22)
+  EU                                          50.71  +1.13 [+0.74, +1.55]  1.00   (pos 15.41 p0 15.69 cl 19.61)
+
+[pool=member sig partition=canonical] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     48.46  +0.00 [+0.00, +0.00]  0.00   (pos 14.35 p0 15.28 cl 18.83)
+  ordinal                                     48.68  +0.22 [-0.03, +0.48]  0.93   (pos 14.36 p0 15.21 cl 19.10)
+  EU                                          49.38  +0.92 [+0.54, +1.29]  1.00   (pos 14.81 p0 15.11 cl 19.45)
+
+[pool=member sig partition=canonical] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     48.61  +0.00 [+0.00, +0.00]  0.00   (pos 14.40 p0 15.38 cl 18.83)
+  ordinal                                     48.75  +0.14 [-0.15, +0.44]  0.78   (pos 14.31 p0 15.34 cl 19.10)
+  EU                                          49.18  +0.57 [+0.08, +1.03]  0.97   (pos 14.62 p0 15.10 cl 19.45)
+
+[pool=member v16 partition=canonical] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     50.22  +0.00 [+0.00, +0.00]  0.00   (pos 15.27 p0 15.78 cl 19.18)
+  ordinal                                     50.19  -0.04 [-0.23, +0.16]  0.37   (pos 15.04 p0 15.77 cl 19.38)
+  EU                                          50.72  +0.49 [+0.14, +0.86]  0.99   (pos 14.98 p0 15.93 cl 19.81)
+
+[pool=member v16 partition=canonical] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     50.66  +0.00 [+0.00, +0.00]  0.00   (pos 15.39 p0 16.09 cl 19.18)
+  ordinal                                     50.63  -0.03 [-0.28, +0.25]  0.41   (pos 15.18 p0 16.07 cl 19.38)
+  EU                                          51.33  +0.66 [+0.23, +1.12]  1.00   (pos 15.30 p0 16.22 cl 19.81)
+
+[pool=member p3 partition=canonical] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     49.84  +0.00 [+0.00, +0.00]  0.00   (pos 14.68 p0 15.54 cl 19.61)
+  ordinal                                     49.82  -0.02 [-0.30, +0.26]  0.48   (pos 14.78 p0 15.43 cl 19.61)
+  EU                                          49.30  -0.54 [-0.89, -0.16]  0.01   (pos 13.74 p0 15.60 cl 19.96)
+
+[pool=member p3 partition=canonical] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     49.77  +0.00 [+0.00, +0.00]  0.00   (pos 14.72 p0 15.44 cl 19.61)
+  ordinal                                     49.91  +0.14 [-0.29, +0.56]  0.70   (pos 14.94 p0 15.36 cl 19.61)
+  EU                                          49.28  -0.49 [-1.00, +0.01]  0.05   (pos 13.84 p0 15.48 cl 19.96)
+
+[pool=primary partition=canonical] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.52  +0.00 [+0.00, +0.00]  0.00   (pos 15.62 p0 16.33 cl 19.57)
+  ordinal                                     51.62  +0.10 [-0.13, +0.33]  0.78   (pos 15.62 p0 16.35 cl 19.65)
+  EU                                          51.80  +0.29 [-0.04, +0.61]  0.93   (pos 15.55 p0 16.29 cl 19.96)
+
+[pool=primary partition=canonical] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     52.43  +0.00 [+0.00, +0.00]  0.00   (pos 16.06 p0 16.80 cl 19.57)
+  ordinal                                     52.51  +0.08 [-0.20, +0.35]  0.68   (pos 16.11 p0 16.75 cl 19.65)
+  EU                                          52.39  -0.04 [-0.47, +0.42]  0.46   (pos 15.86 p0 16.57 cl 19.96)
+
+[pool=primary_v2 partition=canonical] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.53  +0.00 [+0.00, +0.00]  0.00   (pos 15.76 p0 16.16 cl 19.61)
+  ordinal                                     51.38  -0.15 [-0.39, +0.11]  0.16   (pos 15.51 p0 16.22 cl 19.65)
+  EU                                          51.78  +0.25 [+0.00, +0.55]  0.95   (pos 15.57 p0 16.25 cl 19.96)
+
+[pool=primary_v2 partition=canonical] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     52.10  +0.00 [+0.00, +0.00]  0.00   (pos 15.99 p0 16.49 cl 19.61)
+  ordinal                                     52.06  -0.04 [-0.44, +0.35]  0.45   (pos 15.90 p0 16.51 cl 19.65)
+  EU                                          52.42  +0.32 [-0.03, +0.70]  0.93   (pos 15.90 p0 16.56 cl 19.96)
+
+[fallback canonical, ordinal variants] all rows: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     51.28  +0.00 [+0.00, +0.00]  0.00   (pos 15.47 p0 16.20 cl 19.61)
+  ordinal single start                        51.59  +0.31 [+0.11, +0.53]  0.99   (pos 15.61 p0 16.29 cl 19.69)
+  ordinal fine grid                           51.61  +0.33 [+0.09, +0.57]  0.99   (pos 15.66 p0 16.22 cl 19.73)
+  ordinal + EU clean rule                     51.55  +0.26 [+0.01, +0.56]  0.96   (pos 15.39 p0 16.20 cl 19.96)
+
+[fallback canonical, ordinal variants] first batch: score, delta vs 'shipped' [CI90], P(delta>0)
+  shipped                                     52.12  +0.00 [+0.00, +0.00]  0.00   (pos 15.88 p0 16.63 cl 19.61)
+  ordinal single start                        52.41  +0.29 [-0.01, +0.58]  0.94   (pos 16.06 p0 16.67 cl 19.69)
+  ordinal fine grid                           52.41  +0.29 [-0.05, +0.64]  0.92   (pos 16.10 p0 16.59 cl 19.73)
+  ordinal + EU clean rule                     52.34  +0.22 [-0.14, +0.59]  0.84   (pos 15.82 p0 16.56 cl 19.96)

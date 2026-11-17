@@ -1,0 +1,26 @@
+{
+  "zero_video_group_leakage": true,
+  "leaked_video_groups": 0,
+  "standalone_rps": {
+    "arm_a_cv5_5ep": 0.048722,
+    "arm_b_stage2_5ep": 0.051664,
+    "legacy_leaky_5fold_ref": 0.047329
+  },
+  "standalone_argmax_doc2_strict": {
+    "arm_a_cv5_5ep": 48.762,
+    "arm_b_stage2_5ep": 48.771
+  },
+  "resident_v4_pooled_rps": {
+    "arm_a_cv5_5ep": 0.042861,
+    "arm_b_stage2_5ep": 0.04298,
+    "delta_b_minus_a": 0.00012,
+    "cluster_boot_se": 9.3e-05,
+    "z_score_b_minus_a": 1.28,
+    "ci90_b_minus_a": [
+      -3.3e-05,
+      0.000273
+    ]
+  },
+  "adopted_schedule": "cv5",
+  "installed_oof_path": "/wanqing-develop/luowenjing/18/results/r55/p3_qy_honest/pillar3_best_oof.npz"
+}

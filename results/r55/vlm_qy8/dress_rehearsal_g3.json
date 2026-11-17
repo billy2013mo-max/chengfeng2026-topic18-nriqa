@@ -1,0 +1,32 @@
+{
+  "g3_pass": true,
+  "p3_uncast_gib": 3.908,
+  "p3_cast_gib": 2.747,
+  "p3_cast_tv": 0.0,
+  "p3_cast_max_dp": 0.0,
+  "fold0_unmerged_bs4_max_dp_tta": 0.0004919767379760742,
+  "fold0_bf16_tv_vs_saved": 0.0015991070540621877,
+  "fold0_bf16_p99_dp_tta": 0.00790631864219904,
+  "fold0_bf16_max_dp_orig": 0.027732253074645996,
+  "fold0_bf16_max_dp_hflip": 0.03696078062057495,
+  "fold0_bf16_max_dp_tta": 0.013601064682006836,
+  "fold0_nf4_res_gib": 6.253,
+  "fold0_nf4_tv_vs_saved": 0.008788320235908031,
+  "fold0_nf4_tv_vs_bf16": 0.008814854547381401,
+  "engine_9m_params_b": 11.821,
+  "engine_9m_resident_gib": 20.567,
+  "engine_9m_peak_load_gib": 20.567,
+  "engine_9m_peak_infer_gib": 21.282,
+  "engine_9m_peak_by_member": {
+    "cradio_v3": 21.012452125549316,
+    "pe_v3": 20.804819107055664,
+    "peg": 20.804819107055664,
+    "sig_v3": 20.607436180114746,
+    "ntg_pe": 21.282488346099854,
+    "p12_pe": 20.804819107055664,
+    "v16": 21.14515209197998,
+    "phoenix": 21.072192192077637
+  },
+  "engine_9m_mean_s": 2.625,
+  "engine_9m_p95_s": 3.159
+}

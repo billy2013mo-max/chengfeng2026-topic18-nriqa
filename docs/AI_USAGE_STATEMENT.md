@@ -1,39 +1,29 @@
 # 【2026乘风挑战赛·命题18】AI 使用说明（组委会统一要求）
 
-> **说明**：根据【2026乘风挑战赛】组委会统一要求（命题文档第 5 节“解题方案中需说明解题过程在多大程度上使用了 AI、如何使用，表现突出者有额外激励”），本文档详细披露并总结本团队在解题全生命周期中如何使用 **AI 编程与科研智能体（Antigravity Agentic Coding Assistant）** 进行人机协同攻关。
+> **说明**：根据【2026乘风挑战赛】组委会统一要求（命题文档第 5 节“解题方案中需说明解题过程在多大程度上使用了 AI、如何使用，表现突出者有额外激励”），本文档客观记录本团队在解题全生命周期中如何使用 AI 编程与科研智能体进行人机协同研发。
 
 ---
 
-## 一、 AI 参与程度与人机协同范式概述
+## 一、 AI 参与程度与人机协同模式
 
-在本命题的解题过程中，我们采用了 **“人类专家把控顶层方向与线上反馈闭环 + AI 智能体全自主执行底层误差审计、算法设计、合成数据工程、多卡训练调度与零泄漏验证”** 的深度协同范式（AI 参与了约 **90% 的代码研发、数据分析、实验自动化与文档整理工作**）：
+在本命题的研发全周期中，我们采用 **“人类参赛者把控核心方向、规则对齐与严格实验纪律 + AI 智能体高效执行代码工程、误差审计、受控消融与单卡部署优化”** 的深度协同模式（AI 辅助完成了约 **85% ~ 90% 的工程脚本编写、实验自动化编排、消融数据分析与文档整理工作**）：
 
-1. **人类参赛者的核心决策作用**：
-   - 确立客观分 `55+` 的演进目标，把控线上参考榜/评测集的阶段性验证反馈（例如敏锐指出早期版本“正向缺陷分变高但 P0 识别偏低”的 trade-off 现象）；
-   - 严格把关实验科学性（要求建立 100% 物理隔离的独立盲测集审计机制、要求利用 100% 全量人工标注数据进行交叉验证训练、要求挖掘 H200 显存余量进行无损训练加速、及时同步最新赛题规则变更文档）。
-2. **AI 智能体的闭环执行作用**：
-   - 在获得人类授权后，AI 智能体完成了从 **数据探索 → 瓶颈诊断 → 物理退化建模 → 神经网络架构升级 → CUDA/BF16 底层训练加速 → 8 卡并行任务编排 → 严格零泄漏消融审计 → 提交产物校验** 的全链路自动化闭环。
+- **人类专家的核心决策与把关**：
+  1. 确立“零过拟合、零历史 JSON 锚定、严格单张 RTX 4090 可上线交付”的工程铁律；
+  2. 敏锐发现早期间接优化（如仅关注单一参考榜得分）的局限性，要求建立 **3,573 张全量真图按视频/场景分组的 8-Fold Nested OOF** 严格验证协议；
+  3. 审阅消融门控结果，果断淘汰无真实增益的复杂堆叠，收敛至简洁可靠的 `resident_v3_giant` 跨家族常驻方案。
+- **AI 智能体的闭环执行**：
+  - 完成了从数据清洗与分组防泄漏划分、误差与置信度诊断、多家族训练脚本与损失函数实现、受控门控（Gate）自动化验证、单卡 4090 显存/耗时压测到提交格式校验脚本的全链路工程落地。
 
 ---
 
-## 二、 AI 在解题各阶段的具体使用方式与创新贡献
+## 二、 AI 在解题各关键阶段的具体贡献
 
-### 1. 自动化 BadCase 误差诊断与赛题规则精准对齐
-- **跨划分混淆矩阵审计**：AI 自动编写诊断脚本（[`diagnose_s16_s17_bottlenecks.py`](file:///wanqing-develop/luowenjing/18/code/finetune/diagnose_s16_s17_bottlenecks.py)、[`audit_55_bottlenecks.py`](file:///wanqing-develop/luowenjing/18/code/finetune/audit_55_bottlenecks.py)），定位出早期模型在 `过度生成 (P1/P2)`、`纹理损失 (P1)` 上的漏检，以及早期合成数据中高频正弦波纹导致的 `过锐 ↔ 花屏` 交叉误报。
-- **赛题文档变更自动 Diff 与公式对齐**：当赛题更新第二版文档时，AI 通过逐行对比初版与新版文档，第一时间发现 **`S_clean`（20分）计算口径从“仅考核 P0 误判率（除以 $\tau=0.02$）”变更为“全无问题样本六类全部预测为无问题才得分（不区分 P0/P1/P2 误报）”**，从而设计出“全局无问题门控（Clean Gate）+ 解锁已检出缺陷样本 P0 召回”的针对性后处理校准策略。
-
-### 2. 物理退化合成算子与 60 维原生特征工程设计
-- **零振铃等级阶梯合成（Zero-Ripple Severity Ladder）**：AI 针对小样本长尾分布，设计并实现了 [`build_v9_specialists.py`](file:///wanqing-develop/luowenjing/18/code/finetune/build_v9_specialists.py) 与 [`build_v9_fulldata_8folds.py`](file:///wanqing-develop/luowenjing/18/code/finetune/build_v9_fulldata_8folds.py)，用多尺度非锐化掩模替代正弦条纹，并在同一张干净底图上构造 `Clean → P2 → P1 → P0` 严格单调退化阶梯，确保模型学习纯粹的画质退化强度而非背景捷径。
-- **60 维原生分辨率信号特征**：AI 编写了 [`extract_native_phys_feats.py`](file:///wanqing-develop/luowenjing/18/code/finetune/extract_native_phys_feats.py)，在图像缩放前并行提取多尺度 Laplacian 能量比、边缘白边过冲比（Halo Overshoot）、块边界突变度等 60 维物理特征，补齐了 ViT 下采样损失的像素级高频先验。
-
-### 3. V9 神经网络架构设计与损失函数创新
-- **空间异常池化（Spatial Anomaly Pooling）**：针对局部缺陷被全局平均池化淹没的问题，AI 在 [`train_v9_specialist.py`](file:///wanqing-develop/luowenjing/18/code/finetune/train_v9_specialist.py) 中实现了 `Global + Tile Mean + Top-2 Tile Anomaly Max-Mean + Tile Spatial Std` 四维池化层，使局部 `过度生成`、`花屏` 与 `虚化突兀` 的识别能力大幅跃升，并天然支持九宫格异常位置归因。
-- **复合序数感知损失函数**：AI 将官方竞赛评分公式转化为可微分的 `Soft Competition Loss`，并结合批次内 `Pairwise Ordinal Margin Loss`，显著改善了 `P0 / P1 / P2` 等级边界的校准质量。
-
-### 4. 底层训练无损加速与 8 卡 H200 自动化调度
-- 针对 3.89B 巨型多骨干模型训练耗时问题，AI 在保证数学等价（零精度损失）的前提下实施了 **7 项底层工程加速**：
-  1. DataLoader `uint8` 零拷贝传输 + GPU 端 `bfloat16` 归一化（PCIe 带宽开销降低 75%）；
-  2. 33.5 亿冻结骨干参数训练前一次性预转为 `bfloat16`，消除每步动态类型转换；
-  3. 冻结 Transformer 层固定 `.eval()` 模式，跳过冗余随机丢弃算子；
-  4. 启用 `torch.optim.AdamW(..., fused=True)` 单核融合更新与 Flash SDP；
-  5. 取消梯度累加、直接翻倍物理 Micro-Batch 填满显存，使训练速度提升 **2.5 倍以上**，并在 8 张 GPU 上全自动并行完成了 8-Fold 全量数据专精训练。
+1. **赛题规则精准对齐与误差归因审计**：
+   - AI 协助逐行核对新版命题文档的 `Doc2_Strict` 评分口径（`25·S_pos + 20·S_p0 + 20·S_clean`），并编写自动化诊断脚本量化出“分级边界（Grading）是主要提分空间（+9.4 vs +3.5）”以及“单模型种子方差较大”的关键结论，避免了盲目调参。
+2. **受控实验框架与负结果快速证伪**：
+   - AI 协助搭建了带统计显著性门控的受控消融框架（`code/r55/`），通过严格控制变量快速证伪了随机裁剪、无监督自训练、多帧强行聚合等无效假设，使研发资源集中于真正有效的跨家族互补表征、高分辨率物理对比残差（`Phoenix Pillar-3`）与 `RoutedEUDecoder` 期望效用校准。
+3. **数据构造与零泄漏防线工程化**：
+   - 协助实现比特流解码花屏模拟（`build_glitch.py`）与原生分辨率排序阶梯（`build_rank_tuples.py`），并在训练器中强制执行同折隔离与文件名屏蔽，确保零数据泄漏。
+4. **单卡 RTX 4090 常驻推理引擎与一键交付脚本**：
+   - AI 协助构建了 [`code/r55/final_engine.py`](file:///wanqing-develop/luowenjing/18/code/r55/final_engine.py)（支持 `--half` BF16 常驻与 `2x` TTA，将 `resident_v3_giant` 峰值显存压至 **19.06 GB**、单图推理均值压至 **2.31 秒**）、一键推理脚本 [`run_final_infer.sh`](file:///wanqing-develop/luowenjing/18/run_final_infer.sh) 与严格格式校验工具 [`code/r55/validate_submission.py`](file:///wanqing-develop/luowenjing/18/code/r55/validate_submission.py)，保障复评可复现性与交付可靠性。

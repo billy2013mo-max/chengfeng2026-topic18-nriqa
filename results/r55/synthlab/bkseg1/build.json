@@ -1,0 +1,8 @@
+{
+  "recipe": "bkseg1",
+  "doc": "code/r55/build_bokeh_seg.py — SynthLab recipe `bkseg1`: 虚化突兀 built on LABELLED frames with a real subject mask. Run with `python3 -I` (weights in data/r55_aux/raw/seg_weights are loaded as plain tensors). Why (docs/REASSESSMENT_AND_PLAN_2026-11-12.md §10): 虚化突兀 is the most valuable single label (P0-only, counted in both the positive and the P0 score), it is data-limited (+0.076 F1 per doubling of the labels), 79 of its 225 positives come from one batch, and outside that batch the ensemble finds 69 %. The labelled positives are frames with a SHARP SUBJECT CUT OUT AGAINST A BLURRED BACKGROUND (drama stills, privacy blur, panning shots). The first simulation (build_bokeh.py) failed on fidelity, not on principle: a depth split of KVQ frames rarely isolates a subject and the blur destroyed the captions. Here: * seeds are labelled frames without 虚化突兀 / 花屏 in which Mask R-CNN (COCO, torchvision) finds a person or animal covering 6-60 % of the frame; *",
+  "seeds": 900,
+  "frames": 1800,
+  "positives": 900,
+  "negatives": 900
+}

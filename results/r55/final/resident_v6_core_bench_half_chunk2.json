@@ -1,0 +1,44 @@
+{
+  "set": "resident_v6_core",
+  "n": 20,
+  "total_params_b": 9.656,
+  "total_mean": 2.0736507277935745,
+  "total_p95": 3.809056425234303,
+  "total_max": 3.9850297709926963,
+  "per_member": {
+    "cradio_v3": 0.1977894263807684,
+    "peg": 0.09705889676697552,
+    "v16": 0.9922120498958975,
+    "ntg_pe": 0.1895800053142011,
+    "p12_pe": 0.18705407474189997,
+    "p1_qy": 0.4049616118427366
+  },
+  "resident_gb": {
+    "p1_qy": 5.67,
+    "cradio_v3": 7.03,
+    "peg": 7.68,
+    "ntg_pe": 8.33,
+    "p12_pe": 8.97,
+    "v16": 15.68
+  },
+  "resident_total_gb": 15.68,
+  "peak_load_gb": 18.79843759536743,
+  "peak_infer_gb": 17.642765522003174,
+  "peak_by_member": {
+    "cradio_v3": 16.851534843444824,
+    "peg": 15.916481494903564,
+    "ntg_pe": 17.642765522003174,
+    "p12_pe": 15.916481494903564,
+    "v16": 16.25480031967163,
+    "phoenix": 16.173898696899414
+  },
+  "half": true,
+  "v16_chunk": 2,
+  "load_s": 320.2593219280243,
+  "total_median": 1.9599591977894306,
+  "nvidia_smi_peak_load_mib": 20687.625,
+  "nvidia_smi_after_warmup_mib": 18067.625,
+  "nvidia_smi_peak_infer_mib": 20289.625,
+  "torch_reserved_gb": 18.525,
+  "pytorch_cuda_alloc_conf": "expandable_segments:True"
+}

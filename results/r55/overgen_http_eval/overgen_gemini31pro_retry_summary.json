@@ -1,0 +1,84 @@
+{
+  "confusion": {
+    "P0": {
+      "P0": 13,
+      "P1": 2,
+      "P2": 0,
+      "无问题": 0
+    },
+    "P1": {
+      "P0": 3,
+      "P1": 1,
+      "P2": 0,
+      "无问题": 1
+    },
+    "P2": {
+      "P0": 2,
+      "P1": 2,
+      "P2": 0,
+      "无问题": 0
+    },
+    "无问题": {
+      "P0": 0,
+      "P1": 0,
+      "P2": 0,
+      "无问题": 0
+    }
+  },
+  "per_class": {
+    "P0": {
+      "n": 15,
+      "hit": 13,
+      "recall": 0.8666666666666667,
+      "predictions": {
+        "P0": 13,
+        "P1": 2,
+        "P2": 0,
+        "无问题": 0
+      }
+    },
+    "P1": {
+      "n": 5,
+      "hit": 1,
+      "recall": 0.2,
+      "predictions": {
+        "P0": 3,
+        "P1": 1,
+        "P2": 0,
+        "无问题": 1
+      }
+    },
+    "P2": {
+      "n": 4,
+      "hit": 0,
+      "recall": 0.0,
+      "predictions": {
+        "P0": 2,
+        "P1": 2,
+        "P2": 0,
+        "无问题": 0
+      }
+    },
+    "无问题": {
+      "n": 0,
+      "hit": 0,
+      "recall": 0.0,
+      "predictions": {
+        "P0": 0,
+        "P1": 0,
+        "P2": 0,
+        "无问题": 0
+      }
+    }
+  },
+  "invalid": 0,
+  "exact_hit": 14,
+  "exact_n": 24,
+  "defect_detected": 23,
+  "macro_recall_P0P1P2": 0.35555555555555557,
+  "model": "ep-2bbmni-1794561470122917386",
+  "url": "http://wanqing-prt.internal/api/gateway/v1/endpoints",
+  "images": 24,
+  "elapsed_s": 80.6,
+  "positive_defect_recall": 0.9583333333333334
+}

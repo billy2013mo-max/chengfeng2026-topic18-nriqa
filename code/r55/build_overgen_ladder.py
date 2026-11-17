@@ -120,6 +120,51 @@ def main():
     print(f"[overgen r{a.rank}] done", flush=True)
 
 
+def _deviation(job):
+    """Mean absolute difference to the seed at 512 px on the long side (how far the re-render moved)."""
+    import cv2
+    import numpy as np
+    seed, name = job
+    p = next((os.path.join(REPO, d, seed) for d in ("data/images", "data/images_supp")
+              if os.path.exists(os.path.join(REPO, d, seed))), None)
+    a = cv2.imdecode(np.fromfile(p, np.uint8), cv2.IMREAD_COLOR) if p else None
+    b = cv2.imdecode(np.fromfile(os.path.join(AUX_IMG, name), np.uint8), cv2.IMREAD_COLOR)
+    if a is None or b is None:
+        return name, -1.0
+    s = 512.0 / max(a.shape[:2])
+    size = (max(1, int(a.shape[1] * s)), max(1, int(a.shape[0] * s)))
+    a, b = (cv2.resize(x, size, interpolation=cv2.INTER_AREA).astype(np.float32) for x in (a, b))
+    return name, float(np.abs(a - b).mean())
+
+
+def relevel(rows, min_ratio=1.15, min_dev=1.0):
+    """The instruction strength does not reliably order the outputs (the smoke test had L2 fully re-drawn and
+    L3 almost untouched), so the level is re-assigned from the measured departure from the seed: levels are
+    sorted by deviation, a level closer than `min_ratio` to the previous kept one is dropped as ambiguous,
+    and a tuple needs >= 2 surviving levels.  The original instruction stays in `op`."""
+    from multiprocessing import Pool
+    with Pool(32) as pool:
+        dev = dict(pool.map(_deviation, [(r["seed"], r["name"]) for r in rows], chunksize=8))
+    by = {}
+    for r in rows:
+        by.setdefault(r["tuple_id"], []).append(r)
+    out, n_reordered = [], 0
+    for tid, rs in by.items():
+        rs = sorted((r for r in rs if dev[r["name"]] >= min_dev), key=lambda r: dev[r["name"]])
+        kept = []
+        for r in rs:
+            if not kept or dev[r["name"]] >= min_ratio * dev[kept[-1]["name"]]:
+                kept.append(r)
+        if len(kept) < 2:
+            continue
+        n_reordered += [r["op"] for r in kept] != sorted(r["op"] for r in kept)
+        for lv, r in enumerate(kept, start=1):
+            out.append(dict(r, level=lv))
+    print(f"[overgen] relevel: {len(by)} tuples -> {len(out)} images in {len({r['tuple_id'] for r in out})} tuples "
+          f"({n_reordered} re-ordered by measured deviation)")
+    return out
+
+
 def merge():
     """Run once after all ranks finish: folds the per-rank row files into the manifest."""
     rows = []
@@ -128,6 +173,8 @@ def merge():
             with open(os.path.join(AUX_IMG, fn), encoding="utf-8") as f:
                 rows += [json.loads(x) for x in f if x.strip()]
     rows = [r for r in rows if os.path.exists(os.path.join(AUX_IMG, r["name"]))]
+    rows = list({r["name"]: r for r in rows}.values())
+    rows = relevel(rows)
     print(f"[overgen] merged {append_manifest(rows)} new rows into the manifest")
 
 

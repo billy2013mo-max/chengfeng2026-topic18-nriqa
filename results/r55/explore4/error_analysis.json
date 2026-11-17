@@ -1,0 +1,1607 @@
+{
+ "reference": {
+  "all": {
+   "total": 51.347,
+   "pos": 15.487,
+   "p0": 16.25,
+   "clean": 19.61
+  },
+  "orig": {
+   "total": 52.11,
+   "pos": 15.837,
+   "p0": 16.663,
+   "clean": 19.61
+  },
+  "supp": {
+   "total": 51.048,
+   "pos": 15.134,
+   "p0": 15.914,
+   "clean": 20.0
+  }
+ },
+ "per_label": [
+  {
+   "label": "模糊_P2",
+   "n_gold": 649,
+   "n_pred": 623,
+   "tp": 310,
+   "fp": 313,
+   "fn": 339,
+   "P": 0.498,
+   "R": 0.478,
+   "F1": 0.487,
+   "loss_pos": 0.915,
+   "loss_p0": 0.0,
+   "loss": 0.915
+  },
+  {
+   "label": "模糊_P1",
+   "n_gold": 499,
+   "n_pred": 371,
+   "tp": 209,
+   "fp": 162,
+   "fn": 290,
+   "P": 0.563,
+   "R": 0.419,
+   "F1": 0.48,
+   "loss_pos": 0.928,
+   "loss_p0": 0.0,
+   "loss": 0.928
+  },
+  {
+   "label": "模糊_P0",
+   "n_gold": 563,
+   "n_pred": 639,
+   "tp": 492,
+   "fp": 147,
+   "fn": 71,
+   "P": 0.77,
+   "R": 0.874,
+   "F1": 0.819,
+   "loss_pos": 0.324,
+   "loss_p0": 0.545,
+   "loss": 0.869
+  },
+  {
+   "label": "纹理损失_P2",
+   "n_gold": 1003,
+   "n_pred": 843,
+   "tp": 607,
+   "fp": 236,
+   "fn": 396,
+   "P": 0.72,
+   "R": 0.605,
+   "F1": 0.658,
+   "loss_pos": 0.611,
+   "loss_p0": 0.0,
+   "loss": 0.611
+  },
+  {
+   "label": "纹理损失_P1",
+   "n_gold": 1038,
+   "n_pred": 1179,
+   "tp": 749,
+   "fp": 430,
+   "fn": 289,
+   "P": 0.635,
+   "R": 0.722,
+   "F1": 0.676,
+   "loss_pos": 0.579,
+   "loss_p0": 0.0,
+   "loss": 0.579
+  },
+  {
+   "label": "纹理损失_P0",
+   "n_gold": 762,
+   "n_pred": 750,
+   "tp": 609,
+   "fp": 141,
+   "fn": 153,
+   "P": 0.812,
+   "R": 0.799,
+   "F1": 0.806,
+   "loss_pos": 0.347,
+   "loss_p0": 0.654,
+   "loss": 1.002
+  },
+  {
+   "label": "过锐_P2",
+   "n_gold": 730,
+   "n_pred": 761,
+   "tp": 411,
+   "fp": 350,
+   "fn": 319,
+   "P": 0.54,
+   "R": 0.563,
+   "F1": 0.551,
+   "loss_pos": 0.801,
+   "loss_p0": 0.0,
+   "loss": 0.801
+  },
+  {
+   "label": "过锐_P1",
+   "n_gold": 328,
+   "n_pred": 255,
+   "tp": 136,
+   "fp": 119,
+   "fn": 192,
+   "P": 0.533,
+   "R": 0.415,
+   "F1": 0.467,
+   "loss_pos": 0.953,
+   "loss_p0": 0.0,
+   "loss": 0.953
+  },
+  {
+   "label": "过锐_P0",
+   "n_gold": 225,
+   "n_pred": 217,
+   "tp": 167,
+   "fp": 50,
+   "fn": 58,
+   "P": 0.77,
+   "R": 0.742,
+   "F1": 0.756,
+   "loss_pos": 0.436,
+   "loss_p0": 0.828,
+   "loss": 1.264
+  },
+  {
+   "label": "花屏_P0",
+   "n_gold": 213,
+   "n_pred": 216,
+   "tp": 210,
+   "fp": 6,
+   "fn": 3,
+   "P": 0.972,
+   "R": 0.986,
+   "F1": 0.979,
+   "loss_pos": 0.037,
+   "loss_p0": 0.063,
+   "loss": 0.1
+  },
+  {
+   "label": "过度生成_P2",
+   "n_gold": 276,
+   "n_pred": 204,
+   "tp": 82,
+   "fp": 122,
+   "fn": 194,
+   "P": 0.402,
+   "R": 0.297,
+   "F1": 0.342,
+   "loss_pos": 1.176,
+   "loss_p0": 0.0,
+   "loss": 1.176
+  },
+  {
+   "label": "过度生成_P1",
+   "n_gold": 218,
+   "n_pred": 92,
+   "tp": 37,
+   "fp": 55,
+   "fn": 181,
+   "P": 0.402,
+   "R": 0.17,
+   "F1": 0.239,
+   "loss_pos": 1.359,
+   "loss_p0": 0.0,
+   "loss": 1.359
+  },
+  {
+   "label": "过度生成_P0",
+   "n_gold": 190,
+   "n_pred": 303,
+   "tp": 150,
+   "fp": 153,
+   "fn": 40,
+   "P": 0.495,
+   "R": 0.789,
+   "F1": 0.609,
+   "loss_pos": 0.699,
+   "loss_p0": 1.079,
+   "loss": 1.778
+  },
+  {
+   "label": "虚化突兀_P0",
+   "n_gold": 225,
+   "n_pred": 259,
+   "tp": 195,
+   "fp": 64,
+   "fn": 30,
+   "P": 0.753,
+   "R": 0.867,
+   "F1": 0.806,
+   "loss_pos": 0.347,
+   "loss_p0": 0.581,
+   "loss": 0.928
+  }
+ ],
+ "per_label_loss_ci": {
+  "模糊_P2": [
+   0.862,
+   0.986
+  ],
+  "模糊_P1": [
+   0.859,
+   1.013
+  ],
+  "模糊_P0": [
+   0.752,
+   0.99
+  ],
+  "纹理损失_P2": [
+   0.567,
+   0.654
+  ],
+  "纹理损失_P1": [
+   0.541,
+   0.616
+  ],
+  "纹理损失_P0": [
+   0.878,
+   1.114
+  ],
+  "过锐_P2": [
+   0.744,
+   0.864
+  ],
+  "过锐_P1": [
+   0.873,
+   1.042
+  ],
+  "过锐_P0": [
+   1.047,
+   1.506
+  ],
+  "花屏_P0": [
+   0.044,
+   0.171
+  ],
+  "过度生成_P2": [
+   1.097,
+   1.269
+  ],
+  "过度生成_P1": [
+   1.246,
+   1.472
+  ],
+  "过度生成_P0": [
+   1.529,
+   2.021
+  ],
+  "虚化突兀_P0": [
+   0.736,
+   1.131
+  ]
+ },
+ "per_dim_loss": {
+  "模糊": 2.712,
+  "纹理损失": 2.192,
+  "过锐": 3.018,
+  "花屏": 0.1,
+  "过度生成": 4.313,
+  "虚化突兀": 0.928
+ },
+ "oracle_substitution": {
+  "dim_perfect:模糊": {
+   "gain": 2.751,
+   "total": 54.098,
+   "pos": 17.654,
+   "p0": 16.795,
+   "clean": 19.649
+  },
+  "dim_perfect:纹理损失": {
+   "gain": 2.426,
+   "total": 53.773,
+   "pos": 17.025,
+   "p0": 16.904,
+   "clean": 19.844
+  },
+  "dim_perfect:过锐": {
+   "gain": 3.018,
+   "total": 54.365,
+   "pos": 17.677,
+   "p0": 17.078,
+   "clean": 19.61
+  },
+  "dim_perfect:花屏": {
+   "gain": 0.1,
+   "total": 51.447,
+   "pos": 15.524,
+   "p0": 16.313,
+   "clean": 19.61
+  },
+  "dim_perfect:过度生成": {
+   "gain": 4.313,
+   "total": 55.66,
+   "pos": 18.721,
+   "p0": 17.329,
+   "clean": 19.61
+  },
+  "dim_perfect:虚化突兀": {
+   "gain": 0.928,
+   "total": 52.275,
+   "pos": 15.834,
+   "p0": 16.831,
+   "clean": 19.61
+  },
+  "label_perfect:模糊_P2": {
+   "gain": 1.605,
+   "total": 52.952,
+   "pos": 16.963,
+   "p0": 16.34,
+   "clean": 19.649
+  },
+  "label_perfect:模糊_P1": {
+   "gain": 1.89,
+   "total": 53.236,
+   "pos": 16.969,
+   "p0": 16.657,
+   "clean": 19.61
+  },
+  "label_perfect:模糊_P0": {
+   "gain": 1.301,
+   "total": 52.648,
+   "pos": 16.243,
+   "p0": 16.795,
+   "clean": 19.61
+  },
+  "label_perfect:纹理损失_P2": {
+   "gain": 1.203,
+   "total": 52.55,
+   "pos": 16.429,
+   "p0": 16.276,
+   "clean": 19.844
+  },
+  "label_perfect:纹理损失_P1": {
+   "gain": 1.88,
+   "total": 53.227,
+   "pos": 16.777,
+   "p0": 16.84,
+   "clean": 19.61
+  },
+  "label_perfect:纹理损失_P0": {
+   "gain": 1.222,
+   "total": 52.569,
+   "pos": 16.055,
+   "p0": 16.904,
+   "clean": 19.61
+  },
+  "label_perfect:过锐_P2": {
+   "gain": 1.667,
+   "total": 53.013,
+   "pos": 16.982,
+   "p0": 16.422,
+   "clean": 19.61
+  },
+  "label_perfect:过锐_P1": {
+   "gain": 2.115,
+   "total": 53.462,
+   "pos": 16.977,
+   "p0": 16.875,
+   "clean": 19.61
+  },
+  "label_perfect:过锐_P0": {
+   "gain": 1.542,
+   "total": 52.889,
+   "pos": 16.201,
+   "p0": 17.078,
+   "clean": 19.61
+  },
+  "label_perfect:花屏_P0": {
+   "gain": 0.1,
+   "total": 51.447,
+   "pos": 15.524,
+   "p0": 16.313,
+   "clean": 19.61
+  },
+  "label_perfect:过度生成_P2": {
+   "gain": 2.171,
+   "total": 53.518,
+   "pos": 17.353,
+   "p0": 16.554,
+   "clean": 19.61
+  },
+  "label_perfect:过度生成_P1": {
+   "gain": 2.502,
+   "total": 53.849,
+   "pos": 17.487,
+   "p0": 16.752,
+   "clean": 19.61
+  },
+  "label_perfect:过度生成_P0": {
+   "gain": 2.814,
+   "total": 54.16,
+   "pos": 17.221,
+   "p0": 17.329,
+   "clean": 19.61
+  },
+  "label_perfect:虚化突兀_P0": {
+   "gain": 0.928,
+   "total": 52.275,
+   "pos": 15.834,
+   "p0": 16.831,
+   "clean": 19.61
+  },
+  "clean_rows_perfect": {
+   "gain": 0.402,
+   "total": 51.749,
+   "pos": 15.496,
+   "p0": 16.253,
+   "clean": 20.0
+  },
+  "metric_F1=1:模糊_P2": {
+   "gain": 0.915
+  },
+  "metric_F1=1:模糊_P1": {
+   "gain": 0.928
+  },
+  "metric_F1=1:模糊_P0": {
+   "gain": 0.869
+  },
+  "metric_F1=1:纹理损失_P2": {
+   "gain": 0.611
+  },
+  "metric_F1=1:纹理损失_P1": {
+   "gain": 0.579
+  },
+  "metric_F1=1:纹理损失_P0": {
+   "gain": 1.002
+  },
+  "metric_F1=1:过锐_P2": {
+   "gain": 0.801
+  },
+  "metric_F1=1:过锐_P1": {
+   "gain": 0.953
+  },
+  "metric_F1=1:过锐_P0": {
+   "gain": 1.264
+  },
+  "metric_F1=1:花屏_P0": {
+   "gain": 0.1
+  },
+  "metric_F1=1:过度生成_P2": {
+   "gain": 1.176
+  },
+  "metric_F1=1:过度生成_P1": {
+   "gain": 1.359
+  },
+  "metric_F1=1:过度生成_P0": {
+   "gain": 1.778
+  },
+  "metric_F1=1:虚化突兀_P0": {
+   "gain": 0.928
+  }
+ },
+ "confusion": {
+  "模糊": {
+   "cm": [
+    [
+     1679,
+     157,
+     13,
+     13
+    ],
+    [
+     222,
+     310,
+     96,
+     21
+    ],
+    [
+     35,
+     142,
+     209,
+     113
+    ],
+    [
+     4,
+     14,
+     53,
+     492
+    ]
+   ],
+   "det_fp": 183,
+   "det_fn": 261,
+   "det_tp": 1450,
+   "det_F1": 0.867,
+   "grade_err": 439,
+   "off1": 404,
+   "off2": 35,
+   "over_graded": 230,
+   "under_graded": 209,
+   "grade_acc_given_detected": 0.697
+  },
+  "纹理损失": {
+   "cm": [
+    [
+     643,
+     80,
+     32,
+     15
+    ],
+    [
+     131,
+     607,
+     254,
+     11
+    ],
+    [
+     22,
+     152,
+     749,
+     115
+    ],
+    [
+     5,
+     4,
+     144,
+     609
+    ]
+   ],
+   "det_fp": 127,
+   "det_fn": 158,
+   "det_tp": 2645,
+   "det_F1": 0.949,
+   "grade_err": 680,
+   "off1": 665,
+   "off2": 15,
+   "over_graded": 380,
+   "under_graded": 300,
+   "grade_acc_given_detected": 0.743
+  },
+  "过锐": {
+   "cm": [
+    [
+     2061,
+     211,
+     16,
+     2
+    ],
+    [
+     252,
+     411,
+     62,
+     5
+    ],
+    [
+     24,
+     125,
+     136,
+     43
+    ],
+    [
+     3,
+     14,
+     41,
+     167
+    ]
+   ],
+   "det_fp": 229,
+   "det_fn": 279,
+   "det_tp": 1004,
+   "det_F1": 0.798,
+   "grade_err": 290,
+   "off1": 271,
+   "off2": 19,
+   "over_graded": 110,
+   "under_graded": 180,
+   "grade_acc_given_detected": 0.711
+  },
+  "花屏": {
+   "cm": [
+    [
+     3354,
+     0,
+     0,
+     6
+    ],
+    [
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     3,
+     0,
+     0,
+     210
+    ]
+   ],
+   "det_fp": 6,
+   "det_fn": 3,
+   "det_tp": 210,
+   "det_F1": 0.979,
+   "grade_err": 0,
+   "off1": 0,
+   "off2": 0,
+   "over_graded": 0,
+   "under_graded": 0,
+   "grade_acc_given_detected": 1.0
+  },
+  "过度生成": {
+   "cm": [
+    [
+     2809,
+     56,
+     5,
+     19
+    ],
+    [
+     124,
+     82,
+     35,
+     35
+    ],
+    [
+     33,
+     49,
+     37,
+     99
+    ],
+    [
+     8,
+     17,
+     15,
+     150
+    ]
+   ],
+   "det_fp": 80,
+   "det_fn": 165,
+   "det_tp": 519,
+   "det_F1": 0.809,
+   "grade_err": 250,
+   "off1": 198,
+   "off2": 52,
+   "over_graded": 169,
+   "under_graded": 81,
+   "grade_acc_given_detected": 0.518
+  },
+  "虚化突兀": {
+   "cm": [
+    [
+     3284,
+     0,
+     0,
+     64
+    ],
+    [
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     30,
+     0,
+     0,
+     195
+    ]
+   ],
+   "det_fp": 64,
+   "det_fn": 30,
+   "det_tp": 195,
+   "det_F1": 0.806,
+   "grade_err": 0,
+   "off1": 0,
+   "off2": 0,
+   "over_graded": 0,
+   "under_graded": 0,
+   "grade_acc_given_detected": 1.0
+  }
+ },
+ "headroom": {
+  "nested": {
+   "total": 51.347,
+   "pos": 15.487,
+   "p0": 16.25,
+   "clean": 19.61
+  },
+  "a_decoder_insample": {
+   "total": 51.845,
+   "pos": 15.746,
+   "p0": 16.411,
+   "clean": 19.688
+  },
+  "b_perfect_detection_model_grading": {
+   "total": 54.89,
+   "pos": 17.895,
+   "p0": 16.995,
+   "clean": 20.0
+  },
+  "c_model_detection_perfect_grading": {
+   "total": 60.669,
+   "pos": 22.024,
+   "p0": 19.035,
+   "clean": 19.61
+  },
+  "b_detect_perfect:模糊": {
+   "total": 51.946,
+   "pos": 16.03,
+   "p0": 16.266,
+   "clean": 19.649
+  },
+  "c_grade_perfect:模糊": {
+   "total": 53.353,
+   "pos": 16.99,
+   "p0": 16.753,
+   "clean": 19.61
+  },
+  "b_detect_perfect:纹理损失": {
+   "total": 51.827,
+   "pos": 15.713,
+   "p0": 16.27,
+   "clean": 19.844
+  },
+  "c_grade_perfect:纹理损失": {
+   "total": 53.24,
+   "pos": 16.762,
+   "p0": 16.867,
+   "clean": 19.61
+  },
+  "b_detect_perfect:过锐": {
+   "total": 51.919,
+   "pos": 16.051,
+   "p0": 16.258,
+   "clean": 19.61
+  },
+  "c_grade_perfect:过锐": {
+   "total": 53.613,
+   "pos": 16.964,
+   "p0": 17.038,
+   "clean": 19.61
+  },
+  "b_detect_perfect:花屏": {
+   "total": 51.447,
+   "pos": 15.524,
+   "p0": 16.313,
+   "clean": 19.61
+  },
+  "b_detect_perfect:过度生成": {
+   "total": 52.094,
+   "pos": 16.177,
+   "p0": 16.307,
+   "clean": 19.61
+  },
+  "c_grade_perfect:过度生成": {
+   "total": 54.504,
+   "pos": 17.767,
+   "p0": 17.127,
+   "clean": 19.61
+  },
+  "b_detect_perfect:虚化突兀": {
+   "total": 52.275,
+   "pos": 15.834,
+   "p0": 16.831,
+   "clean": 19.61
+  }
+ },
+ "headroom_ci": {
+  "a_minus_nested": [
+   0.285,
+   0.717
+  ],
+  "b_minus_nested": [
+   3.199,
+   3.939
+  ],
+  "c_minus_nested": [
+   8.862,
+   9.878
+  ]
+ },
+ "clean": {
+  "n": 513,
+  "pred_any_defect": 10,
+  "pred_any_p0": 1,
+  "by_dim": {
+   "模糊": {
+    "any": 2,
+    "p0": 1,
+    "only_this": 1
+   },
+   "纹理损失": {
+    "any": 9,
+    "p0": 1,
+    "only_this": 6
+   },
+   "过锐": {
+    "any": 2,
+    "p0": 0,
+    "only_this": 0
+   },
+   "花屏": {
+    "any": 0,
+    "p0": 0,
+    "only_this": 0
+   },
+   "过度生成": {
+    "any": 0,
+    "p0": 0,
+    "only_this": 0
+   },
+   "虚化突兀": {
+    "any": 0,
+    "p0": 0,
+    "only_this": 0
+   }
+  },
+  "pred_all_clean": 591,
+  "pred_clean_but_defective": 88
+ },
+ "batch_ci": {
+  "orig_total": [
+   51.221,
+   52.899
+  ],
+  "supp_total": [
+   50.289,
+   51.693
+  ],
+  "supp_pos": [
+   14.767,
+   15.539
+  ],
+  "orig_pos": [
+   15.372,
+   16.269
+  ],
+  "supp_p0": [
+   15.468,
+   16.315
+  ],
+  "orig_p0": [
+   16.18,
+   17.055
+  ]
+ },
+ "batch_labels": [
+  {
+   "prev_o": 0.1272,
+   "TPR_o": 0.4628,
+   "FPR_o": 0.0861,
+   "F1_o": 0.4507,
+   "prev_s": 0.2436,
+   "TPR_s": 0.4865,
+   "FPR_s": 0.1345,
+   "F1_s": 0.511,
+   "prev_all": 0.1816,
+   "TPR_all": 0.4777,
+   "FPR_all": 0.107,
+   "F1_all": 0.4874,
+   "F1_allacc_origprev": 0.4319,
+   "label": "模糊_P2"
+  },
+  {
+   "prev_o": 0.1083,
+   "TPR_o": 0.3835,
+   "FPR_o": 0.0236,
+   "F1_o": 0.4862,
+   "prev_s": 0.1753,
+   "TPR_s": 0.4437,
+   "FPR_s": 0.0885,
+   "F1_s": 0.4771,
+   "prev_all": 0.1397,
+   "TPR_all": 0.4188,
+   "FPR_all": 0.0527,
+   "F1_all": 0.4805,
+   "F1_allacc_origprev": 0.4521,
+   "label": "模糊_P1"
+  },
+  {
+   "prev_o": 0.1451,
+   "TPR_o": 0.9167,
+   "FPR_o": 0.0246,
+   "F1_o": 0.8893,
+   "prev_s": 0.1718,
+   "TPR_s": 0.8328,
+   "FPR_s": 0.0773,
+   "F1_s": 0.7551,
+   "prev_all": 0.1576,
+   "TPR_all": 0.8739,
+   "FPR_all": 0.0488,
+   "F1_all": 0.8186,
+   "F1_allacc_origprev": 0.8086,
+   "label": "模糊_P0"
+  },
+  {
+   "prev_o": 0.2408,
+   "TPR_o": 0.5786,
+   "FPR_o": 0.1094,
+   "F1_o": 0.6016,
+   "prev_s": 0.3262,
+   "TPR_s": 0.6275,
+   "FPR_s": 0.0693,
+   "F1_s": 0.7088,
+   "prev_all": 0.2807,
+   "TPR_all": 0.6052,
+   "FPR_all": 0.0918,
+   "F1_all": 0.6576,
+   "F1_allacc_origprev": 0.6388,
+   "label": "纹理损失_P2"
+  },
+  {
+   "prev_o": 0.2266,
+   "TPR_o": 0.7169,
+   "FPR_o": 0.1468,
+   "F1_o": 0.6464,
+   "prev_s": 0.3633,
+   "TPR_s": 0.7249,
+   "FPR_s": 0.2011,
+   "F1_s": 0.6979,
+   "prev_all": 0.2905,
+   "TPR_all": 0.7216,
+   "FPR_all": 0.1696,
+   "F1_all": 0.6757,
+   "F1_allacc_origprev": 0.6273,
+   "label": "纹理损失_P1"
+  },
+  {
+   "prev_o": 0.1803,
+   "TPR_o": 0.8309,
+   "FPR_o": 0.0263,
+   "F1_o": 0.852,
+   "prev_s": 0.2507,
+   "TPR_s": 0.7733,
+   "FPR_s": 0.0799,
+   "F1_s": 0.7687,
+   "prev_all": 0.2133,
+   "TPR_all": 0.7992,
+   "FPR_all": 0.0502,
+   "F1_all": 0.8056,
+   "F1_allacc_origprev": 0.7885,
+   "label": "纹理损失_P0"
+  },
+  {
+   "prev_o": 0.1467,
+   "TPR_o": 0.7276,
+   "FPR_o": 0.114,
+   "F1_o": 0.6087,
+   "prev_s": 0.2699,
+   "TPR_s": 0.4612,
+   "FPR_s": 0.1352,
+   "F1_s": 0.5049,
+   "prev_all": 0.2043,
+   "TPR_all": 0.563,
+   "FPR_all": 0.1231,
+   "F1_all": 0.5513,
+   "F1_allacc_origprev": 0.4941,
+   "label": "过锐_P2"
+  },
+  {
+   "prev_o": 0.0889,
+   "TPR_o": 0.4142,
+   "FPR_o": 0.0306,
+   "F1_o": 0.4795,
+   "prev_s": 0.0952,
+   "TPR_s": 0.4151,
+   "FPR_s": 0.0437,
+   "F1_s": 0.4536,
+   "prev_all": 0.0918,
+   "TPR_all": 0.4146,
+   "FPR_all": 0.0367,
+   "F1_all": 0.4666,
+   "F1_allacc_origprev": 0.4631,
+   "label": "过锐_P1"
+  },
+  {
+   "prev_o": 0.0589,
+   "TPR_o": 0.7679,
+   "FPR_o": 0.0156,
+   "F1_o": 0.7611,
+   "prev_s": 0.0676,
+   "TPR_s": 0.7168,
+   "FPR_s": 0.0141,
+   "F1_s": 0.75,
+   "prev_all": 0.063,
+   "TPR_all": 0.7422,
+   "FPR_all": 0.0149,
+   "F1_all": 0.7557,
+   "F1_allacc_origprev": 0.7494,
+   "label": "过锐_P0"
+  },
+  {
+   "prev_o": 0.0573,
+   "TPR_o": 0.9817,
+   "FPR_o": 0.0006,
+   "F1_o": 0.9862,
+   "prev_s": 0.0622,
+   "TPR_s": 0.9904,
+   "FPR_s": 0.0032,
+   "F1_s": 0.9717,
+   "prev_all": 0.0596,
+   "TPR_all": 0.9859,
+   "FPR_all": 0.0018,
+   "F1_all": 0.979,
+   "F1_allacc_origprev": 0.9784,
+   "label": "花屏_P0"
+  },
+  {
+   "prev_o": 0.0783,
+   "TPR_o": 0.349,
+   "FPR_o": 0.0434,
+   "F1_o": 0.3755,
+   "prev_s": 0.076,
+   "TPR_s": 0.2362,
+   "FPR_s": 0.0298,
+   "F1_s": 0.2956,
+   "prev_all": 0.0772,
+   "TPR_all": 0.2971,
+   "FPR_all": 0.037,
+   "F1_all": 0.3417,
+   "F1_allacc_origprev": 0.343,
+   "label": "过度生成_P2"
+  },
+  {
+   "prev_o": 0.0594,
+   "TPR_o": 0.1947,
+   "FPR_o": 0.0117,
+   "F1_o": 0.2821,
+   "prev_s": 0.0628,
+   "TPR_s": 0.1429,
+   "FPR_s": 0.0217,
+   "F1_s": 0.1948,
+   "prev_all": 0.061,
+   "TPR_all": 0.1697,
+   "FPR_all": 0.0164,
+   "F1_all": 0.2387,
+   "F1_allacc_origprev": 0.2375,
+   "label": "过度生成_P1"
+  },
+  {
+   "prev_o": 0.0473,
+   "TPR_o": 0.7,
+   "FPR_o": 0.0276,
+   "F1_o": 0.6207,
+   "prev_s": 0.0598,
+   "TPR_s": 0.87,
+   "FPR_s": 0.0656,
+   "F1_s": 0.6,
+   "prev_all": 0.0532,
+   "TPR_all": 0.7895,
+   "FPR_all": 0.0452,
+   "F1_all": 0.6085,
+   "F1_allacc_origprev": 0.5848,
+   "label": "过度生成_P0"
+  },
+  {
+   "prev_o": 0.0526,
+   "TPR_o": 0.92,
+   "FPR_o": 0.0166,
+   "F1_o": 0.8288,
+   "prev_s": 0.0748,
+   "TPR_s": 0.824,
+   "FPR_s": 0.022,
+   "F1_s": 0.7863,
+   "prev_all": 0.063,
+   "TPR_all": 0.8667,
+   "FPR_all": 0.0191,
+   "F1_all": 0.8058,
+   "F1_allacc_origprev": 0.7839,
+   "label": "虚化突兀_P0"
+  }
+ ],
+ "batch_pos_decomp": {
+  "diff": 0.35,
+  "prevalence": -0.52,
+  "accuracy": 0.87
+ },
+ "batch_p0": {
+  "all": {
+   "R": 0.8429,
+   "P": 0.762,
+   "F1": 0.7955
+  },
+  "orig": {
+   "R": 0.8528,
+   "P": 0.7991,
+   "F1": 0.823
+  },
+  "supp": {
+   "R": 0.8345,
+   "P": 0.7341,
+   "F1": 0.772
+  }
+ },
+ "tags": {
+  "timestamp": {
+   "n": 1066,
+   "n_orig": 790,
+   "n_clean": 388,
+   "any_wrong": 0.334,
+   "dims_wrong": 0.545,
+   "oracle_gain": 3.07,
+   "gain_per_100": 0.288,
+   "sub_score": 43.61
+  },
+  "v8L3HiV6": {
+   "n": 515,
+   "n_orig": 125,
+   "n_clean": 0,
+   "any_wrong": 0.715,
+   "dims_wrong": 1.229,
+   "oracle_gain": 2.681,
+   "gain_per_100": 0.521,
+   "sub_score": 45.94
+  },
+  "v8SlHiV4": {
+   "n": 508,
+   "n_orig": 19,
+   "n_clean": 5,
+   "any_wrong": 0.632,
+   "dims_wrong": 0.89,
+   "oracle_gain": 1.461,
+   "gain_per_100": 0.288,
+   "sub_score": 34.29
+  },
+  "other_untagged": {
+   "n": 488,
+   "n_orig": 376,
+   "n_clean": 18,
+   "any_wrong": 0.635,
+   "dims_wrong": 0.988,
+   "oracle_gain": 1.957,
+   "gain_per_100": 0.401,
+   "sub_score": 49.09
+  },
+  "cn_defectword": {
+   "n": 277,
+   "n_orig": 0,
+   "n_clean": 0,
+   "any_wrong": 0.747,
+   "dims_wrong": 1.181,
+   "oracle_gain": 1.277,
+   "gain_per_100": 0.461,
+   "sub_score": 45.12
+  },
+  "v7L3HiV2": {
+   "n": 170,
+   "n_orig": 170,
+   "n_clean": 0,
+   "any_wrong": 0.776,
+   "dims_wrong": 1.512,
+   "oracle_gain": 1.469,
+   "gain_per_100": 0.864,
+   "sub_score": 45.77
+  },
+  "v8L3HiV1": {
+   "n": 124,
+   "n_orig": 124,
+   "n_clean": 0,
+   "any_wrong": 0.742,
+   "dims_wrong": 1.266,
+   "oracle_gain": 0.555,
+   "gain_per_100": 0.447,
+   "sub_score": 32.82
+  },
+  "v8MdHiV4": {
+   "n": 84,
+   "n_orig": 0,
+   "n_clean": 0,
+   "any_wrong": 0.536,
+   "dims_wrong": 0.833,
+   "oracle_gain": 0.269,
+   "gain_per_100": 0.32,
+   "sub_score": 42.39
+  },
+  "stock_jpg": {
+   "n": 77,
+   "n_orig": 77,
+   "n_clean": 76,
+   "any_wrong": 0.013,
+   "dims_wrong": 0.026,
+   "oracle_gain": 0.003,
+   "gain_per_100": 0.004,
+   "sub_score": 20.0
+  },
+  "v8L3HiV9": {
+   "n": 55,
+   "n_orig": 55,
+   "n_clean": 9,
+   "any_wrong": 0.691,
+   "dims_wrong": 1.2,
+   "oracle_gain": 0.403,
+   "gain_per_100": 0.732,
+   "sub_score": 27.36
+  },
+  "v8L3HiVE": {
+   "n": 43,
+   "n_orig": 0,
+   "n_clean": 0,
+   "any_wrong": 0.605,
+   "dims_wrong": 0.953,
+   "oracle_gain": 0.268,
+   "gain_per_100": 0.623,
+   "sub_score": 31.7
+  },
+  "v8L3UtV9": {
+   "n": 38,
+   "n_orig": 38,
+   "n_clean": 13,
+   "any_wrong": 0.579,
+   "dims_wrong": 1.132,
+   "oracle_gain": 0.203,
+   "gain_per_100": 0.534,
+   "sub_score": null
+  },
+  "v8L3UtV1": {
+   "n": 25,
+   "n_orig": 25,
+   "n_clean": 0,
+   "any_wrong": 0.68,
+   "dims_wrong": 0.88,
+   "oracle_gain": 0.052,
+   "gain_per_100": 0.206,
+   "sub_score": null
+  },
+  "v8L3MiV9": {
+   "n": 25,
+   "n_orig": 25,
+   "n_clean": 2,
+   "any_wrong": 0.72,
+   "dims_wrong": 1.12,
+   "oracle_gain": 0.094,
+   "gain_per_100": 0.375,
+   "sub_score": null
+  },
+  "v8MdHiV1": {
+   "n": 20,
+   "n_orig": 20,
+   "n_clean": 0,
+   "any_wrong": 0.7,
+   "dims_wrong": 1.0,
+   "oracle_gain": 0.064,
+   "gain_per_100": 0.318,
+   "sub_score": null
+  },
+  "v7L3UtV2": {
+   "n": 12,
+   "n_orig": 12,
+   "n_clean": 0,
+   "any_wrong": 0.417,
+   "dims_wrong": 0.667,
+   "oracle_gain": 0.033,
+   "gain_per_100": 0.274,
+   "sub_score": null
+  },
+  "v8SlHiV1": {
+   "n": 10,
+   "n_orig": 10,
+   "n_clean": 0,
+   "any_wrong": 0.7,
+   "dims_wrong": 1.0,
+   "oracle_gain": 0.045,
+   "gain_per_100": 0.452,
+   "sub_score": null
+  },
+  "v7L3UtV3": {
+   "n": 6,
+   "n_orig": 6,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 1.833,
+   "oracle_gain": 0.058,
+   "gain_per_100": 0.964,
+   "sub_score": null
+  },
+  "v8L3UtV4": {
+   "n": 6,
+   "n_orig": 6,
+   "n_clean": 2,
+   "any_wrong": 0.5,
+   "dims_wrong": 0.833,
+   "oracle_gain": 0.014,
+   "gain_per_100": 0.24,
+   "sub_score": null
+  },
+  "v7L3UmV2": {
+   "n": 5,
+   "n_orig": 5,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 1.6,
+   "oracle_gain": 0.037,
+   "gain_per_100": 0.741,
+   "sub_score": null
+  },
+  "v8L2HiV2": {
+   "n": 5,
+   "n_orig": 5,
+   "n_clean": 0,
+   "any_wrong": 0.4,
+   "dims_wrong": 0.4,
+   "oracle_gain": 0.012,
+   "gain_per_100": 0.233,
+   "sub_score": null
+  },
+  "v6HMidHQv8": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 0.0,
+   "dims_wrong": 0.0,
+   "oracle_gain": 0.0,
+   "gain_per_100": 0.0,
+   "sub_score": null
+  },
+  "v7L3UmV4": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 1.0,
+   "oracle_gain": 0.006,
+   "gain_per_100": 0.616,
+   "sub_score": null
+  },
+  "v8SlUtV1": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 2.0,
+   "oracle_gain": 0.018,
+   "gain_per_100": 1.8,
+   "sub_score": null
+  },
+  "v8L3HiV3": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 2.0,
+   "oracle_gain": 0.005,
+   "gain_per_100": 0.491,
+   "sub_score": null
+  },
+  "v6UProHQvD": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 0.0,
+   "dims_wrong": 0.0,
+   "oracle_gain": 0.0,
+   "gain_per_100": 0.0,
+   "sub_score": null
+  },
+  "v7L3UtV4": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 1.0,
+   "oracle_gain": 0.001,
+   "gain_per_100": 0.127,
+   "sub_score": null
+  },
+  "v7L3HiV3": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 2.0,
+   "oracle_gain": 0.012,
+   "gain_per_100": 1.205,
+   "sub_score": null
+  },
+  "v7L3UtV1": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 1.0,
+   "oracle_gain": 0.002,
+   "gain_per_100": 0.17,
+   "sub_score": null
+  },
+  "v7L3UtV6": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 1.0,
+   "oracle_gain": 0.005,
+   "gain_per_100": 0.535,
+   "sub_score": null
+  },
+  "v7L3HiV4": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 1.0,
+   "oracle_gain": 0.002,
+   "gain_per_100": 0.212,
+   "sub_score": null
+  },
+  "v7L3HiV6": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 2.0,
+   "oracle_gain": 0.004,
+   "gain_per_100": 0.358,
+   "sub_score": null
+  },
+  "v8L3HiV6A": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 3.0,
+   "oracle_gain": 0.02,
+   "gain_per_100": 1.966,
+   "sub_score": null
+  },
+  "v8L3UtV6": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 2.0,
+   "oracle_gain": 0.004,
+   "gain_per_100": 0.396,
+   "sub_score": null
+  },
+  "v8SlHmV1": {
+   "n": 1,
+   "n_orig": 1,
+   "n_clean": 0,
+   "any_wrong": 1.0,
+   "dims_wrong": 1.0,
+   "oracle_gain": 0.001,
+   "gain_per_100": 0.064,
+   "sub_score": null
+  }
+ },
+ "concentration": {
+  "top": {
+   "10": {
+    "frac_rows": 0.009,
+    "gain": 0.532,
+    "frac_of_gap": 0.039
+   },
+   "25": {
+    "frac_rows": 0.015,
+    "gain": 1.12,
+    "frac_of_gap": 0.082
+   },
+   "50": {
+    "frac_rows": 0.027,
+    "gain": 1.881,
+    "frac_of_gap": 0.138
+   },
+   "100": {
+    "frac_rows": 0.045,
+    "gain": 3.099,
+    "frac_of_gap": 0.227
+   },
+   "200": {
+    "frac_rows": 0.081,
+    "gain": 4.994,
+    "frac_of_gap": 0.366
+   },
+   "400": {
+    "frac_rows": 0.148,
+    "gain": 7.783,
+    "frac_of_gap": 0.57
+   },
+   "800": {
+    "frac_rows": 0.28,
+    "gain": 10.922,
+    "frac_of_gap": 0.8
+   }
+  },
+  "random": [
+   [
+    100,
+    0.449
+   ],
+   [
+    400,
+    1.842
+   ]
+  ],
+  "n_videos": 3136,
+  "top10pct_cells": 0.349
+ },
+ "confident_errors": {
+  "模糊": {
+   "wrong": 883,
+   "wrong_pred_prob_gt_0_8": 144,
+   "wrong_gold_prob_lt_0_1": 178,
+   "det_conf_fn": 115,
+   "det_conf_fp": 65
+  },
+  "纹理损失": {
+   "wrong": 965,
+   "wrong_pred_prob_gt_0_8": 111,
+   "wrong_gold_prob_lt_0_1": 196,
+   "det_conf_fn": 25,
+   "det_conf_fp": 90
+  },
+  "过锐": {
+   "wrong": 798,
+   "wrong_pred_prob_gt_0_8": 125,
+   "wrong_gold_prob_lt_0_1": 165,
+   "det_conf_fn": 116,
+   "det_conf_fp": 61
+  },
+  "花屏": {
+   "wrong": 9,
+   "wrong_pred_prob_gt_0_8": 3,
+   "wrong_gold_prob_lt_0_1": 3,
+   "det_conf_fn": 2,
+   "det_conf_fp": 1
+  },
+  "过度生成": {
+   "wrong": 495,
+   "wrong_pred_prob_gt_0_8": 77,
+   "wrong_gold_prob_lt_0_1": 108,
+   "det_conf_fn": 73,
+   "det_conf_fp": 27
+  },
+  "虚化突兀": {
+   "wrong": 94,
+   "wrong_pred_prob_gt_0_8": 29,
+   "wrong_gold_prob_lt_0_1": 14,
+   "det_conf_fn": 23,
+   "det_conf_fp": 6
+  }
+ },
+ "sibling": {
+  "n_videos": 310,
+  "n_pairs": 700,
+  "agree_all": 0.443,
+  "agree_dim": [
+   0.764,
+   0.646,
+   0.767,
+   1.0,
+   0.857,
+   0.984
+  ],
+  "agree_detect": [
+   0.863,
+   0.903,
+   0.856,
+   1.0,
+   0.95,
+   0.984
+  ],
+  "sib_oracle": {
+   "doc2_strict_total": 46.67874294367705,
+   "doc2_S_pos": 13.650146976548825,
+   "doc2_S_p0": 13.921453109985368,
+   "doc2_Clean2": 19.107142857142854
+  },
+  "model_on_same_rows": {
+   "total": 52.333,
+   "pos": 15.809,
+   "p0": 16.702,
+   "clean": 19.821
+  },
+  "n_rows": 747
+ },
+ "sibling_conf_err": {
+  "conf_err": 86,
+  "sib_match": 45,
+  "all_err": 575,
+  "all_sib_match": 256
+ }
+}

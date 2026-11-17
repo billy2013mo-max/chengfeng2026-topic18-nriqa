@@ -1,0 +1,8 @@
+{
+  "recipe": "ogsr1",
+  "doc": "code/r55/build_overgen_sr.py — SynthLab recipe `ogsr1`: 过度生成 produced by real super-resolution / restoration models. Run with `python3 -I` (the loader library lives in third_party/pydeps_sr; weights in data/r55_aux/raw/sr_weights). Why: 过度生成 is the largest loss (label F1 0.32 / 0.27 / 0.63) and the earlier FLUX re-render ladder was a different phenomenon (models that detect the real defect at AUC 0.96 saw it in 16-25 % of those frames). The labelled defect is what generative enhancement of a weak source looks like, so it is produced here the same way: a labelled frame without 过度生成 is degraded (down-scaled 2-4x, optionally re-compressed) and then restored by a public GAN super-resolution model (Real-ESRGAN x4plus / x2plus, BSRGAN, realesr-general-x4v3) back to its original size. The restored",
+  "seeds": 900,
+  "frames": 1800,
+  "present_unknown_grade": 900,
+  "negatives": 900
+}

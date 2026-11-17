@@ -1,0 +1,9 @@
+{
+  "recipe": "benign1",
+  "doc": "Label-preserving processing: a mild transcode / re-quantisation / tone change does not create or remove a defect. Applied to clean AND defective frames with their human labels unchanged, it tells the model that 'has been through a processing step' is not evidence of a defect (clean frames with a pipeline tag are flagged 19-32 % of the time; unseen pipelines cost ~10 % RPS).",
+  "seeds": 1600,
+  "frames": 1600,
+  "negatives": 1600,
+  "present_unknown_grade": 0,
+  "p0": 0
+}

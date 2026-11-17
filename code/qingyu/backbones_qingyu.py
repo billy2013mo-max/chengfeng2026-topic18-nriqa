@@ -286,7 +286,9 @@ class QingyuVisionQualityTower(nn.Module):
             m = timm.create_model("vit_pe_core_large_patch14_336", pretrained=False, num_classes=0, dynamic_img_size=True)
             m.load_state_dict(load_file(w_path), strict=False)
             dc = timm.data.resolve_data_config({}, model=m)
-            m.tap3 = IntermediateThreeLayerGatedTap(m.blocks, m.embed_dim, tap_indices=[15, 19, 22]).float()
+            # audit 2026-11-14 (P6): QY_PE_TAPS="7,13,19" moves the three gated taps to earlier blocks (default 15,19,22)
+            _taps = [int(x) for x in os.environ.get("QY_PE_TAPS", "15,19,22").split(",")]
+            m.tap3 = IntermediateThreeLayerGatedTap(m.blocks, m.embed_dim, tap_indices=_taps).float()
             m.abmil = TokenGatedABMILPool(m.embed_dim).float()
             self._unfreeze_top_blocks(m, m.blocks, max(unfreeze_last_k, 9))
 

@@ -1,0 +1,102 @@
+{
+  "confusion": {
+    "P0": {
+      "P0": 62,
+      "P1": 107,
+      "P2": 5,
+      "无问题": 1
+    },
+    "P1": {
+      "P0": 66,
+      "P1": 141,
+      "P2": 3,
+      "无问题": 3
+    },
+    "P2": {
+      "P0": 75,
+      "P1": 177,
+      "P2": 16,
+      "无问题": 4
+    },
+    "无问题": {
+      "P0": 0,
+      "P1": 0,
+      "P2": 0,
+      "无问题": 0
+    }
+  },
+  "per_class": {
+    "P0": {
+      "n": 175,
+      "hit": 62,
+      "recall": 0.35428571428571426,
+      "predictions": {
+        "P0": 62,
+        "P1": 107,
+        "P2": 5,
+        "无问题": 1
+      }
+    },
+    "P1": {
+      "n": 213,
+      "hit": 141,
+      "recall": 0.6619718309859155,
+      "predictions": {
+        "P0": 66,
+        "P1": 141,
+        "P2": 3,
+        "无问题": 3
+      }
+    },
+    "P2": {
+      "n": 272,
+      "hit": 16,
+      "recall": 0.058823529411764705,
+      "predictions": {
+        "P0": 75,
+        "P1": 177,
+        "P2": 16,
+        "无问题": 4
+      }
+    },
+    "无问题": {
+      "n": 0,
+      "hit": 0,
+      "recall": 0.0,
+      "predictions": {
+        "P0": 0,
+        "P1": 0,
+        "P2": 0,
+        "无问题": 0
+      }
+    }
+  },
+  "invalid": 24,
+  "exact_hit": 219,
+  "exact_n": 660,
+  "defect_detected": 652,
+  "macro_recall_P0P1P2": 0.35836035822779816,
+  "model": "ep-2bbmni-1794561470122917386",
+  "url": "http://wanqing-prt.internal/api/gateway/v1/endpoints",
+  "images": 684,
+  "elapsed_s": 1698.7,
+  "positive_defect_recall": 0.9878787878787879
+}
+
+
+curl 'http://wanqing-prt.internal/api/gateway/v1/endpoints/chat/completions' \
+-H "Authorization: Bearer dbyywn3c35vdvwgr0uosi69domebs7aeh1rt"  \
+-H 'Content-Type: application/json' \
+-d '{
+    "model": "ep-ke9ljw-1794575112558413277", 
+    "messages": [ 
+        {
+            "role": "system",
+            "content": "你是一个 AI 人工智能助手。"
+        },
+        {
+            "role": "user",
+            "content": "请介绍一下太阳系的八大行星"
+        }
+    ]
+}'

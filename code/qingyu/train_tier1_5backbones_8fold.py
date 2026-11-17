@@ -85,6 +85,9 @@ def load_fold_rows(split_csv: str) -> Tuple[List[Dict[str, object]], List[Dict[s
 
 
 class Tier1DualEngineDataset(Dataset):
+    TILE_CAP_TRAIN = 16          # native_tiles mode (code/r55/native_tiles.py): max tiles per frame while training
+    TILE_GLOBAL = False          # native_tiles mode: also return the whole frame squashed to 448x448
+
     def __init__(
         self,
         rows: Sequence[Dict[str, object]],
@@ -142,6 +145,27 @@ class Tier1DualEngineDataset(Dataset):
         t_tensor = torch.from_numpy(t_prob.copy()) if t_prob is not None else torch.zeros((6, 4), dtype=torch.float32)
         has_t = 1 if t_prob is not None else 0
 
+        if self.mode_tag == "native_tiles":
+            # every pixel at native resolution: 448x448 tiles, stride 448, last row / column aligned to the edge
+            arr = np.asarray(im.convert("RGB"), dtype=np.uint8)
+            H_, W_ = arr.shape[:2]
+            if H_ < 448 or W_ < 448:
+                arr = np.pad(arr, ((0, max(0, 448 - H_)), (0, max(0, 448 - W_)), (0, 0)), mode="edge")
+                H_, W_ = arr.shape[:2]
+
+            def _starts(n):
+                st = list(range(0, n - 448 + 1, 448))
+                return st if st[-1] == n - 448 else st + [n - 448]
+            boxes = [(y, x) for y in _starts(H_) for x in _starts(W_)]
+            if self.train and len(boxes) > self.TILE_CAP_TRAIN:
+                boxes = [boxes[i] for i in sorted(random.sample(range(len(boxes)), self.TILE_CAP_TRAIN))]
+            tiles = torch.from_numpy(np.stack([arr[y:y + 448, x:x + 448] for y, x in boxes]).copy())     # (T, 448, 448, 3) uint8
+            out_t = {"tiles_u8": tiles, "phys": phys, "grades": grades, "ghash": ghash, "name": nm,
+                     "teacher_6x4": t_tensor, "has_teacher": has_t}
+            if self.TILE_GLOBAL:
+                out_t["global_01"] = self._pil_to_chw01(im.resize((448, 448), Image.BICUBIC))
+            return out_t
+
         if self.mode_tag == "naflex_dict":
             # Return PIL views `[global_native, crop_focus_448, crop_meor_448]` for NaFlex processor in collate_fn
             im_nat = resize_native_aspect_pil(im, max_pixels=784 * 256, min_pixels=256 * 256, patch_mult=16)
@@ -175,7 +199,13 @@ class Tier1DualEngineDataset(Dataset):
             }
 
         # Default `multi_crop_448` (ConvNeXtV2-Base & PE-Core-Large & InternViT-6B): global 448 + all 4 1:1 448 crops
-        g_448 = im.resize((448, 448), Image.BICUBIC)
+        if os.environ.get("QY_GLOBAL_LETTERBOX", "0") == "1":    # audit 2026-11-14 (P6): keep the aspect ratio, pad with black
+            sc = 448.0 / max(im.size)
+            g_in = im.resize((max(1, round(im.size[0] * sc)), max(1, round(im.size[1] * sc))), Image.BICUBIC)
+            g_448 = Image.new("RGB", (448, 448))
+            g_448.paste(g_in, ((448 - g_in.size[0]) // 2, (448 - g_in.size[1]) // 2))
+        else:
+            g_448 = im.resize((448, 448), Image.BICUBIC)
         views = [g_448] + [extract_1to1_crop_pil(im, c_boxes[k], 448) for k in range(4)]
         views_t = torch.stack([self._pil_to_chw01(v) for v in views], dim=0)
         return {
@@ -207,6 +237,17 @@ def make_tier1_collate_fn(mode_tag: str, naflex_processor=None, max_num_patches:
                 enc = naflex_processor(images=ims_v, return_tensors="pt", max_num_patches=max_num_patches)
                 naflex_views.append(dict(enc))
             out["naflex_views"] = naflex_views
+        elif mode_tag == "native_tiles":
+            Tm = max(b["tiles_u8"].shape[0] for b in batch)
+            tiles = torch.zeros((len(batch), Tm, 448, 448, 3), dtype=torch.uint8)
+            mask = torch.zeros((len(batch), Tm), dtype=torch.bool)
+            for i, b in enumerate(batch):
+                n = b["tiles_u8"].shape[0]
+                tiles[i, :n] = b["tiles_u8"]
+                mask[i, :n] = True
+            out["tiles_u8"], out["tile_mask"] = tiles, mask
+            if "global_01" in batch[0]:
+                out["global_01"] = torch.stack([b["global_01"] for b in batch], dim=0)
         elif mode_tag == "native_aspect_plus_crops":
             out["nat_global"] = [b["nat_global"].unsqueeze(0) for b in batch]
             out["views_01"] = torch.stack([b["views_01"] for b in batch], dim=0)
@@ -219,6 +260,10 @@ def make_tier1_collate_fn(mode_tag: str, naflex_processor=None, max_num_patches:
 
 def forward_batch_on_device(model: QingyuVisionQualityTower, batch: Dict[str, object], device: torch.device):
     phys = batch["phys"].to(device, non_blocking=True)
+    if model.mode_tag == "native_tiles":
+        tiles = batch["tiles_u8"].to(device, non_blocking=True).permute(0, 1, 4, 2, 3).float() / 255.0     # (B, T, 3, 448, 448)
+        g = batch["global_01"].to(device, non_blocking=True) if "global_01" in batch else None
+        return model(views_01=tiles, phys_feat=phys, tile_mask=batch["tile_mask"].to(device, non_blocking=True), global_01=g)
     if model.mode_tag == "naflex_dict":
         nv = [{k: v.to(device, non_blocking=True) for k, v in d.items()} for d in batch["naflex_views"]]
         return model(phys_feat=phys, naflex_views_list=nv)
