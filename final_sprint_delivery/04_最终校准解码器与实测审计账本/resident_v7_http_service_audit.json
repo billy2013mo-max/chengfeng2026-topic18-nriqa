@@ -1,0 +1,261 @@
+{
+  "decoder": "deconf_v4_tile",
+  "tested_images": [
+    "196160772653_10.03s.png",
+    "137212400938_frame14.png",
+    "164190196424_337.png",
+    "178984587163_v7L3HiV2_4030.png"
+  ],
+  "fastapi": {
+    "backend": "fastapi",
+    "port": 8055,
+    "health_after": {
+      "status": "ok",
+      "set": "resident_v7",
+      "members": [
+        "cradio_v3",
+        "pe_v3",
+        "peg",
+        "sig_v3",
+        "v16",
+        "p3_qy",
+        "ntg_pe",
+        "p12_pe",
+        "p1_qy",
+        "pe_bkseg1",
+        "ntg_convnext"
+      ],
+      "decoder": "deconf_v4_tile",
+      "attribution": true,
+      "load_s": 220.61,
+      "warmup_s": 10.99,
+      "torch_peak_gb": 18.798,
+      "torch_allocated_gb": 15.572,
+      "torch_reserved_gb": 17.684,
+      "nvidia_smi_mib": 117627.3,
+      "nvidia_smi_peak_mib": 118809.3,
+      "params_b": 11.624,
+      "shared_weights_gb": 4.037,
+      "embed_host_gb": 1.159,
+      "requests": 7,
+      "uptime_s": 44.1,
+      "clean_footprint": "results/r55/final/resident_v7_clean_footprint.npz",
+      "pytorch_cuda_alloc_conf": "expandable_segments:True"
+    },
+    "infer_checks": [
+      {
+        "image": "196160772653_10.03s.png",
+        "mode": "image_path",
+        "latency_ms": {
+          "infer": 8876.42,
+          "decode": 4.31,
+          "attr": 0.08,
+          "total": 8927.19,
+          "request": 9031.57
+        },
+        "match": true
+      },
+      {
+        "image": "137212400938_frame14.png",
+        "mode": "image_path",
+        "latency_ms": {
+          "infer": 5036.02,
+          "decode": 4.22,
+          "attr": 585.86,
+          "total": 5643.91,
+          "request": 5644.93
+        },
+        "match": true
+      },
+      {
+        "image": "164190196424_337.png",
+        "mode": "image_base64",
+        "latency_ms": {
+          "infer": 6043.27,
+          "decode": 4.27,
+          "attr": 343.95,
+          "total": 6417.52,
+          "request": 6438.86
+        },
+        "match": true
+      }
+    ],
+    "batch_video_summary": {
+      "video_id": "clip_demo_01",
+      "num_frames": 4,
+      "frames": [
+        "196160772653_10.03s.png",
+        "137212400938_frame14.png",
+        "164190196424_337.png",
+        "178984587163_v7L3HiV2_4030.png"
+      ],
+      "video_label": {
+        "模糊": "P1",
+        "纹理损失": "P0",
+        "过锐": "无问题",
+        "花屏": "P0",
+        "过度生成": "P2",
+        "虚化突兀": "P0"
+      },
+      "trigger_frames": {
+        "模糊": [
+          3
+        ],
+        "纹理损失": [
+          3
+        ],
+        "过锐": [],
+        "花屏": [
+          1
+        ],
+        "过度生成": [
+          2
+        ],
+        "虚化突兀": [
+          3
+        ]
+      },
+      "m_eff_p0": [
+        2.819,
+        2.582,
+        3.415,
+        3.55,
+        2.837,
+        3.202
+      ]
+    },
+    "error_codes": {
+      "missing_file": 404,
+      "malformed_json": 400
+    },
+    "sigterm_exit_code": 0,
+    "gpu_id": 3,
+    "gpu_mib_after_shutdown": 98125
+  },
+  "stdlib": {
+    "backend": "stdlib",
+    "port": 8056,
+    "health_after": {
+      "status": "ok",
+      "set": "resident_v7",
+      "members": [
+        "cradio_v3",
+        "pe_v3",
+        "peg",
+        "sig_v3",
+        "v16",
+        "p3_qy",
+        "ntg_pe",
+        "p12_pe",
+        "p1_qy",
+        "pe_bkseg1",
+        "ntg_convnext"
+      ],
+      "decoder": "deconf_v4_tile",
+      "attribution": true,
+      "load_s": 212.2,
+      "warmup_s": 10.99,
+      "torch_peak_gb": 18.798,
+      "torch_allocated_gb": 15.572,
+      "torch_reserved_gb": 17.684,
+      "nvidia_smi_mib": 117633.3,
+      "nvidia_smi_peak_mib": 118809.3,
+      "params_b": 11.624,
+      "shared_weights_gb": 4.037,
+      "embed_host_gb": 1.159,
+      "requests": 7,
+      "uptime_s": 52.3,
+      "clean_footprint": "results/r55/final/resident_v7_clean_footprint.npz",
+      "pytorch_cuda_alloc_conf": "expandable_segments:True"
+    },
+    "infer_checks": [
+      {
+        "image": "196160772653_10.03s.png",
+        "mode": "image_path",
+        "latency_ms": {
+          "infer": 8953.76,
+          "decode": 4.13,
+          "attr": 0.08,
+          "total": 9003.38,
+          "request": 9009.47
+        },
+        "match": true
+      },
+      {
+        "image": "137212400938_frame14.png",
+        "mode": "image_path",
+        "latency_ms": {
+          "infer": 7047.35,
+          "decode": 3.98,
+          "attr": 588.96,
+          "total": 7658.03,
+          "request": 7659.06
+        },
+        "match": true
+      },
+      {
+        "image": "164190196424_337.png",
+        "mode": "image_base64",
+        "latency_ms": {
+          "infer": 7835.61,
+          "decode": 3.96,
+          "attr": 388.84,
+          "total": 8255.36,
+          "request": 8275.89
+        },
+        "match": true
+      }
+    ],
+    "batch_video_summary": {
+      "video_id": "clip_demo_01",
+      "num_frames": 4,
+      "frames": [
+        "196160772653_10.03s.png",
+        "137212400938_frame14.png",
+        "164190196424_337.png",
+        "178984587163_v7L3HiV2_4030.png"
+      ],
+      "video_label": {
+        "模糊": "P1",
+        "纹理损失": "P0",
+        "过锐": "无问题",
+        "花屏": "P0",
+        "过度生成": "P2",
+        "虚化突兀": "P0"
+      },
+      "trigger_frames": {
+        "模糊": [
+          3
+        ],
+        "纹理损失": [
+          3
+        ],
+        "过锐": [],
+        "花屏": [
+          1
+        ],
+        "过度生成": [
+          2
+        ],
+        "虚化突兀": [
+          3
+        ]
+      },
+      "m_eff_p0": [
+        2.819,
+        2.582,
+        3.415,
+        3.55,
+        2.837,
+        3.202
+      ]
+    },
+    "error_codes": {
+      "missing_file": 404,
+      "malformed_json": 400
+    },
+    "sigterm_exit_code": 0,
+    "gpu_id": 3,
+    "gpu_mib_after_shutdown": 98125
+  }
+}

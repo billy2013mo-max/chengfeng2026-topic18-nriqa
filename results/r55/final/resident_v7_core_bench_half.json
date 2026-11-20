@@ -1,0 +1,50 @@
+{
+  "set": "resident_v7_core",
+  "n": 40,
+  "total_params_b": 10.082,
+  "total_mean": 2.3557710672030225,
+  "total_p95": 4.532727254740894,
+  "total_max": 5.375918936915696,
+  "per_member": {
+    "cradio_v3": 0.18486545132473112,
+    "peg": 0.09453522022813558,
+    "v16": 0.9998733348445967,
+    "ntg_pe": 0.17448677762877196,
+    "p12_pe": 0.18614261788316072,
+    "p1_qy": 0.39552121181041,
+    "pe_bkseg1": 0.09259995012544095,
+    "ntg_convnext": 0.22250194568186998
+  },
+  "resident_gb": {
+    "p1_qy": 5.67,
+    "cradio_v3": 7.03,
+    "peg": 7.68,
+    "pe_bkseg1": 8.33,
+    "ntg_pe": 8.97,
+    "ntg_convnext": 9.16,
+    "p12_pe": 9.8,
+    "v16": 16.51
+  },
+  "resident_total_gb": 16.51,
+  "peak_load_gb": 18.79843759536743,
+  "peak_infer_gb": 17.960914134979248,
+  "peak_by_member": {
+    "cradio_v3": 17.684953689575195,
+    "peg": 16.749900341033936,
+    "pe_bkseg1": 16.749900341033936,
+    "ntg_pe": 17.404632568359375,
+    "ntg_convnext": 17.960914134979248,
+    "p12_pe": 16.749900341033936,
+    "v16": 17.088219165802002,
+    "phoenix": 17.0146222114563
+  },
+  "half": true,
+  "v16_chunk": 2,
+  "load_s": 152.7700810432434,
+  "total_median": 2.036305932328105,
+  "nvidia_smi_peak_load_mib": 20667.625,
+  "nvidia_smi_after_warmup_mib": 19077.625,
+  "nvidia_smi_peak_infer_mib": 20765.625,
+  "torch_reserved_gb": 18.984,
+  "pytorch_cuda_alloc_conf": "expandable_segments:True"
+}

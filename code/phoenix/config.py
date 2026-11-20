@@ -31,11 +31,7 @@ except ImportError:  # pragma: no cover - bare stdlib laptop fallback
 
 PHOENIX_DIR = os.path.dirname(os.path.abspath(__file__))
 CODE_DIR = os.path.dirname(PHOENIX_DIR)
-REPO_ROOT = (
-    "/wanqing-develop/luowenjing/18"
-    if os.path.exists("/wanqing-develop/luowenjing/18")
-    else os.path.abspath(os.path.join(PHOENIX_DIR, "../.."))
-)
+REPO_ROOT = os.path.abspath(os.path.join(PHOENIX_DIR, "../.."))
 
 PHOENIX_SPLITS_DIR = Path(REPO_ROOT) / "data" / "phoenix_splits"
 PHOENIX_CKPT_DIR = Path(REPO_ROOT) / "checkpoints" / "phoenix"
@@ -214,10 +210,20 @@ def set_deterministic_seed(seed: int = 2026) -> None:
 def resolve_local_or_hf_model(model_key: str, root: str = REPO_ROOT) -> str:
     """Prefers offline local weights under `models/`, falling back to HuggingFace/timm ID."""
     spec = PHOENIX_MODEL_BUDGET[model_key]
+    extra_base = os.environ.get("R55_BASE_MODELS_DIR", "").strip()
+    roots = [root, os.path.dirname(root), os.path.join(os.path.dirname(root), "03_模型产物")]
     for cand in spec["candidates"]:  # type: ignore[index]
-        p = cand if os.path.isabs(cand) else os.path.join(root, cand)
-        if os.path.exists(p):
-            return p
+        if os.path.isabs(cand) and os.path.exists(cand):
+            return cand
+        if extra_base and str(cand).startswith("models/"):
+            p_env = os.path.join(extra_base, str(cand)[len("models/"):])
+            if os.path.exists(p_env):
+                return p_env
+        for rt in roots:
+            for rel_c in (str(cand), str(cand).replace("models/", "base_models/", 1)):
+                p = os.path.join(rt, rel_c)
+                if os.path.exists(p):
+                    return p
     return str(spec["candidates"][-1])  # type: ignore[index]
 
 

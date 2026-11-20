@@ -189,6 +189,29 @@ class MultiViewAttentionAggregator(nn.Module):
             return torch.cat([g_feat, attn_local, max_local], dim=-1)
 
 
+_SAFETENSORS_CACHE_ENABLED = False
+_SAFETENSORS_SD_CACHE: Dict[str, Dict[str, torch.Tensor]] = {}
+
+
+def set_safetensors_cache_enabled(enabled: bool) -> None:
+    """Opt-in CPU state-dict cache during multi-tower startup (cleared right after init)."""
+    global _SAFETENSORS_CACHE_ENABLED
+    _SAFETENSORS_CACHE_ENABLED = bool(enabled)
+    if not enabled:
+        _SAFETENSORS_SD_CACHE.clear()
+
+
+def _load_safetensors_cached(path: str) -> Dict[str, torch.Tensor]:
+    from safetensors.torch import load_file
+    if _SAFETENSORS_CACHE_ENABLED:
+        sd = _SAFETENSORS_SD_CACHE.get(path)
+        if sd is None:
+            sd = load_file(path)
+            _SAFETENSORS_SD_CACHE[path] = sd
+        return sd
+    return load_file(path)
+
+
 class QingyuVisionQualityTower(nn.Module):
     def __init__(
         self,
@@ -250,9 +273,8 @@ class QingyuVisionQualityTower(nn.Module):
             import timm
             p_cand = resolve_model_path("convnextv2_base")
             if os.path.isdir(p_cand) and os.path.exists(os.path.join(p_cand, "model.safetensors")):
-                from safetensors.torch import load_file
                 m = timm.create_model("convnextv2_base.fcmae_ft_in22k_in1k", pretrained=False, num_classes=0)
-                m.load_state_dict(load_file(os.path.join(p_cand, "model.safetensors")), strict=False)
+                m.load_state_dict(_load_safetensors_cached(os.path.join(p_cand, "model.safetensors")), strict=False)
             else:
                 m = timm.create_model("convnextv2_base.fcmae_ft_in22k_in1k", pretrained=True, num_classes=0)
             dc = timm.data.resolve_data_config({}, model=m)
@@ -280,11 +302,10 @@ class QingyuVisionQualityTower(nn.Module):
 
         if key == "pe_core_large":
             import timm
-            from safetensors.torch import load_file
             p_cand = resolve_model_path("pe_core_large")
             w_path = p_cand if os.path.isfile(p_cand) else os.path.join(p_cand, "model.safetensors")
             m = timm.create_model("vit_pe_core_large_patch14_336", pretrained=False, num_classes=0, dynamic_img_size=True)
-            m.load_state_dict(load_file(w_path), strict=False)
+            m.load_state_dict(_load_safetensors_cached(w_path), strict=False)
             dc = timm.data.resolve_data_config({}, model=m)
             # audit 2026-11-14 (P6): QY_PE_TAPS="7,13,19" moves the three gated taps to earlier blocks (default 15,19,22)
             _taps = [int(x) for x in os.environ.get("QY_PE_TAPS", "15,19,22").split(",")]
@@ -393,7 +414,9 @@ class QingyuVisionQualityTower(nn.Module):
 
         if key == "cradio_v4_h":
             from transformers import AutoModel
+            from qingyu.config_and_paths import seed_hf_dynamic_modules
             repo = resolve_model_path("cradio_v4_h")
+            seed_hf_dynamic_modules(repo)
             m = AutoModel.from_pretrained(repo, trust_remote_code=True)
             blocks = m.radio_model.model.blocks
             m.tap3 = IntermediateThreeLayerGatedTap(blocks, 1280, tap_indices=[max(0, len(blocks) - 10), max(0, len(blocks) - 5), len(blocks) - 2]).float()
@@ -516,16 +539,33 @@ class QingyuVisionQualityTower(nn.Module):
             for bi, gt in enumerate(native_global_list):
                 hw = (int(gt.shape[-2]), int(gt.shape[-1]))
                 shape_groups.setdefault(hw, []).append(bi)
+            g_chunk = int(getattr(self, "infer_global_chunk", 0))
             for _, idxs in shape_groups.items():
-                gx = torch.cat([native_global_list[i] for i in idxs], dim=0)
-                gf = self._encode_single_view(self._norm_img(gx))
-                for loc_j, orig_i in enumerate(idxs):
-                    g_feats[orig_i] = gf[loc_j]
+                if g_chunk > 0 and len(idxs) > g_chunk:
+                    for j in range(0, len(idxs), g_chunk):
+                        sub = idxs[j : j + g_chunk]
+                        gx = torch.cat([native_global_list[i] for i in sub], dim=0)
+                        gf = self._encode_single_view(self._norm_img(gx))
+                        for loc_j, orig_i in enumerate(sub):
+                            g_feats[orig_i] = gf[loc_j]
+                else:
+                    gx = torch.cat([native_global_list[i] for i in idxs], dim=0)
+                    gf = self._encode_single_view(self._norm_img(gx))
+                    for loc_j, orig_i in enumerate(idxs):
+                        g_feats[orig_i] = gf[loc_j]
             g_stack = torch.stack(g_feats, dim=0).unsqueeze(1)
 
             if views_01 is not None and views_01.shape[1] > 0:
                 B_, Vc, C, H, W = views_01.shape
-                cf = self._encode_single_view(self._norm_img(views_01.reshape(B_ * Vc, C, H, W))).view(B_, Vc, -1)
+                c_flat = self._norm_img(views_01.reshape(B_ * Vc, C, H, W))
+                v_chunk = int(getattr(self, "infer_view_chunk", 0))
+                if v_chunk > 0 and c_flat.shape[0] > v_chunk:
+                    cf = torch.cat(
+                        [self._encode_single_view(c_flat[j : j + v_chunk]) for j in range(0, c_flat.shape[0], v_chunk)],
+                        dim=0,
+                    ).view(B_, Vc, -1)
+                else:
+                    cf = self._encode_single_view(c_flat).view(B_, Vc, -1)
                 v_stack = torch.cat([g_stack, cf], dim=1)
             else:
                 v_stack = g_stack

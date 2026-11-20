@@ -41,12 +41,16 @@ class NativeTileTower(QingyuVisionQualityTower):
         self.use_global = bool(use_global)
         self.mode_tag = "native_tiles"
         self.global_slot_dim = self.view_agg.gate[0].normalized_shape[0]
+        self.capture_tiles = False
+        self._tile_capture_buf = []
+        self.tile_chunk = 16
 
     def forward(self, views_01=None, phys_feat=None, tile_mask=None, global_01=None, **_):
         B, T = views_01.shape[:2]
         valid = tile_mask.bool()
         flat = self._norm_img(views_01[valid])                               # (N, 3, 448, 448): only real tiles, no padding
-        chunks = [self._encode_single_view(flat[s:s + 16]) for s in range(0, flat.shape[0], 16)]
+        csz = max(1, int(getattr(self, "tile_chunk", 16)))
+        chunks = [self._encode_single_view(flat[s:s + csz]) for s in range(0, flat.shape[0], csz)]
         emb = torch.cat(chunks, 0)
         feats = emb.new_zeros((B, T, emb.shape[-1]))
         feats[valid] = emb
@@ -61,4 +65,21 @@ class NativeTileTower(QingyuVisionQualityTower):
             mx = f.masked_fill(~valid.unsqueeze(-1), -1e4).amax(1)
             slot0 = g.float() if g is not None else mean
             vis = torch.cat([slot0, attn, mx], dim=-1)
-            return self.head(vis, phys_feat=phys_feat.float() if phys_feat is not None else None)
+            out = self.head(vis, phys_feat=phys_feat.float() if phys_feat is not None else None)
+            if getattr(self, "capture_tiles", False):
+                for bi in range(B):
+                    ft = f[bi, valid[bi]]
+                    Tv = ft.shape[0]
+                    vis_tile = torch.cat([slot0[bi : bi + 1].expand(Tv, -1), ft, ft], dim=-1)
+                    pf_t = phys_feat[bi : bi + 1].float().expand(Tv, -1) if phys_feat is not None else None
+                    out_tile = self.head(vis_tile, phys_feat=pf_t)
+                    wv = w[bi, valid[bi], 0]
+                    wv = wv / wv.sum().clamp(min=1e-8)
+                    self._tile_capture_buf.append(
+                        (
+                            out_tile["probs_6x4"].detach().float().cpu().numpy(),
+                            out_tile["severity_s"].detach().float().cpu().numpy(),
+                            wv.detach().float().cpu().numpy(),
+                        )
+                    )
+            return out

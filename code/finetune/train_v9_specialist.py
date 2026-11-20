@@ -59,6 +59,21 @@ def pool_spatial_tokens(patches, k=32):
     return torch.cat([p_mean, p_std, p_topk], dim=1)
 
 
+def _resolve_v9_local_path(rel_path):
+    _repo = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    extra_base = os.environ.get('R55_BASE_MODELS_DIR', '').strip()
+    if extra_base and rel_path.startswith('models/'):
+        p_env = os.path.join(extra_base, rel_path[len('models/'):])
+        if os.path.exists(p_env):
+            return p_env
+    for rt in (_repo, os.path.dirname(_repo), os.path.join(os.path.dirname(_repo), '03_模型产物')):
+        for rc in (rel_path, rel_path.replace('models/', 'base_models/', 1)):
+            cand = os.path.join(rt, rc)
+            if os.path.exists(cand):
+                return cand
+    return rel_path
+
+
 def build_v9_backbone(name):
     """Returns (module, fwd, mean, std, block_list, out_dim) with Spatial Anomaly Patch Token Pooling."""
     if name == 'siglip2':
@@ -78,7 +93,7 @@ def build_v9_backbone(name):
 
     if name == 'siglip2g':
         from transformers import SiglipVisionModel, AutoImageProcessor
-        repo = 'models/siglip2-giant'
+        repo = _resolve_v9_local_path('models/siglip2-giant')
         m = SiglipVisionModel.from_pretrained(repo, attn_implementation='sdpa')
         proc = AutoImageProcessor.from_pretrained(repo)
         _enable_pos_interp(m)
@@ -89,7 +104,7 @@ def build_v9_backbone(name):
 
     if name == 'eupe':
         m = torch.hub.load('/tmp/race18/eupe_repo', 'eupe_vitb16', source='local',
-                           weights='models/eupe-vit-b/EUPE-ViT-B.pt')
+                           weights=_resolve_v9_local_path('models/eupe-vit-b/EUPE-ViT-B.pt'))
         def fwd(x):
             o = m.forward_features(x)
             return torch.cat([o['x_norm_clstoken'], pool_spatial_tokens(o['x_norm_patchtokens'], k=32)], dim=1)
@@ -97,7 +112,13 @@ def build_v9_backbone(name):
 
     if name == 'convnext':
         import timm
-        m = timm.create_model('convnextv2_base.fcmae_ft_in22k_in1k', pretrained=True, num_classes=0)
+        w_loc = _resolve_v9_local_path('models/convnextv2-base/model.safetensors')
+        if os.path.exists(w_loc):
+            from safetensors.torch import load_file
+            m = timm.create_model('convnextv2_base.fcmae_ft_in22k_in1k', pretrained=False, num_classes=0)
+            m.load_state_dict(load_file(w_loc), strict=False)
+        else:
+            m = timm.create_model('convnextv2_base.fcmae_ft_in22k_in1k', pretrained=True, num_classes=0)
         dc = timm.data.resolve_data_config({}, model=m)
         def fwd(x):
             y = m.forward_features(x)  # (N, C, H, W)
@@ -110,7 +131,13 @@ def build_v9_backbone(name):
 
     if name == 'eva02':
         import timm
-        m = timm.create_model('eva02_base_patch14_448.mim_in22k_ft_in1k', pretrained=True, num_classes=0, dynamic_img_size=True)
+        w_loc = _resolve_v9_local_path('models/eva02-base-448/model.safetensors')
+        if os.path.exists(w_loc):
+            from safetensors.torch import load_file
+            m = timm.create_model('eva02_base_patch14_448.mim_in22k_ft_in1k', pretrained=False, num_classes=0, dynamic_img_size=True)
+            m.load_state_dict(load_file(w_loc), strict=False)
+        else:
+            m = timm.create_model('eva02_base_patch14_448.mim_in22k_ft_in1k', pretrained=True, num_classes=0, dynamic_img_size=True)
         dc = timm.data.resolve_data_config({}, model=m)
         def fwd(x):
             t = m.forward_features(x)
@@ -120,7 +147,25 @@ def build_v9_backbone(name):
 
     if name == 'cradio':
         from transformers import AutoModel
-        m = AutoModel.from_pretrained('models/c-radio-v4-h', trust_remote_code=True)
+        cr_repo = _resolve_v9_local_path('models/c-radio-v4-h')
+        if os.path.isdir(cr_repo):
+            try:
+                import glob as _glob, shutil as _shutil
+                from transformers.dynamic_module_utils import HF_MODULES_CACHE, create_dynamic_module
+                mod_sub = os.path.join(
+                    'transformers_modules',
+                    os.path.basename(os.path.normpath(cr_repo)).replace('-', '_hyphen_').replace('.', '_dot_'),
+                )
+                create_dynamic_module(mod_sub)
+                dst = os.path.join(str(HF_MODULES_CACHE), mod_sub)
+                os.makedirs(dst, exist_ok=True)
+                for pyf in _glob.glob(os.path.join(cr_repo, '*.py')):
+                    bn = os.path.basename(pyf)
+                    if not os.path.exists(os.path.join(dst, bn)):
+                        _shutil.copy2(pyf, os.path.join(dst, bn))
+            except Exception:
+                pass
+        m = AutoModel.from_pretrained(cr_repo, trust_remote_code=True)
         def fwd(x):
             summ, feat = m(x)
             return torch.cat([summ, pool_spatial_tokens(feat, k=32)], dim=1)
@@ -129,10 +174,11 @@ def build_v9_backbone(name):
     if name in ('pecorel', 'pecoreg'):
         import timm
         from safetensors.torch import load_file
-        arch, path, size = {
+        arch, rel_p, size = {
             'pecorel': ('vit_pe_core_large_patch14_336', 'models/pe-core-l14/model.safetensors', 448),
             'pecoreg': ('vit_pe_core_gigantic_patch14_448', 'models/pe-core-g14/model.safetensors', 448)
         }[name]
+        path = _resolve_v9_local_path(rel_p)
         m = timm.create_model(arch, pretrained=False, num_classes=0, dynamic_img_size=True)
         m.load_state_dict(load_file(path), strict=False)
         dc = timm.data.resolve_data_config({}, model=m)
@@ -151,7 +197,7 @@ def build_v9_backbone(name):
         import timm
         from safetensors.torch import load_file
         m = timm.create_model('vit_large_patch16_dinov3', pretrained=False, num_classes=0, dynamic_img_size=True)
-        m.load_state_dict(load_file('models/dinov3-vitl16/model.safetensors'), strict=True)
+        m.load_state_dict(load_file(_resolve_v9_local_path('models/dinov3-vitl16/model.safetensors')), strict=True)
         dc = timm.data.resolve_data_config({}, model=m)
         def fwd(x):
             t = m.forward_features(x)

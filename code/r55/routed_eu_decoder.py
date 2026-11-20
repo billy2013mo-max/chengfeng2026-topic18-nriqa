@@ -46,12 +46,15 @@ MEMBER_FAMILY_MAP: Dict[str, str] = {
     "p1": "ph_vlm",
     "p1_cv5": "ph_vlm",
     "p1_qy": "ph_vlm",
+    "qwen_hr": "ph_vlm",
     "p3": "ph",
     "p3_qy": "ph",
     "ntg_pe": "ntg",
     "ntg_cradio": "ntg",
     "ntg_dinov3": "ntg",
     "ntg_convnext": "ntg",
+    "bndry_pe": "bndry",
+    "bndry_dual": "bndry",
 }
 
 

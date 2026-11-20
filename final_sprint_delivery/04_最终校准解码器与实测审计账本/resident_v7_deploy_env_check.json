@@ -1,0 +1,318 @@
+{
+  "set": "resident_v7",
+  "decoder": "deconf_v4_tile",
+  "n_fail": 0,
+  "n_warn": 0,
+  "checks": [
+    {
+      "status": "OK",
+      "item": "python",
+      "detail": "3.11.11 (verified: 3.11.11)"
+    },
+    {
+      "status": "OK",
+      "item": "torch",
+      "detail": "2.13.0"
+    },
+    {
+      "status": "OK",
+      "item": "torchvision",
+      "detail": "0.28.0"
+    },
+    {
+      "status": "OK",
+      "item": "numpy",
+      "detail": "2.2.2"
+    },
+    {
+      "status": "OK",
+      "item": "scipy",
+      "detail": "1.17.1"
+    },
+    {
+      "status": "OK",
+      "item": "opencv-python-headless",
+      "detail": "5.0.0.93"
+    },
+    {
+      "status": "OK",
+      "item": "pillow",
+      "detail": "11.0.0"
+    },
+    {
+      "status": "OK",
+      "item": "timm",
+      "detail": "1.0.30"
+    },
+    {
+      "status": "OK",
+      "item": "transformers",
+      "detail": "5.6.0"
+    },
+    {
+      "status": "OK",
+      "item": "accelerate",
+      "detail": "1.11.0"
+    },
+    {
+      "status": "OK",
+      "item": "peft",
+      "detail": "0.18.1"
+    },
+    {
+      "status": "OK",
+      "item": "safetensors",
+      "detail": "0.8.0"
+    },
+    {
+      "status": "OK",
+      "item": "huggingface-hub",
+      "detail": "1.32.0"
+    },
+    {
+      "status": "OK",
+      "item": "tokenizers",
+      "detail": "0.22.2"
+    },
+    {
+      "status": "OK",
+      "item": "sentencepiece",
+      "detail": "0.2.2"
+    },
+    {
+      "status": "OK",
+      "item": "einops",
+      "detail": "0.8.2"
+    },
+    {
+      "status": "OK",
+      "item": "scikit-learn",
+      "detail": "1.9.1"
+    },
+    {
+      "status": "OK",
+      "item": "pandas",
+      "detail": "2.3.3"
+    },
+    {
+      "status": "OK",
+      "item": "tqdm",
+      "detail": "4.67.1"
+    },
+    {
+      "status": "OK",
+      "item": "nvidia-ml-py",
+      "detail": "13.595.45"
+    },
+    {
+      "status": "OK",
+      "item": "fastapi",
+      "detail": "0.136.3"
+    },
+    {
+      "status": "OK",
+      "item": "uvicorn",
+      "detail": "0.53.0"
+    },
+    {
+      "status": "OK",
+      "item": "anyio",
+      "detail": "4.15.1"
+    },
+    {
+      "status": "OK",
+      "item": "pydantic",
+      "detail": "2.12.3"
+    },
+    {
+      "status": "OK",
+      "item": "import bitsandbytes",
+      "detail": "0.50.2 from third_party/pydeps/bitsandbytes"
+    },
+    {
+      "status": "OK",
+      "item": "native lib for torch CUDA 13.0",
+      "detail": "third_party/pydeps/bitsandbytes/libbitsandbytes_cuda130.so"
+    },
+    {
+      "status": "OK",
+      "item": "4-bit NF4 matmul on GPU",
+      "detail": "out (2, 64) finite=True"
+    },
+    {
+      "status": "OK",
+      "item": "torch build",
+      "detail": "2.13.0+cu130 CUDA 13.0 cuDNN 92000"
+    },
+    {
+      "status": "OK",
+      "item": "compiled arch list",
+      "detail": "sm_75 sm_80 sm_86 sm_90 sm_100 sm_120"
+    },
+    {
+      "status": "OK",
+      "item": "current GPU NVIDIA H200",
+      "detail": "sm_90, 139.8 GiB, usable kernels: native"
+    },
+    {
+      "status": "OK",
+      "item": "RTX 4090 target sm_89 (Ada)",
+      "detail": "binary-compatible SASS ['sm_80', 'sm_86'] (same major 8, minor <= 9)"
+    },
+    {
+      "status": "OK",
+      "item": "bf16 support",
+      "detail": "True"
+    },
+    {
+      "status": "OK",
+      "item": "VRAM >= 24 GB budget (RTX 4090 = 23.99 GiB)",
+      "detail": "139.8 GiB on this device"
+    },
+    {
+      "status": "OK",
+      "item": "PYTORCH_CUDA_ALLOC_CONF",
+      "detail": "expandable_segments:True"
+    },
+    {
+      "status": "OK",
+      "item": "bf16 GEMM smoke test",
+      "detail": "12.632"
+    },
+    {
+      "status": "OK",
+      "item": "members",
+      "detail": "['cradio_v3', 'pe_v3', 'peg', 'sig_v3', 'v16', 'p3_qy', 'ntg_pe', 'p12_pe', 'p1_qy', 'pe_bkseg1', 'ntg_convnext']"
+    },
+    {
+      "status": "OK",
+      "item": "decoder (deconf_v4_tile)",
+      "detail": "results/r55/final/resident_v7_decoder_deconf_v4_tile.pkl"
+    },
+    {
+      "status": "OK",
+      "item": "video aggregator (serve /infer_batch, --video-mode)",
+      "detail": "results/r55/final/resident_v7_video_aggregator.pkl"
+    },
+    {
+      "status": "OK",
+      "item": "clean footprint npz (attribution; no training data at runtime)",
+      "detail": "results/r55/final/resident_v7_clean_footprint.npz 75.2 KiB towers=['pe_v3', 'peg', 'pe_bkseg1'] n_fp=24 n_phys=160"
+    },
+    {
+      "status": "OK",
+      "item": "ckpt cradio_v3",
+      "detail": "results/r55/fullfit_v3_tier1/cradio_v4_h/fold_0_best.pt (0.69 GiB)"
+    },
+    {
+      "status": "OK",
+      "item": "ckpt pe_v3",
+      "detail": "results/r55/fullfit_v3_tier1/pe_core_large/fold_0_best.pt (0.48 GiB)"
+    },
+    {
+      "status": "OK",
+      "item": "ckpt peg",
+      "detail": "results/next55/towers/r55_fullglitch_s2026/pe_core_large/fold_0_best.pt (0.48 GiB)"
+    },
+    {
+      "status": "OK",
+      "item": "ckpt sig_v3",
+      "detail": "results/r55/fullfit_v3_tier1/siglip2_so400m_naflex/fold_0_best.pt (0.53 GiB)"
+    },
+    {
+      "status": "OK",
+      "item": "ckpt v16",
+      "detail": "results/next55/fullfit/v16_full8/V16_Full_F0_AllGrade_Microscope_swa.pt"
+    },
+    {
+      "status": "OK",
+      "item": "ckpt p3_qy",
+      "detail": "results/r55/p3_qy_honest_fullfit/pillar3_fulldata_swa.pt (1.16 GiB)"
+    },
+    {
+      "status": "OK",
+      "item": "ckpt ntg_pe",
+      "detail": "results/r55/fullfit_v5_ntg/pe_core_large/fold_0_best.pt (0.48 GiB)"
+    },
+    {
+      "status": "OK",
+      "item": "ckpt p12_pe",
+      "detail": "results/r55/fullfit_v3_p12/pe_core_large/fold_0_best.pt (0.48 GiB)"
+    },
+    {
+      "status": "OK",
+      "item": "ckpt p1_qy",
+      "detail": "results/r55/vlm_qy8/ckpts/p1_c233397_s2026_fullfit_swa.pt (0.92 GiB)"
+    },
+    {
+      "status": "OK",
+      "item": "ckpt pe_bkseg1",
+      "detail": "results/r55/fullfit_v7_bkseg1/pe_core_large/fold_0_best.pt (0.48 GiB)"
+    },
+    {
+      "status": "OK",
+      "item": "ckpt ntg_convnext",
+      "detail": "results/r55/fullfit_v7_ntg_convnext/convnextv2_base/fold_0_best.pt (0.35 GiB)"
+    },
+    {
+      "status": "OK",
+      "item": "backbone convnextv2_base",
+      "detail": "/wanqing-develop/luowenjing/18/models/convnextv2-base"
+    },
+    {
+      "status": "OK",
+      "item": "backbone cradio_v4_h",
+      "detail": "/wanqing-develop/luowenjing/18/models/c-radio-v4-h"
+    },
+    {
+      "status": "OK",
+      "item": "backbone pe_core_large",
+      "detail": "/wanqing-develop/luowenjing/18/models/pe-core-l14/model.safetensors"
+    },
+    {
+      "status": "OK",
+      "item": "backbone siglip2_so400m_naflex",
+      "detail": "/wanqing-develop/luowenjing/18/models/siglip2-naflex"
+    },
+    {
+      "status": "OK",
+      "item": "backbone v16:pecoreg",
+      "detail": "/wanqing-develop/luowenjing/18/models/pe-core-g14/model.safetensors"
+    },
+    {
+      "status": "OK",
+      "item": "backbone v16:dinov3l",
+      "detail": "/wanqing-develop/luowenjing/18/models/dinov3-vitl16/model.safetensors"
+    },
+    {
+      "status": "OK",
+      "item": "backbone v16:cradio",
+      "detail": "/wanqing-develop/luowenjing/18/models/c-radio-v4-h"
+    },
+    {
+      "status": "OK",
+      "item": "backbone v16:eva02",
+      "detail": "/wanqing-develop/luowenjing/18/models/eva02-base-448/model.safetensors"
+    },
+    {
+      "status": "OK",
+      "item": "backbone v16:convnext",
+      "detail": "/wanqing-develop/luowenjing/18/models/convnextv2-base/model.safetensors"
+    },
+    {
+      "status": "OK",
+      "item": "base pillar1_qwen3vl_8b",
+      "detail": "/wanqing-develop/luowenjing/18/models/qwen3vl-8b"
+    },
+    {
+      "status": "OK",
+      "item": "base pillar3_depth_anything_s",
+      "detail": "/wanqing-develop/luowenjing/18/models/depth-anything-v2-small"
+    },
+    {
+      "status": "OK",
+      "item": "data/manifest_combined.csv needed at inference?",
+      "detail": "no (only by --fit-decoder / --build-clean-footprint / --bench; present on this host: True)"
+    }
+  ]
+}

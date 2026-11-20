@@ -349,6 +349,48 @@ def load_pool_teacher(dirs, fold: int) -> Dict[str, np.ndarray]:
     return {n: np.mean(v, axis=0) for n, v in acc.items() if len(v) == len(dirs)}
 
 
+class CrossDefectInvariance:
+    """Disentangling penalty (2026-11-17, owner direction "B"): at a FIXED human grade of defect d, the predicted
+    severity of d should not move with the human grades of the other graded defects.  On v7 nested OOF the pooled
+    过度生成 P(P0) is too high on frames with other defects (pred 0.35-0.70 -> observed 0.35-0.41) and too low on
+    clean-ish frames (pred 0.20-0.50 -> observed 0.43-0.54).
+
+    For every current row i and every memory row k with g_d(i) == g_d(k) the pair contributes
+    (e_d(i) - e_d(k)) and (s_j(i) - s_j(k)) for each other graded defect j, where e = expected severity under the
+    model (0..3) and s_j the human grade.  The loss is sum_j slope_j^2 with slope_j the least-squares slope of the
+    severity gap on the grade gap of j.  Memory rows are detached (an XBM-style queue), so a batch of 6 still sees a
+    few hundred same-grade pairs.  Labels only; nothing at inference changes."""
+    GRADED = (0, 1, 2, 4)
+
+    def __init__(self, dims, capacity=512, device="cuda"):
+        self.dims, self.cap, self.device = list(dims), int(capacity), device
+        self.e = torch.zeros(0, 6, device=device)
+        self.g = torch.zeros(0, 6, dtype=torch.long, device=device)
+
+    def __call__(self, probs, grades):
+        e = (probs.float() * torch.arange(4, device=probs.device, dtype=torch.float32)).sum(-1)      # (B, 6)
+        g = grades.long()
+        loss = e.sum() * 0.0
+        if self.e.shape[0] >= 32:
+            for d in self.dims:
+                same = (g[:, d][:, None] == self.g[:, d][None, :]).float()                          # (B, M)
+                if same.sum() < 8:
+                    continue
+                de = e[:, d][:, None] - self.e[:, d][None, :]
+                for j in self.GRADED:
+                    if j == d:
+                        continue
+                    ds = (g[:, j][:, None] - self.g[:, j][None, :]).float()
+                    den = (same * ds * ds).sum()
+                    if den < 1.0:
+                        continue
+                    loss = loss + ((same * de * ds).sum() / den) ** 2
+        with torch.no_grad():
+            self.e = torch.cat([e.detach(), self.e], 0)[: self.cap]
+            self.g = torch.cat([g.detach(), self.g], 0)[: self.cap]
+        return loss
+
+
 def evaluate(model, va_rows, img_loader, meta_store, collate_fn, device, args):
     vp, vqc, gv, _ = predict_2x_tta(model, va_rows, img_loader, meta_store, collate_fn, device,
                                     batch_size=args.batch_size * 2, workers=args.workers)
@@ -511,6 +553,10 @@ def train(args):
         criterion.dim_w = [float(x) for x in args.dim_w.split(",")]
         assert len(criterion.dim_w) == 6
         print(f"[sprint] per-dim loss weights (canonical order) = {criterion.dim_w}", flush=True)
+    dis = None
+    if args.lambda_dis > 0:
+        dis = CrossDefectInvariance([int(x) for x in args.dis_dims.split(",")], capacity=args.dis_mem, device=device)
+        print(f"[dis] cross-defect invariance on dims {dis.dims}, lambda {args.lambda_dis}, memory {args.dis_mem}", flush=True)
 
     out_dir = os.path.join(REPO_ROOT, args.out_dir, args.backbone)
     os.makedirs(out_dir, exist_ok=True)
@@ -536,6 +582,10 @@ def train(args):
                     l_kdl = aux_losses(out, b, device, args.rank_tau)[1]
                     loss = loss + args.lambda_kd_lab * l_kdl
                     parts[2] = float(l_kdl.item())
+                if dis is not None:
+                    l_dis = dis(out["probs_6x4"], b["grades"].to(device))
+                    loss = loss + args.lambda_dis * l_dis
+                    parts[1] = float(l_dis.item())          # logged in the "rank" slot
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             del out, loss
@@ -709,6 +759,9 @@ def main():
     ap.add_argument("--skip-t150", action="store_true",
                     help="skip redundant per-fold t150 inference (preserves t150_* keys as valid simplex placeholders for downstream readers)")
     ap.add_argument("--dim-w", default="", help="sprint: comma list of 6 per-dim loss weights in canonical DIMS order")
+    ap.add_argument("--lambda-dis", type=float, default=0.0, help="B: cross-defect invariance weight (0 = off)")
+    ap.add_argument("--dis-dims", default="4", help="B: comma list of graded dims the invariance applies to")
+    ap.add_argument("--dis-mem", type=int, default=512, help="B: memory rows for the invariance pairs")
     ap.add_argument("--no-save-ckpt", action="store_true",
                     help="skip writing fold_*_best.pt to conserve disk during OOF sweeps (still writes fold_*_probs.npz)")
     train(ap.parse_args())

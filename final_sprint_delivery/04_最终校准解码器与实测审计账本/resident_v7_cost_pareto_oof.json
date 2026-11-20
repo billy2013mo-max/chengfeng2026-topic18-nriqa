@@ -1,0 +1,29 @@
+{
+  "resident_v7_novlm (10m Pure-Vision Shared-Trunk, 3.33B, ~10.9 GB)": {
+    "doc2_all": 51.709,
+    "doc2_orig": 52.159,
+    "S_pos_orig": 15.97,
+    "S_p0_orig": 16.39,
+    "S_clean_orig": 19.81,
+    "mAP14_orig": 0.663,
+    "rps_orig": 0.03796
+  },
+  "resident_v6_core (6m Legacy Core, 9.66B, 15.68 GB)": {
+    "doc2_all": 51.585,
+    "doc2_orig": 51.884,
+    "S_pos_orig": 15.84,
+    "S_p0_orig": 16.28,
+    "S_clean_orig": 19.77,
+    "mAP14_orig": 0.6644,
+    "rps_orig": 0.0377
+  },
+  "resident_v7_core (8m Core, 10.05B, ~14.2 GB)": {
+    "doc2_all": 51.55,
+    "doc2_orig": 52.038,
+    "S_pos_orig": 15.87,
+    "S_p0_orig": 16.37,
+    "S_clean_orig": 19.81,
+    "mAP14_orig": 0.665,
+    "rps_orig": 0.03762
+  }
+}

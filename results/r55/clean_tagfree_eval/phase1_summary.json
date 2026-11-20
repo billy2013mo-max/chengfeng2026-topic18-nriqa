@@ -1,0 +1,48 @@
+{
+  "test150": {
+    "tagfree_v6_core": {
+      "n_images": 150,
+      "clean": 19,
+      "P0": 102,
+      "P1": 89,
+      "P2": 144
+    },
+    "tagfree_v6_qwen_hires": {
+      "n_images": 150,
+      "clean": 19,
+      "P0": 103,
+      "P1": 87,
+      "P2": 145
+    },
+    "tagfree_v7_qwen_hires": {
+      "n_images": 150,
+      "clean": 18,
+      "P0": 105,
+      "P1": 88,
+      "P2": 146
+    }
+  },
+  "final644": {
+    "tagfree_v6_core": {
+      "n_images": 644,
+      "clean": 111,
+      "P0": 417,
+      "P1": 361,
+      "P2": 611
+    },
+    "tagfree_v6_qwen_hires": {
+      "n_images": 644,
+      "clean": 111,
+      "P0": 414,
+      "P1": 346,
+      "P2": 617
+    },
+    "tagfree_v7_qwen_hires": {
+      "n_images": 644,
+      "clean": 111,
+      "P0": 411,
+      "P1": 352,
+      "P2": 613
+    }
+  }
+}

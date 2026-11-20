@@ -337,6 +337,23 @@ class MultiLayerHypercolumnVisionTower(nn.Module):
         from transformers import AutoModel
 
         repo = resolve_local_or_hf_model("pillar3_cradio_v4_h")
+        if os.path.isdir(repo):
+            try:
+                import glob as _glob
+                from transformers.dynamic_module_utils import HF_MODULES_CACHE, create_dynamic_module
+                mod_sub = os.path.join(
+                    "transformers_modules",
+                    os.path.basename(os.path.normpath(repo)).replace("-", "_hyphen_").replace(".", "_dot_"),
+                )
+                create_dynamic_module(mod_sub)
+                dst = os.path.join(str(HF_MODULES_CACHE), mod_sub)
+                os.makedirs(dst, exist_ok=True)
+                for pyf in _glob.glob(os.path.join(repo, "*.py")):
+                    bn = os.path.basename(pyf)
+                    if not os.path.exists(os.path.join(dst, bn)):
+                        shutil.copy2(pyf, os.path.join(dst, bn))
+            except Exception:
+                pass
         dt = _BB_DTYPE if torch.cuda.is_available() else torch.float32
         try:
             m = AutoModel.from_pretrained(repo, trust_remote_code=True, dtype=dt)
@@ -534,17 +551,26 @@ def build_pillar3_sample_tensors(
     precomputed_boxes: Optional[np.ndarray] = None,
     patch_size: int = 384,
     include_mid_tex: bool = True,
+    precomputed_phys_maps: Optional[Dict[str, np.ndarray]] = None,
+    precomputed_coc: Optional[np.ndarray] = None,
+    precomputed_crops: Optional[Sequence] = None,
 ) -> Dict[str, object]:
     """
     Constructs `[0, 1]` `views_01` (`[4, 3, 384, 384]` default or `[3, 3, 384, 384]` in legacy mode)
     + `phys_9ch [9, 256, 256]` + `probe_8ch [8, 256, 256]`.
     """
     rgb_np = np.asarray(pil_img, dtype=np.uint8)
-    phys_maps = compute_1to1_wavelet_and_artifact_maps(rgb_np)
-    probe_obj = coc_probe if coc_probe is not None else CoCDepthDefocusProbe(model_path=None, device="cpu")
-    coc_field = probe_obj.compute_coc_jacobian_field(pil_img, phys_maps)
+    phys_maps = precomputed_phys_maps if precomputed_phys_maps is not None else compute_1to1_wavelet_and_artifact_maps(rgb_np)
+    if precomputed_coc is not None:
+        coc_field = precomputed_coc
+    else:
+        probe_obj = coc_probe if coc_probe is not None else CoCDepthDefocusProbe(model_path=None, device="cpu")
+        coc_field = probe_obj.compute_coc_jacobian_field(pil_img, phys_maps)
 
-    if precomputed_boxes is not None:
+    if precomputed_crops is not None and len(precomputed_crops) >= 2:
+        crops = [precomputed_crops[0], precomputed_crops[1]]
+        crop_meta = [{}, {}]
+    elif precomputed_boxes is not None:
         crops = [
             crop_1to1_from_box(pil_img, precomputed_boxes[0], patch_size=patch_size),
             crop_1to1_from_box(pil_img, precomputed_boxes[1], patch_size=patch_size),

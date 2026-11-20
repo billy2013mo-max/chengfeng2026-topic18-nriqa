@@ -12,7 +12,7 @@ Checks (FAIL = inference will not run; WARN = runs, but differs from the verifie
      member checkpoint, local base-model weights
   5. inference does not depend on training data: data/manifest_combined.csv is NOT required (reported only)
 
-Usage:  python3 code/r55/check_deploy_env.py [--set resident_v6_core] [--decoder routed_gate_eu] [--json out.json]
+Usage:  python3 code/r55/check_deploy_env.py [--set resident_v7] [--decoder deconf_v4_tile] [--json out.json]
 Exit code 0 when there is no FAIL.
 """
 import argparse
@@ -124,15 +124,16 @@ def check_artifacts(set_name, rule):
     rec("OK", "members", members)
     dp = os.path.join(fe.OUT, f"{set_name}_decoder_{rule}.pkl" if rule != "d55" else f"{set_name}_decoder.pkl")
     rec("OK" if os.path.exists(dp) else "FAIL", f"decoder ({rule})", os.path.relpath(dp, REPO))
-    vp = os.path.join(fe.OUT, f"{set_name}_video_aggregator.pkl")
+    vp = fe._resolve_pack_path(f"results/r55/final/{set_name}_video_aggregator.pkl", f"decoders/{set_name}_video_aggregator.pkl")
     rec("OK" if os.path.exists(vp) else "WARN", "video aggregator (serve /infer_batch, --video-mode)", os.path.relpath(vp, REPO))
     fp = fe.clean_footprint_path(set_name)
     if os.path.exists(fp):
         z = np.load(fp, allow_pickle=False)
         meta = json.loads(str(z["meta_json"]))
-        pe_key, peg_extra = fe._attr_tower_keys([m for m in members if m in fe.TIER1])
-        need = [f"fp__{t}__{m}" for t in [pe_key] + ([peg_extra] if peg_extra else []) for m in fe._FP_MODES]
-        need += [k for k in ("phys_tile__overshoot", "phys_glob__lapvar")]
+        pe_key, peg_extra, bk_extra = fe._attr_tower_keys([m for m in members if m in fe.TIER1])
+        exp_towers = [pe_key] + ([peg_extra] if peg_extra else []) + ([bk_extra] if bk_extra else [])
+        need = [f"fp__{t}__{m}" for t in exp_towers for m in fe._FP_MODES]
+        need += [k for k in ("phys_tile__overshoot", "phys_tile__overshoot_p90", "phys_glob__lapvar", "phys_glob__acutance")]
         miss = [k for k in need if k not in z.files]
         rec("FAIL" if miss else "OK", "clean footprint npz (attribution; no training data at runtime)",
             f"{os.path.relpath(fp, REPO)} {os.path.getsize(fp) / 1024:.1f} KiB towers={meta['towers']} "
@@ -151,6 +152,8 @@ def check_artifacts(set_name, rule):
             ck(m, fe.NTG_CKPT[m], f"checkpoints/{m}/fold_0_best.pt")
         elif m in fe.P12_CKPT:
             ck(m, fe.P12_CKPT[m], f"checkpoints/{m}/fold_0_best.pt")
+        elif m in fe.BNDRY_CKPT:
+            ck(m, fe.BNDRY_CKPT[m], f"checkpoints/{m}/fullfit_best.pt")
         elif m == "v16":
             c = glob.glob(os.path.join(REPO, "results/next55/fullfit/v16_full8/V16_Full_F0_*_swa.pt"))
             if c:
@@ -159,18 +162,43 @@ def check_artifacts(set_name, rule):
                 ck("v16", "results/next55/fullfit/v16_full8/V16_Full_F0_AllGrade_Microscope_swa.pt", "checkpoints/v16/V16_Full_F0_AllGrade_Microscope_swa.pt")
         elif m == "p1_qy":
             ck("p1_qy", "results/r55/vlm_qy8/ckpts/p1_c233397_s2026_fullfit_swa.pt", "checkpoints/p1_qy/p1_c233397_s2026_fullfit_swa.pt")
+        elif m == "qwen_hr":
+            ck("qwen_hr", "results/r55/qwen3vl_hires_pilot/ckpts/qwen3vl_hires_s2026_fullfit_swa.pt", "checkpoints/qwen_hr/qwen3vl_hires_s2026_fullfit_swa.pt")
         elif m == "p3_qy":
-            ck("p3_qy", "results/r55/p3_qy_honest_fullfit/pillar3_fulldata_swa.pt")
+            ck("p3_qy", "results/r55/p3_qy_honest_fullfit/pillar3_fulldata_swa.pt", "checkpoints/p3_qy/pillar3_fulldata_swa.pt")
     print("   base-model weights")
     sys.path.insert(0, os.path.join(REPO, "code"))
     from qingyu.config_and_paths import resolve_model_path
     from phoenix.config import resolve_local_or_hf_model
-    bbs = sorted({fe.TIER1.get(m) or fe.NTG_SPEC.get(m) or (fe.P12_SPEC[m][0] if m in fe.P12_SPEC else None) for m in members} - {None})
+    bbs_set = set()
+    for m in members:
+        bb = fe.TIER1.get(m) or fe.NTG_SPEC.get(m) or (fe.P12_SPEC[m][0] if m in fe.P12_SPEC else None)
+        if bb:
+            bbs_set.add(bb)
+        if m in fe.BNDRY_SPEC:
+            bk = fe.BNDRY_SPEC[m][0]
+            if bk == "dual_pe_cradio":
+                bbs_set.update(("pe_core_large", "cradio_v4_h"))
+            else:
+                bbs_set.add(bk)
+    bbs = sorted(bbs_set)
     for bb in bbs:
         p = resolve_model_path(bb)
         rec("OK" if os.path.exists(p) else "WARN", f"backbone {bb}", p if os.path.exists(p) else f"{p} (not local; needs HF cache)")
-    keys = (["pillar1_qwen3vl_8b"] if any(m in members for m in ("p1", "p1_qy")) else []) + \
-        (["pillar3_depth_anything_s"] if any(m in members for m in ("p1", "p1_qy", "p3", "p3_qy")) else [])
+    if "v16" in members:
+        sys.path.insert(0, os.path.join(REPO, "code", "finetune"))
+        from train_v9_specialist import _resolve_v9_local_path
+        for v_tag, v_rel in (
+            ("v16:pecoreg", "models/pe-core-g14/model.safetensors"),
+            ("v16:dinov3l", "models/dinov3-vitl16/model.safetensors"),
+            ("v16:cradio", "models/c-radio-v4-h"),
+            ("v16:eva02", "models/eva02-base-448/model.safetensors"),
+            ("v16:convnext", "models/convnextv2-base/model.safetensors"),
+        ):
+            vp_bb = _resolve_v9_local_path(v_rel)
+            rec("OK" if os.path.exists(vp_bb) else "WARN", f"backbone {v_tag}", vp_bb)
+    keys = (["pillar1_qwen3vl_8b"] if any(m in members for m in ("p1", "p1_qy", "qwen_hr")) else []) + \
+        (["pillar3_depth_anything_s"] if any(m in members for m in ("p1", "p1_qy", "qwen_hr", "p3", "p3_qy")) else [])
     for k in keys:
         p = resolve_local_or_hf_model(k)
         if os.path.exists(p):
@@ -193,8 +221,8 @@ def check_training_independence():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--set", default="resident_v6_core")
-    ap.add_argument("--decoder", default="routed_gate_eu")
+    ap.add_argument("--set", default="resident_v8_boundary")
+    ap.add_argument("--decoder", default="deconf_v6_boundary")
     ap.add_argument("--gpu", default=os.environ.get("CUDA_VISIBLE_DEVICES", "0"))
     ap.add_argument("--json", default="")
     a = ap.parse_args()

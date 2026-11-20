@@ -66,6 +66,19 @@ SETS = {
     "resident_v6_core": ["cradio_v3", "peg", "v16", "ntg_pe", "p12_pe", "p1_qy"],
     "resident_v7": ["cradio_v3", "pe_v3", "peg", "sig_v3", "v16", "p3_qy", "ntg_pe", "p12_pe", "p1_qy", "pe_bkseg1", "ntg_convnext"],
     "resident_v7_core": ["cradio_v3", "peg", "v16", "ntg_pe", "p12_pe", "p1_qy", "pe_bkseg1", "ntg_convnext"],
+    "resident_v7_novlm": ["cradio_v3", "pe_v3", "peg", "sig_v3", "v16", "p3_qy", "ntg_pe", "p12_pe", "pe_bkseg1", "ntg_convnext"],
+    "resident_v8_boundary": [
+        "cradio_v3", "pe_v3", "peg", "sig_v3", "v16", "p3_qy", "ntg_pe", "p12_pe",
+        "p1_qy", "pe_bkseg1", "ntg_convnext", "bndry_pe", "bndry_dual", "qwen_hr",
+    ],
+    "resident_v8_boundary_novlm": [
+        "cradio_v3", "pe_v3", "peg", "sig_v3", "v16", "p3_qy", "ntg_pe", "p12_pe",
+        "pe_bkseg1", "ntg_convnext", "bndry_pe", "bndry_dual",
+    ],
+    "resident_v8_novlm_iv6b": [
+        "cradio_v3", "pe_v3", "peg", "sig_v3", "v16", "p3_qy", "ntg_pe", "p12_pe",
+        "pe_bkseg1", "ntg_convnext", "bndry_pe", "bndry_dual", "iv6b",
+    ],
 }
 
 V16_CHUNK_BY_SET = {
@@ -73,6 +86,10 @@ V16_CHUNK_BY_SET = {
     "resident_v6_core": 2,
     "resident_v7": 2,
     "resident_v7_core": 2,
+    "resident_v7_novlm": 2,
+    "resident_v8_boundary": 4,
+    "resident_v8_boundary_novlm": 4,
+    "resident_v8_novlm_iv6b": 4,
 }
 CLEAN_FOOTPRINT_N = 24          # clean training frames used for the PE-operator footprint (unchanged from the runtime version)
 CLEAN_PHYS_N = 160              # clean training frames for the measured-physics percentiles
@@ -136,7 +153,8 @@ FAMILY = {
     "ntg_pe": "ntg", "ntg_convnext": "ntg",
     "p12_pe": "p12", "p12_g14": "p12",
     "v16": "v16", "p1": "phoenix", "p3": "phoenix", "p3_qy": "phoenix",
-    "p1_qy": "phoenix_vlm",
+    "p1_qy": "phoenix_vlm", "qwen_hr": "phoenix_vlm",
+    "bndry_pe": "bndry", "bndry_dual": "bndry",
 }
 TIER1 = {
     "cradio": "cradio_v4_h", "pe": "pe_core_large", "peg": "pe_core_large", "sig": "siglip2_so400m_naflex",
@@ -162,6 +180,17 @@ NTG_CKPT = {
     "ntg_pe": "results/r55/fullfit_v5_ntg/pe_core_large/fold_0_best.pt",
     "ntg_convnext": "results/r55/fullfit_v7_ntg_convnext/convnextv2_base/fold_0_best.pt",
 }
+BNDRY_SPEC = {
+    "bndry_pe": ("pe_core_large", 9),
+    "bndry_dual": ("dual_pe_cradio", 8),
+}
+BNDRY_CKPT = {
+    "bndry_pe": "results/r55/boundary_v2/v2_pe_ntg/fullfit_best.pt",
+    "bndry_dual": "results/r55/boundary_v2/v2_dual_pe_cradio/fullfit_best.pt",
+}
+IV6B_CKPT = {
+    "iv6b": "results/r55/iv6b_native_pilot/fullfit_best.pt",
+}
 V3_OOF_DIRS = {
     "cradio_v3": "results/next55/towers/r55_fixed_e4_s2026/cradio_v4_h",
     "pe_v3": "results/next55/towers/r55_fixed_s2026/pe_core_large",
@@ -171,6 +200,10 @@ V3_OOF_DIRS = {
     "p12_g14": "results/next55/towers/r55_p12_kd_e4_s2026/pe_core_g14",
     "pe_bkseg1": "results/next55/towers/r55_synth-bkseg1_s2026/pe_core_large",
     "ntg_convnext": "results/next55/towers/r55_ntg_convnext_e8_s2026/convnextv2_base",
+    "bndry_pe": "results/r55/boundary_v2/v2_pe_ntg",
+    "bndry_dual": "results/r55/boundary_v2/v2_dual_pe_cradio",
+    "qwen_hr": "results/r55/qwen3vl_hires_pilot",
+    "iv6b": "results/r55/iv6b_native_pilot",
 }
 OOF_KEY = {"cradio": "qy_cradio_v4_h", "pe": "qy_pe_core_large", "peg": "r55_glitch2_s2026_pe_core_large",
            "sig": "qy_siglip2_so400m_naflex", "v16": "v16_full8"}
@@ -413,22 +446,122 @@ def fit_decoder(set_name):
         pickle.dump(dict(video_aggregator=vid_agg, members=members), open(os.path.join(OUT, f"{set_name}_video_aggregator.pkl"), "wb"))
 
 
+def _move_token_embedding_to_host(vlm):
+    """
+    p1_qy feeds one fixed prompt, yet its 151,936 x 4096 token-embedding table (1.16 GB in bf16) sits on the GPU.
+    Keep the table in host memory and copy only the looked-up rows to the GPU per call: the values are the same,
+    so the outputs are unchanged.  Returns the number of GPU bytes released (0 if the table is not found).
+    """
+    import torch
+
+    class HostEmbedding(torch.nn.Module):
+        def __init__(self, emb):
+            super().__init__()
+            self.table = emb.weight.detach().to("cpu")           # plain attribute, not a parameter: `.to(device)` leaves it on the host
+            self.num_embeddings, self.embedding_dim, self.padding_idx = emb.num_embeddings, emb.embedding_dim, emb.padding_idx
+
+        @property
+        def weight(self):
+            return self.table
+
+        def forward(self, input_ids):
+            return torch.nn.functional.embedding(input_ids.to("cpu"), self.table).to(input_ids.device)
+
+    lm = getattr(getattr(vlm, "backbone", None), "language_model", None)
+    emb = getattr(lm, "embed_tokens", None)
+    if not isinstance(emb, torch.nn.Embedding):
+        return 0
+    nb = emb.weight.numel() * emb.weight.element_size()
+    lm.embed_tokens = HostEmbedding(emb)
+    return nb
+
+
+def _quantize_linear_int8_g128(mod, group_size=128, min_dim=512, skip=("patch_embed", "embeddings", "head")):
+    """
+    Pure-PyTorch symmetric INT8 group-128 weight-only quantization for large unshared ViT Linear layers.
+    100% BF16 activations (zero FP16 overflow, zero external dependencies, RTX 4090 / A100 / H200 native).
+    Returns (num_quantized_layers, bytes_saved_vs_bf16).
+    """
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    class _WeightOnlyINT8GroupLinear(nn.Module):
+        def __init__(self, lin: nn.Linear, gs: int = 128):
+            super().__init__()
+            w = lin.weight.data.float()
+            out_f, in_f = w.shape
+            wg = w.view(out_f, in_f // gs, gs)
+            s = wg.abs().amax(dim=2, keepdim=True).clamp(min=1e-8) / 127.0
+            q = (wg / s).round().clamp(-127, 127).to(torch.int8).view(out_f, in_f)
+            self.register_buffer("w_q", q.contiguous())
+            self.register_buffer("scale", s.squeeze(-1).to(torch.bfloat16).contiguous())
+            self.group_size, self.out_f, self.in_f = gs, out_f, in_f
+            self._fp8_param_numel = int(out_f * in_f)
+            self.bias = (
+                nn.Parameter(lin.bias.data.to(torch.bfloat16).clone(), requires_grad=False)
+                if lin.bias is not None
+                else None
+            )
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            w = (
+                self.w_q.view(self.out_f, self.in_f // self.group_size, self.group_size).to(x.dtype)
+                * self.scale.to(x.dtype).unsqueeze(-1)
+            ).view(self.out_f, self.in_f)
+            b = self.bias.to(x.dtype) if self.bias is not None else None
+            return F.linear(x, w, b)
+
+    nq, saved = 0, 0
+
+    def _rec(m):
+        nonlocal nq, saved
+        for name, ch in list(m.named_children()):
+            if any(sk in name.lower() for sk in skip):
+                continue
+            if (
+                type(ch) is nn.Linear
+                and ch.in_features % group_size == 0
+                and ch.in_features >= min_dim
+                and ch.out_features >= min_dim
+            ):
+                qlin = _WeightOnlyINT8GroupLinear(ch, gs=group_size)
+                bf16_bytes = ch.weight.numel() * 2
+                q_bytes = qlin.w_q.numel() + qlin.scale.numel() * 2
+                setattr(m, name, qlin)
+                nq += 1
+                saved += max(0, bf16_bytes - q_bytes)
+            else:
+                _rec(ch)
+
+    _rec(mod)
+    return nq, saved
+
+
 class FinalEngine:
-    def __init__(self, members, device="cuda", img_dir="", half=False, v16_chunk=0):
+    def __init__(self, members, device="cuda", img_dir="", half=False, v16_chunk=0, share_weights=False, embed_on_host=False):
         import torch
-        from qingyu.backbones_qingyu import QingyuVisionQualityTower
+        from qingyu.backbones_qingyu import QingyuVisionQualityTower, set_safetensors_cache_enabled
         from qingyu.config_and_paths import REPO_ROOT, LosslessNativeImageLoader, setup_sys_path_and_cwd
         from qingyu.dual_engine_preprocess import PHYS_FEAT_DIM, DualEnginePhysicsExtractor, PrecomputedDualEngineStore
         from qingyu.train_tier1_5backbones_8fold import make_tier1_collate_fn
         setup_sys_path_and_cwd(chdir_repo=True)
+        set_safetensors_cache_enabled(True)
         self.torch, self.members, self.dev = torch, list(members), torch.device(device)
+        self.profile_sync = False
+        self._img_cache = {}
+        self._prefetch_cache = {}
         self.img_dir = img_dir
         if img_dir:
             os.environ["NEXT55_EXTRA_IMG_DIR"] = img_dir          # V16 feature / image lookup (read at import)
         self.mem = {}
+        self.share_weights = bool(share_weights)
+        self._share_reg, self._share_seen, self.shared_bytes = {}, set(), 0
         t0 = time.time()
 
         def note(tag):
+            if self.share_weights:
+                self.shared_bytes += self._share_identical_weights()
             torch.cuda.synchronize()
             gc.collect()                                          # drop CPU-side state dicts / temporaries of this member
             torch.cuda.empty_cache()                              # return freed blocks (e.g. p1_qy bf16->4bit build) to the driver
@@ -438,7 +571,7 @@ class FinalEngine:
 
         # Phoenix first: building p1/p1_qy needs the bf16 model (~16 GB) before it shrinks to ~6 GB
         self.p3_key = "p3_qy" if "p3_qy" in members else ("p3" if "p3" in members else None)
-        if "p1" in members or "p1_qy" in members or self.p3_key is not None:
+        if "p1" in members or "p1_qy" in members or "qwen_hr" in members or self.p3_key is not None:
             from phoenix.config import PHOENIX_CKPT_DIR, resolve_local_or_hf_model
             from phoenix.native_physics_and_views import CoCDepthDefocusProbe
             self.coc = CoCDepthDefocusProbe(model_path=resolve_local_or_hf_model("pillar3_depth_anything_s"), device=str(self.dev))
@@ -446,7 +579,31 @@ class FinalEngine:
             from phoenix_pillar_4090 import build_pillar_for_4090
             self.p1 = build_pillar_for_4090("pillar1", device=str(self.dev), bnb_path=BNB, verbose=False)
             note("p1")
-        if "p1_qy" in members:
+        if "p1_qy" in members and "qwen_hr" in members:
+            from dual_vlm_shared_4090 import DualAdapterQwen3VL4090
+            p1_qy_ckpt = os.environ.get(
+                "R55_P1_QY_CKPT_OVERRIDE",
+                _resolve_pack_path(
+                    "results/r55/vlm_qy8/ckpts/p1_c233397_s2026_fullfit_swa.pt",
+                    "checkpoints/p1_qy/p1_c233397_s2026_fullfit_swa.pt",
+                ),
+            )
+            qh_ckpt = _resolve_pack_path(
+                "results/r55/qwen3vl_hires_pilot/ckpts/qwen3vl_hires_s2026_fullfit_swa.pt",
+                "checkpoints/qwen_hr/qwen3vl_hires_s2026_fullfit_swa.pt",
+            )
+            assert os.path.exists(p1_qy_ckpt), f"Missing honest full-fit p1_qy checkpoint: {p1_qy_ckpt}"
+            assert os.path.exists(qh_ckpt), f"Missing honest full-fit qwen_hr checkpoint: {qh_ckpt}"
+            self.dual_vlm = DualAdapterQwen3VL4090(
+                p1_ckpt=p1_qy_ckpt,
+                qh_ckpt=qh_ckpt,
+                device=str(self.dev),
+                embed_on_host=embed_on_host,
+                verbose=False,
+            )
+            self.embed_host_bytes = self.dual_vlm.embed_host_bytes
+            note("dual_vlm")
+        elif "p1_qy" in members:
             from vlm_c233397_qy8 import build_c233397_pillar_for_4090
             p1_qy_ckpt = os.environ.get(
                 "R55_P1_QY_CKPT_OVERRIDE",
@@ -459,12 +616,80 @@ class FinalEngine:
             self.p1_qy = build_c233397_pillar_for_4090(
                 ckpt_path=p1_qy_ckpt, pillar="pillar1", device=str(self.dev), bnb_path=BNB, four_bit=True, verbose=False
             )
+            if embed_on_host:
+                self.embed_host_bytes = _move_token_embedding_to_host(self.p1_qy)
             note("p1_qy")
+        if "iv6b" in members:
+            import torch.nn as nn
+            import torch.nn.functional as F
+            import train_iv6b_native_tiles as ivm
+
+            class _WeightOnlyFP8GroupLinear(nn.Module):
+                """Pure-PyTorch FP8 E4M3 group-128 weight-only linear (100% BF16 activations, 0/72 argmax diff vs BF16)."""
+                def __init__(self, lin: nn.Linear, group_size: int = 128):
+                    super().__init__()
+                    w = lin.weight.data.float()
+                    out_f, in_f = w.shape
+                    wg = w.view(out_f, in_f // group_size, group_size)
+                    s = wg.abs().amax(dim=2, keepdim=True).clamp(min=1e-8) / 448.0
+                    q = (wg / s).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).view(out_f, in_f)
+                    self.register_buffer("w_q", q.contiguous())
+                    self.register_buffer("scale", s.squeeze(-1).to(torch.bfloat16).contiguous())
+                    self.group_size, self.out_f, self.in_f = group_size, out_f, in_f
+                    self._fp8_param_numel = int(out_f * in_f)
+                    self.bias = (
+                        nn.Parameter(lin.bias.data.to(torch.bfloat16).clone(), requires_grad=False)
+                        if lin.bias is not None
+                        else None
+                    )
+
+                def forward(self, x: torch.Tensor) -> torch.Tensor:
+                    w = (
+                        self.w_q.view(self.out_f, self.in_f // self.group_size, self.group_size).to(x.dtype)
+                        * self.scale.to(x.dtype).unsqueeze(-1)
+                    ).view(self.out_f, self.in_f)
+                    b = self.bias.to(x.dtype) if self.bias is not None else None
+                    return F.linear(x, w, b)
+
+            iv_ckpt = _resolve_pack_path(IV6B_CKPT["iv6b"], "checkpoints/iv6b/fullfit_best.pt")
+            assert os.path.exists(iv_ckpt), f"Missing honest full-fit iv6b checkpoint: {iv_ckpt}"
+            ck = torch.load(iv_ckpt, map_location="cpu", weights_only=False)
+            sd_iv = ck.get("state_dict", ck)
+            iv_m = ivm.InternViT6BNativeTileModel(
+                model_dir="models/internvit-6b",
+                tune_mode=str(ck.get("tune_mode", "lora_top30")),
+                lora_rank=int(ck.get("lora_rank", 128)),
+                lora_alpha=int(ck.get("lora_alpha", 256)),
+                eval_chunk_views=8 if half else 16,
+            )
+            res = iv_m.load_state_dict(sd_iv, strict=False)
+            bad = [
+                k for k in res.missing_keys
+                if (not k.startswith("_raw_vis."))
+                and ("lora" in k.lower() or k.startswith(("head.", "tile_gate.", "pyramid_tap.", "abmil.")))
+            ] + list(res.unexpected_keys)
+            assert not bad, f"iv6b checkpoint mismatch: {bad[:5]}"
+            if hasattr(iv_m.backbone, "merge_and_unload"):
+                iv_m.backbone = iv_m.backbone.merge_and_unload()
+                iv_m._raw_vis = iv_m.backbone
+            if half:
+                for blk in iv_m._raw_vis.encoder.layers:
+                    for sub in (blk.attn, blk.mlp):
+                        for cname, child in list(sub.named_children()):
+                            if type(child) is nn.Linear:
+                                setattr(sub, cname, _WeightOnlyFP8GroupLinear(child, group_size=128).to(self.dev))
+            iv_m.to(self.dev).eval()
+            self.iv6b = (iv_m, int(ck.get("tile_cap", 12)), ivm)
+            del ck, sd_iv
+            note("iv6b")
         if self.p3_key is not None:
             from phoenix.train_pillar12_native_vlm import detect_lora_rank_from_state_dict
             from phoenix.train_pillar3_hires_physics import Pillar3HiResPhysicsSpecialist
             if self.p3_key == "p3_qy":
-                p3_ckpt = os.path.join(REPO, "results/r55/p3_qy_honest_fullfit/pillar3_fulldata_swa.pt")
+                p3_ckpt = _resolve_pack_path(
+                    "results/r55/p3_qy_honest_fullfit/pillar3_fulldata_swa.pt",
+                    "checkpoints/p3_qy/pillar3_fulldata_swa.pt",
+                )
                 assert os.path.exists(p3_ckpt), f"Missing honest full-fit Pillar3 checkpoint: {p3_ckpt}"
             else:
                 p3_ckpt = os.path.join(str(PHOENIX_CKPT_DIR), "pillar3_fulldata_swa.pt")
@@ -503,6 +728,9 @@ class FinalEngine:
                 for n, mod in model.backbone.named_modules():    # read-out modules run in fp32 by design (autocast disabled)
                     if any(t in n.split(".")[-1] for t in ("tap3", "dual_tap", "abmil", "spatial_proj")):
                         mod.float()
+                if bb == "cradio_v4_h":
+                    model.infer_global_chunk = 1                 # bit-exact peak-VRAM cap on B=2 native-aspect H-flip TTA
+                    model.infer_view_chunk = 4
             model.to(self.dev).eval()
             self.t1[m] = (model, make_tier1_collate_fn(model.mode_tag, naflex_processor=getattr(model, "naflex_processor", None), max_num_patches=784))
             note(m)
@@ -526,7 +754,10 @@ class FinalEngine:
                     for n, mod in model.backbone.named_modules():
                         if any(t in n.split(".")[-1] for t in ("tap3", "dual_tap", "abmil", "spatial_proj")):
                             mod.float()
+                    model.tile_chunk = 4 if m == "ntg_convnext" else 8  # bit-exact cap on B=2 tile activation spike
                 model.to(self.dev).eval()
+                if m == "ntg_pe":
+                    model.capture_tiles = True
                 self.ntg[m] = (model, make_tier1_collate_fn(model.mode_tag, naflex_processor=getattr(model, "naflex_processor", None), max_num_patches=784))
                 note(m)
 
@@ -557,6 +788,39 @@ class FinalEngine:
                 self.p12[m] = (model, make_p12_collate(model.mode_tag, naflex_processor=getattr(model, "naflex_processor", None), max_num_patches=784))
                 note(m)
 
+        self.bndry = {}
+        bndry_ms = [x for x in members if x in BNDRY_SPEC]
+        if bndry_ms:
+            from semantic_roi_meta import SEMANTIC_PHYS_TOTAL_DIM, SemanticRoiLazyExtractor
+            from train_boundary_specialist import BoundaryTileTower
+            if self.p12_store is None:
+                self.p12_store = PrecomputedDualEngineStore(
+                    "__no_precomputed_p12_meta__.npz",
+                    lazy_extractor=SemanticRoiLazyExtractor(base_extractor=self.store.lazy_extractor),
+                )
+            for m in bndry_ms:
+                bb, unf = BNDRY_SPEC[m]
+                ck_path = _resolve_pack_path(BNDRY_CKPT[m], f"checkpoints/{m}/fullfit_best.pt")
+                assert os.path.exists(ck_path), f"Missing boundary specialist checkpoint: {ck_path}"
+                ck = torch.load(ck_path, map_location="cpu", weights_only=False)
+                model = BoundaryTileTower(
+                    backbone_key=bb,
+                    phys_dim=int(ck.get("phys_dim", SEMANTIC_PHYS_TOTAL_DIM)),
+                    unfreeze_last_k=int(ck.get("unfreeze_last_k", unf)),
+                    view_chunk=8,
+                    dropout=float(ck.get("dropout", 0.22)),
+                )
+                _, unexpected = model.load_state_dict(ck["state_dict"], strict=False)
+                assert not unexpected, unexpected[:5]
+                if half:
+                    model.backbone.to(torch.bfloat16)
+                    for n, mod in model.backbone.named_modules():
+                        if any(t in n.split(".")[-1] for t in ("tap3", "abmil", "masked_abmil")):
+                            mod.float()
+                model.to(self.dev).eval()
+                self.bndry[m] = (model, int(ck.get("tile_cap", 12)))
+                note(m)
+
         if "v16" in members:
             import glob
             import train_v16_microscope_specialist as v16
@@ -569,12 +833,26 @@ class FinalEngine:
             )
             ck = torch.load(v16_ckpt, map_location="cpu", weights_only=False)
             tr = ck["args"]
-            net = v16.MultiNetV16([v16.build_v9_backbone(it.split(":")[0]) for it in tr["backbones"].split(",")], phys_dim=60,
+            v16_bnames = [it.split(":")[0] for it in tr["backbones"].split(",")]
+            net = v16.MultiNetV16([v16.build_v9_backbone(bn) for bn in v16_bnames], phys_dim=60,
                                   dropout=tr["dropout"], n_quad=tr["tiles"] * tr["tiles"])
             _, unexpected = net.load_state_dict(ck["state_dict"], strict=False)
             assert not unexpected, unexpected[:5]
+            self.int8_saved_bytes = 0
             if half:
                 net.bs.to(torch.bfloat16)                        # the five backbones; heads stay fp32
+                # Pure-PyTorch INT8 group-128 weight-only quantization on unshared PE-Core-G14 (1.88B):
+                # saves ~1.76 GB VRAM on CPU before GPU upload, faster than BF16, mean_TV~0.0011, 0/900 cell diffs.
+                if os.environ.get("R55_DISABLE_V16_INT8", "0") != "1":
+                    for bi, bn in enumerate(v16_bnames):
+                        if bn == "pecoreg":
+                            nq_v16, saved_v16 = _quantize_linear_int8_g128(net.bs[bi], group_size=128)
+                            self.int8_saved_bytes += saved_v16
+                            print(
+                                f"  [v16] pure-PyTorch INT8-g128 weight-only on unshared {bn}: "
+                                f"{nq_v16} layers, -{saved_v16 / 2 ** 30:.2f} GiB VRAM",
+                                flush=True,
+                            )
                 if "p1_qy" in members and not v16_chunk:
                     v16_chunk = 2                                # bound 8-view activation spike in 9-member resident_v6 (TV == 0.0)
             net.to(self.dev)
@@ -584,6 +862,29 @@ class FinalEngine:
             self.v16 = (v16, net, ck["phys_mu"], ck["phys_sd"], tr, compute_one_image_feats)
             note("v16")
 
+        # Release temporary startup safetensors CPU cache immediately after all towers load
+        set_safetensors_cache_enabled(False)
+
+        # Single-decode per-image PIL cache wrapper on loader (100% N=1 invariant; cleared after each infer())
+        self._orig_load_pil = self.loader.load_pil
+
+        def _cached_load_pil(nm):
+            hit = self._img_cache.get(str(nm))
+            if hit is not None:
+                return hit
+            return self._orig_load_pil(nm)
+
+        self.loader.load_pil = _cached_load_pil
+
+        # Detect bit-exact shared frozen PE prefix across Tier-1 PE members (e.g. pe_v3, peg, pe_bkseg1)
+        self._pe_shared_group, self._pe_prefix_k = self._detect_pe_shared_group()
+        if len(self._pe_shared_group) >= 2:
+            print(
+                f"  [infra] shared frozen PE prefix compute: {self._pe_shared_group} "
+                f"(blocks[0..{self._pe_prefix_k - 1}] run 1x instead of {len(self._pe_shared_group)}x, bit-exact)",
+                flush=True,
+            )
+
         # Count resident PyTorch parameters across all loaded modules
         seen_p = set()
         n_params = 0
@@ -592,6 +893,8 @@ class FinalEngine:
             mods_all.append(self.p1)
         if hasattr(self, "p1_qy"):
             mods_all.append(self.p1_qy)
+        if hasattr(self, "dual_vlm"):
+            mods_all.append(self.dual_vlm)
         if hasattr(self, "p3"):
             mods_all.append(self.p3)
         for mod_t1, _ in self.t1.values():
@@ -600,84 +903,450 @@ class FinalEngine:
             mods_all.append(mod_ntg)
         for mod_p12, _ in self.p12.values():
             mods_all.append(mod_p12)
+        for mod_bn, _ in self.bndry.values():
+            mods_all.append(mod_bn)
         if hasattr(self, "v16"):
             mods_all.append(self.v16[1])
+        if hasattr(self, "iv6b"):
+            mods_all.append(self.iv6b[0])
         for mod_obj in mods_all:
             if hasattr(mod_obj, "parameters"):
                 for prm in mod_obj.parameters():
                     if id(prm) not in seen_p:
                         seen_p.add(id(prm))
                         n_params += int(prm.numel())
+            if hasattr(mod_obj, "modules"):
+                for sub_m in mod_obj.modules():
+                    fp8_n = getattr(sub_m, "_fp8_param_numel", 0)
+                    if fp8_n and id(sub_m) not in seen_p:
+                        seen_p.add(id(sub_m))
+                        n_params += int(fp8_n)
         self.total_params_b = round(n_params / 1e9, 3)
         gc.collect()
         torch.cuda.empty_cache()
         self.load_s = time.time() - t0
 
+    # ------------------------------------------------------------------ lossless weight sharing
+    def _weight_roots(self):
+        torch = self.torch
+        roots = [getattr(self, a) for a in ("p1", "p1_qy", "dual_vlm", "p3") if hasattr(self, a)]
+        for d in (
+            getattr(self, "t1", {}),
+            getattr(self, "ntg", {}),
+            getattr(self, "p12", {}),
+            getattr(self, "bndry", {}),
+        ):
+            roots += [v[0] for v in d.values()]
+        if hasattr(self, "v16"):
+            roots.append(self.v16[1])
+        return [r for r in roots if isinstance(r, torch.nn.Module)]
+
+    def _share_identical_weights(self, min_bytes=64 * 1024):
+        """
+        Several members load the same pretrained backbone and fine-tune only its last blocks, so their frozen blocks are
+        bit-identical copies on the GPU.  Point every such copy at one storage (verified with an exact `torch.equal`, so the
+        outputs cannot change) and let the allocator free the rest.  Called after each member is loaded -> the transient
+        duplicate is never larger than one member.  Returns the number of bytes released.
+        """
+        torch = self.torch
+        reg, seen, freed = self._share_reg, self._share_seen, 0
+        for root in self._weight_roots():
+            for mod in root.modules():
+                for store, is_param in ((mod._parameters, True), (mod._buffers, False)):
+                    for pn, t in list(store.items()):
+                        if t is None or not t.is_cuda or t.dtype == torch.uint8:      # uint8 = packed 4-bit weights
+                            continue
+                        nb = t.numel() * t.element_size()
+                        st = t.untyped_storage()
+                        if nb < min_bytes or st.nbytes() != nb or st.data_ptr() in seen:
+                            continue
+                        flat = t.detach().reshape(-1)
+                        key = (str(t.dtype), tuple(t.shape), flat[:: max(1, flat.numel() // 257)][:257].float().cpu().numpy().tobytes())
+                        canon = next((cand for cand in reg.get(key, ()) if torch.equal(cand, flat.view_as(cand))), None)
+                        if canon is None:
+                            reg.setdefault(key, []).append(t.detach())
+                            seen.add(st.data_ptr())
+                        elif is_param:
+                            t.data = canon
+                            freed += nb
+                        else:
+                            store[pn] = canon
+                            freed += nb
+        return freed
+
+    def _detect_pe_shared_group(self):
+        """Find Tier-1 `pe_core_large` multi_crop_448 members whose frozen prefix blocks are bit-identical."""
+        torch = self.torch
+        cands = [
+            m for m, (mod, _) in self.t1.items()
+            if getattr(mod, "backbone_key", "") == "pe_core_large" and getattr(mod, "mode_tag", "") == "multi_crop_448"
+        ]
+        if len(cands) < 2:
+            return [], 0
+        m0 = self.t1[cands[0]][0]
+        bb0 = m0.backbone
+        if not (hasattr(bb0, "blocks") and hasattr(bb0, "patch_embed") and hasattr(bb0, "_pos_embed") and hasattr(bb0, "norm_pre")):
+            return [], 0
+        # Verify identical mean/std and stem parameters
+        def _mods_equal(a, b):
+            pa = dict(a.named_parameters())
+            pb = dict(b.named_parameters())
+            if pa.keys() != pb.keys():
+                return False
+            return all(pa[k].dtype == pb[k].dtype and torch.equal(pa[k], pb[k]) for k in pa)
+
+        group = [cands[0]]
+        for mk in cands[1:]:
+            mm = self.t1[mk][0]
+            bb = mm.backbone
+            if not (torch.equal(m0.img_mean, mm.img_mean) and torch.equal(m0.img_std, mm.img_std)):
+                continue
+            if not (_mods_equal(bb0.patch_embed, bb.patch_embed) and _mods_equal(bb0.norm_pre, bb.norm_pre)):
+                continue
+            if getattr(bb0, "cls_token", None) is not None and not torch.equal(bb0.cls_token, bb.cls_token):
+                continue
+            if getattr(bb0, "pos_embed", None) is not None and not torch.equal(bb0.pos_embed, bb.pos_embed):
+                continue
+            group.append(mk)
+        if len(group) < 2:
+            return [], 0
+
+        min_tap = min(min(getattr(self.t1[mk][0].backbone.tap3, "tap_indices", [15])) for mk in group)
+        prefix_k = 0
+        for bi in range(min(len(bb0.blocks), int(min_tap))):
+            if all(_mods_equal(bb0.blocks[bi], self.t1[mk][0].backbone.blocks[bi]) for mk in group[1:]):
+                prefix_k = bi + 1
+            else:
+                break
+        if prefix_k < 4:
+            return [], 0
+        return group, prefix_k
+
+    def prefetch_cpu(self, name, pil_rgb=None):
+        """Pure-CPU thread-safe prefetch: decodes PIL RGB once + precomputes V16 60-D physics vector."""
+        if pil_rgb is None:
+            pil_rgb = self._orig_load_pil(name).convert("RGB")
+        else:
+            pil_rgb = pil_rgb.convert("RGB")
+        rgb_u8 = np.asarray(pil_rgb, dtype=np.uint8)
+        v16_phys = None
+        if hasattr(self, "v16"):
+            from extract_native_phys_feats import compute_feats_from_bgr
+            v16_phys = compute_feats_from_bgr(np.ascontiguousarray(rgb_u8[:, :, ::-1]))
+        return pil_rgb, rgb_u8, v16_phys
+
     # ------------------------------------------------------------------ members
+    def _run_pe_shared_group(self, name):
+        """Bit-exact shared frozen prefix (`blocks[0..prefix_k-1]`) + B=2 H-flip TTA across PE Tier-1 members."""
+        from qingyu.train_tier1_5backbones_8fold import Tier1DualEngineDataset
+        torch = self.torch
+        group = self._pe_shared_group
+        pk = self._pe_prefix_k
+        row = [{"name": name, "group_id": name, "grades": [0] * 6}]
+        m0, collate0 = self.t1[group[0]]
+        it0 = Tier1DualEngineDataset(row, self.loader, self.store, m0.mode_tag, train=False, hflip_tta=False)[0]
+        it1 = Tier1DualEngineDataset(row, self.loader, self.store, m0.mode_tag, train=False, hflip_tta=True)[0]
+        batch = collate0([it0, it1])
+        views_01 = batch["views_01"].to(self.dev, non_blocking=True)
+        phys_t = batch["phys"].to(self.dev, non_blocking=True)
+        B, V, C, H, W = views_01.shape
+        bb0 = m0.backbone
+        rope_mixed = bool(getattr(bb0, "rope_mixed", False))
+
+        out_probs, out_secs = {}, {}
+        t_pref = time.perf_counter()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=(self.dev.type == "cuda")):
+            flat = m0._norm_img(views_01.reshape(B * V, C, H, W))
+            x = bb0.patch_embed(flat)
+            x, rot_pos_embed = bb0._pos_embed(x)
+            x = bb0.norm_pre(x)
+            for bi in range(pk):
+                rp = rot_pos_embed[bi] if (rope_mixed and rot_pos_embed is not None) else rot_pos_embed
+                x = bb0.blocks[bi](x, rope=rp)
+        x_pref = x
+        if self.profile_sync:
+            torch.cuda.synchronize()
+        pref_share_s = (time.perf_counter() - t_pref) / len(group)
+
+        for mk in group:
+            t = time.perf_counter()
+            model, _ = self.t1[mk]
+            bb = model.backbone
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=(self.dev.type == "cuda")):
+                xm = x_pref
+                for bi in range(pk, len(bb.blocks)):
+                    rp = rot_pos_embed[bi] if (rope_mixed and rot_pos_embed is not None) else rot_pos_embed
+                    xm = bb.blocks[bi](xm, rope=rp)
+                raw_t = bb.norm(xm)
+                with torch.autocast(device_type="cuda" if raw_t.is_cuda else "cpu", enabled=False):
+                    tf = bb.tap3.fuse(raw_t.float())
+                    n_pref = getattr(bb, "num_prefix_tokens", 1)
+                    if n_pref > 0:
+                        pt = torch.cat([tf[:, :1], tf[:, n_pref:]], dim=1)
+                        emb = torch.cat([tf[:, 0], bb.abmil(pt, has_cls=True)], dim=1)
+                    else:
+                        emb = torch.cat([tf.mean(dim=1), bb.abmil(tf, has_cls=False)], dim=1)
+                    v_stack = emb.view(B, V, -1)
+                    vis_summary = model.view_agg(v_stack.float())
+                    ho = model.head(vis_summary, phys_feat=phys_t.float())
+            p2 = ho["probs_6x4"].float().cpu().numpy()
+            out_probs[mk] = (0.5 * (p2[0] + p2[1])).astype(np.float32)
+            if self.profile_sync:
+                torch.cuda.synchronize()
+            out_secs[mk] = pref_share_s + (time.perf_counter() - t)
+        return out_probs, out_secs
+
     def _tier1(self, m, name):
-        from qingyu.train_tier1_5backbones_8fold import predict_2x_tta
+        from qingyu.train_tier1_5backbones_8fold import Tier1DualEngineDataset, forward_batch_on_device
+        torch = self.torch
         model, collate = self.t1[m]
-        p, _, _, _ = predict_2x_tta(model, [{"name": name, "group_id": name, "grades": [0] * 6}], self.loader, self.store, collate,
-                                    self.dev, batch_size=1, workers=0)
-        return p[0]
+        row = [{"name": name, "group_id": name, "grades": [0] * 6}]
+        it0 = Tier1DualEngineDataset(row, self.loader, self.store, model.mode_tag, train=False, hflip_tta=False)[0]
+        it1 = Tier1DualEngineDataset(row, self.loader, self.store, model.mode_tag, train=False, hflip_tta=True)[0]
+        batch = collate([it0, it1])
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=(self.dev.type == "cuda")):
+            out = forward_batch_on_device(model, batch, self.dev)
+        p2 = out["probs_6x4"].float().cpu().numpy()
+        return (0.5 * (p2[0] + p2[1])).astype(np.float32)
 
     def _ntg(self, m, name):
-        from qingyu.train_tier1_5backbones_8fold import predict_2x_tta
+        from qingyu.train_tier1_5backbones_8fold import Tier1DualEngineDataset, forward_batch_on_device
+        torch = self.torch
         model, collate = self.ntg[m]
-        p, _, _, _ = predict_2x_tta(model, [{"name": name, "group_id": name, "grades": [0] * 6}], self.loader, self.store, collate,
-                                    self.dev, batch_size=1, workers=0)
-        return p[0]
+        if getattr(model, "capture_tiles", False):
+            model._tile_capture_buf = []
+        row = [{"name": name, "group_id": name, "grades": [0] * 6}]
+        it0 = Tier1DualEngineDataset(row, self.loader, self.store, model.mode_tag, train=False, hflip_tta=False)[0]
+        it1 = Tier1DualEngineDataset(row, self.loader, self.store, model.mode_tag, train=False, hflip_tta=True)[0]
+        batch = collate([it0, it1])
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=(self.dev.type == "cuda")):
+            out = forward_batch_on_device(model, batch, self.dev)
+        p2 = out["probs_6x4"].float().cpu().numpy()
+        return (0.5 * (p2[0] + p2[1])).astype(np.float32)
 
     def _p12(self, m, name):
         from semantic_roi_meta import analyze_semantic_rois_pil
-        from train_p12_specialist import predict_p12_tta
+        from train_p12_specialist import P12SemanticDataset, forward_p12_batch
+        torch = self.torch
         if str(name) not in self.p12_store.map and str(name) in self.store.map:
             im = self.loader.load_pil(name).convert("RGB")
             self.p12_store.map[str(name)] = analyze_semantic_rois_pil(im, base_phys_36=self.store.map[str(name)]["phys_vec"])
         model, collate = self.p12[m]
-        p, _, _, _ = predict_p12_tta(model, [{"name": name, "group_id": name, "grades": [0] * 6}], self.loader, self.p12_store, collate,
-                                     self.dev, batch_size=1, workers=0)
-        return p[0]
+        row = [{"name": name, "group_id": name, "grades": [0] * 6}]
+        it0 = P12SemanticDataset(row, self.loader, self.p12_store, model.mode_tag, train=False, hflip_tta=False)[0]
+        it1 = P12SemanticDataset(row, self.loader, self.p12_store, model.mode_tag, train=False, hflip_tta=True)[0]
+        batch = collate([it0, it1])
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=(self.dev.type == "cuda")):
+            out = forward_p12_batch(model, batch, self.dev)
+        p2 = out["probs_6x4"].float().cpu().numpy()
+        return (0.5 * (p2[0] + p2[1])).astype(np.float32)
 
-    def _v16(self, name):
-        from torch.utils.data import DataLoader
+    def _bndry(self, m, name, rgb_u8=None, bndry_tile_cache=None):
+        from semantic_roi_meta import analyze_semantic_rois_pil
+        from train_boundary_specialist import extract_native_tiles_coords_energy
+        torch = self.torch
+        im = self.loader.load_pil(name).convert("RGB")
+        if str(name) not in self.p12_store.map:
+            base_phys_36 = (
+                self.store.map[str(name)]["phys_vec"]
+                if str(name) in self.store.map
+                else self.store.lazy_extractor.analyze_pil_image(im)["phys_vec"]
+            )
+            self.p12_store.map[str(name)] = analyze_semantic_rois_pil(im, base_phys_36=base_phys_36)
+        phys_np = np.nan_to_num(
+            np.asarray(self.p12_store.map[str(name)]["phys_vec"], dtype=np.float32),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        arr = rgb_u8 if rgb_u8 is not None else np.asarray(im, dtype=np.uint8)
+        model, tile_cap = self.bndry[m]
+
+        def _get_views(hf_flag):
+            key = (bool(hf_flag), int(tile_cap))
+            if bndry_tile_cache is not None and key in bndry_tile_cache:
+                return bndry_tile_cache[key]
+            arr_v = np.ascontiguousarray(arr[:, ::-1, :]) if hf_flag else arr
+            res = extract_native_tiles_coords_energy(arr_v, tile_cap=tile_cap, rand_sample=False)
+            if bndry_tile_cache is not None:
+                bndry_tile_cache[key] = res
+            return res
+
+        g0, t0, c0, e0 = _get_views(False)
+        g1, t1, c1, e1 = _get_views(True)
+        T0, T1 = t0.shape[0], t1.shape[0]
+        if T0 == T1:
+            g_t = torch.from_numpy(np.stack([g0, g1], axis=0)).to(self.dev, non_blocking=True)
+            t_t = torch.from_numpy(np.stack([t0, t1], axis=0)).to(self.dev, non_blocking=True)
+            m_t = torch.ones((2, T0), dtype=torch.bool, device=self.dev)
+            c_t = torch.from_numpy(np.stack([c0, c1], axis=0)).to(self.dev, non_blocking=True)
+            e_t = torch.from_numpy(np.stack([e0, e1], axis=0)).to(self.dev, non_blocking=True)
+            phys_t = torch.from_numpy(np.stack([phys_np, phys_np], axis=0)).to(self.dev, non_blocking=True)
+            with torch.autocast(
+                device_type="cuda" if self.dev.type == "cuda" else "cpu",
+                dtype=torch.bfloat16,
+                enabled=(self.dev.type == "cuda"),
+            ):
+                out = model(g_t, t_t, m_t, c_t, tile_energy=e_t, phys_feat=phys_t)
+            p2 = out["probs_6x4"].float().cpu().numpy()
+            p_acc = 0.5 * (p2[0] + p2[1])
+        else:
+            phys_t = torch.from_numpy(phys_np).unsqueeze(0).to(self.dev)
+            p_acc = np.zeros((6, 4), dtype=np.float64)
+            for g_u8, t_u8, coords, energies in ((g0, t0, c0, e0), (g1, t1, c1, e1)):
+                g_t = torch.from_numpy(g_u8).unsqueeze(0).to(self.dev)
+                t_t = torch.from_numpy(t_u8).unsqueeze(0).to(self.dev)
+                m_t = torch.ones((1, t_u8.shape[0]), dtype=torch.bool, device=self.dev)
+                c_t = torch.from_numpy(coords).unsqueeze(0).to(self.dev)
+                e_t = torch.from_numpy(energies).unsqueeze(0).to(self.dev)
+                with torch.autocast(
+                    device_type="cuda" if self.dev.type == "cuda" else "cpu",
+                    dtype=torch.bfloat16,
+                    enabled=(self.dev.type == "cuda"),
+                ):
+                    out = model(g_t, t_t, m_t, c_t, tile_energy=e_t, phys_feat=phys_t)
+                p_acc += 0.5 * out["probs_6x4"].float().cpu().numpy()[0]
+        p_acc = np.clip(p_acc, 1e-7, 1.0)
+        p_acc /= p_acc.sum(axis=-1, keepdims=True)
+        return p_acc.astype(np.float32)
+
+    def _v16(self, name, pil_rgb=None, rgb_u8=None, pre_v16_phys=None):
+        from PIL import Image
         from qingyu.certainty_gated_stacker import p012_to_6x4_simplex
-        v16, net, mu, sd, tr, feats = self.v16
-        nm, vec = feats(name)
-        assert np.any(vec), f"V16 cannot find image {name}"
-        rows = [{"name": name, **{c: 0 for c in v16.CLASSES}}]
-        outs = []
-        for hf in (False, True):
-            ds = v16.V16NativeMicroscopeDataset(rows, {name: vec}, mu, sd, tr["size"], False, hflip=hf, tiles=tr["tiles"])
-            outs.append(v16.predict_v16(net, DataLoader(ds, batch_size=1, shuffle=False, num_workers=0), self.dev, tr["alpha_ex"]))
-        p0, p1, p2 = [0.5 * (outs[0][i] + outs[1][i]) for i in range(3)]
-        return p012_to_6x4_simplex(p0, p1, p2)[0]
+        from extract_native_phys_feats import compute_feats_from_bgr
+        torch = self.torch
+        v16, net, mu, sd, tr, _ = self.v16
+        if pil_rgb is None:
+            pil_rgb = self.loader.load_pil(name).convert("RGB")
+        if rgb_u8 is None:
+            rgb_u8 = np.asarray(pil_rgb, dtype=np.uint8)
+        vec = pre_v16_phys if pre_v16_phys is not None else compute_feats_from_bgr(np.ascontiguousarray(rgb_u8[:, :, ::-1]))
+        assert np.any(vec), f"V16 cannot compute features for image {name}"
 
-    def _phoenix(self, pil):
-        """p1/p1_qy and p3/p3_qy averaged over the two orientations."""
+        size = int(tr["size"])
+        T = int(tr["tiles"])
+        if not hasattr(self, "_v16_ds_stub"):
+            stub = v16.V16NativeMicroscopeDataset.__new__(v16.V16NativeMicroscopeDataset)
+            stub.size = size
+            stub.tiles = T
+            stub.train = False
+            self._v16_ds_stub = stub
+
+        def _build_views(im):
+            w, h = im.size
+            views = [im.resize((size, size), Image.BILINEAR)]
+            for dy in range(T):
+                for dx in range(T):
+                    views.append(im.crop((dx * w // T, dy * h // T, (dx + 1) * w // T, (dy + 1) * h // T)).resize((size, size), Image.BILINEAR))
+            views.extend(self._v16_ds_stub._extract_native_microscope_crops(im))
+            return np.transpose(np.stack([np.asarray(v, dtype=np.uint8) for v in views]), (0, 3, 1, 2))
+
+        x0 = _build_views(pil_rgb)
+        x1 = _build_views(pil_rgb.transpose(Image.FLIP_LEFT_RIGHT))
+        x_t = torch.from_numpy(np.stack([x0, x1], axis=0)).to(self.dev, non_blocking=True)
+        p_norm = np.clip((vec - mu) / sd, -6.0, 6.0).astype(np.float32)
+        p_t = torch.from_numpy(np.stack([p_norm, p_norm], axis=0)).to(self.dev, non_blocking=True)
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=(self.dev.type == "cuda")):
+            lc, le, _ = net(x_t, p_t)
+        p0, p1, p2, _ = v16.exact_probs_from_dual(lc.float(), le.float(), alpha_ex=tr["alpha_ex"])
+        p0_m = 0.5 * (p0[0:1].cpu().numpy() + p0[1:2].cpu().numpy())
+        p1_m = 0.5 * (p1[0:1].cpu().numpy() + p1[1:2].cpu().numpy())
+        p2_m = 0.5 * (p2[0:1].cpu().numpy() + p2[1:2].cpu().numpy())
+        return p012_to_6x4_simplex(p0_m, p1_m, p2_m)[0]
+
+    def _iv6b(self, name, pil_rgb=None, rgb_u8=None):
+        """InternViT-6B Native-Tile Specialist (B=2 H-flip TTA, reuses in-memory RGB & 36-D physics)."""
+        from PIL import Image
+        torch = self.torch
+        iv_m, tile_cap, ivm = self.iv6b
+        if pil_rgb is None:
+            pil_rgb = self.loader.load_pil(name).convert("RGB")
+        arr = rgb_u8 if rgb_u8 is not None else np.asarray(pil_rgb, dtype=np.uint8)
+        if str(name) in self.store.map:
+            phys_np = np.asarray(self.store.map[str(name)]["phys_vec"], dtype=np.float32)
+        else:
+            phys_np = np.asarray(self.store.lazy_extractor.analyze_pil_image(pil_rgb)["phys_vec"], dtype=np.float32)
+        phys_np = np.nan_to_num(phys_np, nan=0.0, posinf=0.0, neginf=0.0)
+
+        views = []
+        for flip in (False, True):
+            a = np.ascontiguousarray(arr[:, ::-1, :]) if flip else arr
+            g_pil = Image.fromarray(a, mode="RGB").resize((ivm.TILE_SIZE, ivm.TILE_SIZE), Image.BICUBIC)
+            g_u8 = torch.from_numpy(np.asarray(g_pil, dtype=np.uint8).copy())
+            ap = ivm.pad_to_min_tile_reflect(a, ivm.TILE_SIZE)
+            H_, W_ = ap.shape[:2]
+            boxes = [(y, x) for y in ivm.tile_starts(H_, ivm.TILE_SIZE) for x in ivm.tile_starts(W_, ivm.TILE_SIZE)]
+            if len(boxes) > tile_cap:
+                boxes = ivm.select_deterministic_tiles(ap, boxes, tile_cap)
+            t_u8 = torch.from_numpy(
+                np.stack([ap[y : y + ivm.TILE_SIZE, x : x + ivm.TILE_SIZE] for y, x in boxes], axis=0).copy()
+            )
+            views.append((g_u8, t_u8))
+
+        (g0, t0), (g1, t1) = views
+        Tm = max(t0.shape[0], t1.shape[0])
+        tiles = torch.zeros((2, Tm, ivm.TILE_SIZE, ivm.TILE_SIZE, 3), dtype=torch.uint8)
+        mask = torch.zeros((2, Tm), dtype=torch.bool)
+        tiles[0, : t0.shape[0]] = t0
+        mask[0, : t0.shape[0]] = True
+        tiles[1, : t1.shape[0]] = t1
+        mask[1, : t1.shape[0]] = True
+
+        g_t = torch.stack([g0, g1], dim=0).to(self.dev, non_blocking=True)
+        tiles_t = tiles.to(self.dev, non_blocking=True)
+        mask_t = mask.to(self.dev, non_blocking=True)
+        phys_t = torch.from_numpy(np.stack([phys_np, phys_np], axis=0)).to(self.dev, non_blocking=True)
+        with torch.autocast(device_type="cuda" if self.dev.type == "cuda" else "cpu", dtype=torch.bfloat16, enabled=(self.dev.type == "cuda")):
+            out = iv_m(g_t, tiles_t, mask_t, phys_t)
+        p2 = out["probs_6x4"].float().cpu().numpy()
+        p_acc = np.clip(0.5 * (p2[0] + p2[1]), 1e-7, 1.0)
+        p_acc /= p_acc.sum(axis=-1, keepdims=True)
+        return p_acc.astype(np.float32)
+
+    def _phoenix(self, pil, sem_meta=None):
+        """p1/p1_qy/qwen_hr and p3/p3_qy averaged over the two orientations (reusing maps0/coc0/crops0 & B=2)."""
         from PIL import Image
         from phoenix.native_physics_and_views import compute_1to1_wavelet_and_artifact_maps, resize_native_aspect_pil, select_scrutiny_1to1_patches
         from phoenix.train_pillar3_hires_physics import build_pillar3_sample_tensors
         torch = self.torch
-        acc, sec = {}, {"p1": 0.0, "p1_qy": 0.0}
+        acc, sec = {}, {"p1": 0.0, "p1_qy": 0.0, "qwen_hr": 0.0}
         if self.p3_key is not None:
             sec[self.p3_key] = 0.0
+        maps0, coc0, crops0 = None, None, None
         if "p1_qy" in self.members:
             t = time.perf_counter()
             maps0 = compute_1to1_wavelet_and_artifact_maps(np.asarray(pil, dtype=np.uint8))
+            coc0 = self.coc.compute_coc_jacobian_field(pil, maps0)
+            self._last_phoenix_aux = (maps0, coc0[:, :, 0])
             crops0, _ = select_scrutiny_1to1_patches(
-                pil_img=pil, phys_maps=maps0, coc_field=self.coc.compute_coc_jacobian_field(pil, maps0), patch_size=384, num_patches=2
+                pil_img=pil, phys_maps=maps0, coc_field=coc0, patch_size=384, num_patches=2
             )
             g0 = resize_native_aspect_pil(pil, max_pixels=784 * 784, grid_factor=28)
             views_orig = [g0, crops0[0], crops0[1]]
-            views_flip = [v.transpose(Image.FLIP_LEFT_RIGHT) for v in views_orig]
-            for vw in (views_orig, views_flip):
-                oq = self.p1_qy([vw], batch_ids=None, apply_batch_bias=False, device=self.dev)
-                acc.setdefault("p1_qy", []).append(oq["probs_6x4"].float().cpu().numpy()[0])
-            torch.cuda.synchronize()
+            if hasattr(self, "dual_vlm"):
+                acc["p1_qy"] = [self.dual_vlm.infer_p1_qy(views_orig)]
+            else:
+                views_flip = [v.transpose(Image.FLIP_LEFT_RIGHT) for v in views_orig]
+                for vw in (views_orig, views_flip):
+                    oq = self.p1_qy([vw], batch_ids=None, apply_batch_bias=False, device=self.dev)
+                    acc.setdefault("p1_qy", []).append(oq["probs_6x4"].float().cpu().numpy()[0])
+            if self.profile_sync:
+                torch.cuda.synchronize()
             sec["p1_qy"] += time.perf_counter() - t
-        for im in (pil, pil.transpose(Image.FLIP_LEFT_RIGHT)):
-            if "p1" in self.members:
+        if "qwen_hr" in self.members:
+            from train_qwen3vl_hires_roi import extract_4views_from_pil, select_3_semantic_boxes_448
+            t = time.perf_counter()
+            boxes_3x4 = None
+            if sem_meta is not None:
+                boxes_3x4 = select_3_semantic_boxes_448(sem_meta["crops_448_boxes"], sem_meta["phys_vec"])
+            q0 = extract_4views_from_pil(pil, boxes_3x4=boxes_3x4)
+            acc["qwen_hr"] = [self.dual_vlm.infer_qwen_hr(q0)]
+            if self.profile_sync:
+                torch.cuda.synchronize()
+            sec["qwen_hr"] += time.perf_counter() - t
+        pil_flip = pil.transpose(Image.FLIP_LEFT_RIGHT)
+        if "p1" in self.members:
+            for im in (pil, pil_flip):
                 t = time.perf_counter()
                 maps = compute_1to1_wavelet_and_artifact_maps(np.asarray(im, dtype=np.uint8))
                 crops, _ = select_scrutiny_1to1_patches(pil_img=im, phys_maps=maps, coc_field=self.coc.compute_coc_jacobian_field(im, maps),
@@ -685,16 +1354,33 @@ class FinalEngine:
                 o = self.p1([[resize_native_aspect_pil(im, max_pixels=784 * 784, grid_factor=28), crops[0], crops[1]]],
                             batch_ids=None, apply_batch_bias=False, device=self.dev)
                 acc.setdefault("p1", []).append(o["probs_6x4"].float().cpu().numpy()[0])
-                torch.cuda.synchronize()
+                if self.profile_sync:
+                    torch.cuda.synchronize()
                 sec["p1"] += time.perf_counter() - t
-            if self.p3_key is not None:
-                t = time.perf_counter()
-                pk = build_pillar3_sample_tensors(im, coc_probe=self.coc, include_mid_tex=not self.p3_legacy)
-                o = self.p3(views_01=pk["views_tensor"].unsqueeze(0).to(self.dev), phys_9ch=pk["phys_9ch"].unsqueeze(0).to(self.dev),
-                            probe_8ch=pk["probe_8ch"].unsqueeze(0).to(self.dev), batch_ids=None, apply_batch_bias=False)
-                acc.setdefault(self.p3_key, []).append(o["probs_6x4"].float().cpu().numpy()[0])
+        if self.p3_key is not None:
+            t = time.perf_counter()
+            if maps0 is None:
+                maps0 = compute_1to1_wavelet_and_artifact_maps(np.asarray(pil, dtype=np.uint8))
+                coc0 = self.coc.compute_coc_jacobian_field(pil, maps0)
+                self._last_phoenix_aux = (maps0, coc0[:, :, 0])
+            pk0 = build_pillar3_sample_tensors(
+                pil,
+                coc_probe=self.coc,
+                include_mid_tex=not self.p3_legacy,
+                precomputed_phys_maps=maps0,
+                precomputed_coc=coc0,
+                precomputed_crops=crops0,
+            )
+            pk1 = build_pillar3_sample_tensors(pil_flip, coc_probe=self.coc, include_mid_tex=not self.p3_legacy)
+            v2 = torch.stack([pk0["views_tensor"], pk1["views_tensor"]], dim=0).to(self.dev, non_blocking=True)
+            ph2 = torch.stack([pk0["phys_9ch"], pk1["phys_9ch"]], dim=0).to(self.dev, non_blocking=True)
+            pr2 = torch.stack([pk0["probe_8ch"], pk1["probe_8ch"]], dim=0).to(self.dev, non_blocking=True)
+            o2 = self.p3(views_01=v2, phys_9ch=ph2, probe_8ch=pr2, batch_ids=None, apply_batch_bias=False)
+            p2 = o2["probs_6x4"].float().cpu().numpy()
+            acc[self.p3_key] = [0.5 * (p2[0] + p2[1])]
+            if self.profile_sync:
                 torch.cuda.synchronize()
-                sec[self.p3_key] += time.perf_counter() - t
+            sec[self.p3_key] += time.perf_counter() - t
         return {k: np.mean(v, 0) for k, v in acc.items()}, sec
 
     def infer(self, name):
@@ -702,45 +1388,176 @@ class FinalEngine:
         torch = self.torch
         probs, sec = {}, {}
         self.peak = getattr(self, "peak", {})
+        sync = bool(self.profile_sync)
 
         def mark(tag):
-            self.peak[tag] = max(self.peak.get(tag, 0.0), torch.cuda.max_memory_allocated() / 2 ** 30)
-            torch.cuda.reset_peak_memory_stats()
+            if sync:
+                self.peak[tag] = max(self.peak.get(tag, 0.0), torch.cuda.max_memory_allocated() / 2 ** 30)
+                torch.cuda.reset_peak_memory_stats()
 
-        with torch.no_grad():
-            torch.cuda.reset_peak_memory_stats()
-            for m in self.t1:
-                t = time.perf_counter()
-                probs[m] = self._tier1(m, name)
-                torch.cuda.synchronize()
-                sec[m] = time.perf_counter() - t
-                mark(m)
-            for m in self.ntg:
-                t = time.perf_counter()
-                probs[m] = self._ntg(m, name)
-                torch.cuda.synchronize()
-                sec[m] = time.perf_counter() - t
-                mark(m)
-            for m in self.p12:
-                t = time.perf_counter()
-                probs[m] = self._p12(m, name)
-                torch.cuda.synchronize()
-                sec[m] = time.perf_counter() - t
-                mark(m)
-            if "v16" in self.members:
-                t = time.perf_counter()
-                probs["v16"] = self._v16(name)
-                torch.cuda.synchronize()
-                sec["v16"] = time.perf_counter() - t
-                mark("v16")
-            if "p1" in self.members or "p1_qy" in self.members or self.p3_key is not None:
-                pp, ps = self._phoenix(self.loader.load_pil(name).convert("RGB"))
-                probs.update(pp)
-                sec.update({k: v for k, v in ps.items() if k in pp})
-                mark("phoenix")
-        self.store.map.pop(str(name), None)                    # keep the on-the-fly meta store from growing
-        if self.p12_store is not None:
-            self.p12_store.map.pop(str(name), None)
+        # Single-decode per-image cache (consumes prefetched CPU work if available; cleared in finally)
+        pref = self._prefetch_cache.pop(str(name), None)
+        if pref is not None:
+            pil_rgb, rgb_u8, pre_v16_phys = pref
+        else:
+            pil_rgb = self._orig_load_pil(name).convert("RGB")
+            rgb_u8 = np.asarray(pil_rgb, dtype=np.uint8)
+            pre_v16_phys = None
+        _owns_img_cache = str(name) not in self._img_cache
+        self._img_cache[str(name)] = pil_rgb
+        bndry_tile_cache = {}
+
+        try:
+            with torch.no_grad():
+                if sync:
+                    torch.cuda.reset_peak_memory_stats()
+                pe_grp = getattr(self, "_pe_shared_group", [])
+                pe_grp_set = set(pe_grp)
+                pe_done = False
+                for m in self.t1:
+                    if m in pe_grp_set:
+                        if not pe_done:
+                            gp, gs = self._run_pe_shared_group(name)
+                            probs.update(gp)
+                            sec.update(gs)
+                            for gm in pe_grp:
+                                mark(gm)
+                            pe_done = True
+                        continue
+                    t = time.perf_counter()
+                    probs[m] = self._tier1(m, name)
+                    if sync:
+                        torch.cuda.synchronize()
+                    sec[m] = time.perf_counter() - t
+                    mark(m)
+                for m in self.ntg:
+                    t = time.perf_counter()
+                    probs[m] = self._ntg(m, name)
+                    if sync:
+                        torch.cuda.synchronize()
+                    sec[m] = time.perf_counter() - t
+                    mark(m)
+                for m in self.p12:
+                    t = time.perf_counter()
+                    probs[m] = self._p12(m, name)
+                    if sync:
+                        torch.cuda.synchronize()
+                    sec[m] = time.perf_counter() - t
+                    mark(m)
+                for m in self.bndry:
+                    t = time.perf_counter()
+                    probs[m] = self._bndry(m, name, rgb_u8=rgb_u8, bndry_tile_cache=bndry_tile_cache)
+                    if sync:
+                        torch.cuda.synchronize()
+                    sec[m] = time.perf_counter() - t
+                    mark(m)
+                if "v16" in self.members:
+                    t = time.perf_counter()
+                    probs["v16"] = self._v16(name, pil_rgb=pil_rgb, rgb_u8=rgb_u8, pre_v16_phys=pre_v16_phys)
+                    if sync:
+                        torch.cuda.synchronize()
+                    sec["v16"] = time.perf_counter() - t
+                    mark("v16")
+                if "iv6b" in self.members:
+                    t = time.perf_counter()
+                    probs["iv6b"] = self._iv6b(name, pil_rgb=pil_rgb, rgb_u8=rgb_u8)
+                    if sync:
+                        torch.cuda.synchronize()
+                    sec["iv6b"] = time.perf_counter() - t
+                    mark("iv6b")
+                if "p1" in self.members or "p1_qy" in self.members or "qwen_hr" in self.members or self.p3_key is not None:
+                    self._last_phoenix_aux = None
+                    sem_meta_ph = self.p12_store.map.get(str(name)) if self.p12_store is not None else None
+                    pp, ps = self._phoenix(pil_rgb, sem_meta=sem_meta_ph)
+                    probs.update(pp)
+                    sec.update({k: v for k, v in ps.items() if k in pp})
+                    mark("phoenix")
+
+                if "ntg_pe" in self.ntg:
+                    buf = getattr(self.ntg["ntg_pe"][0], "_tile_capture_buf", ())
+                    if len(buf) >= 1:
+                        from native_tiles import TILE, tile_starts
+                        from ntg_tile_peak_probe import summarize_per_tile_outputs
+                        from phoenix.native_physics_and_views import compute_1to1_wavelet_and_artifact_maps
+                        from semantic_roi_meta import analyze_semantic_rois_pil
+                        from spatial_salience_probe import _compute_skin_prob_half, aggregate_spatial_salience_features
+
+                        if len(buf) >= 2:
+                            probs["_tile_peaks_6x12"] = (
+                                0.5 * (summarize_per_tile_outputs(*buf[0]) + summarize_per_tile_outputs(*buf[1]))
+                            ).astype(np.float32)
+                        else:
+                            probs["_tile_peaks_6x12"] = summarize_per_tile_outputs(*buf[0]).astype(np.float32)
+
+                        W, H = pil_rgb.size
+                        xs, ys = tile_starts(W, TILE), tile_starts(H, TILE)
+                        tile_boxes = [(x0, y0, min(W, x0 + TILE), min(H, y0 + TILE)) for y0 in ys for x0 in xs]
+
+                        ntg_m = self.ntg["ntg_pe"][0]
+                        if H < TILE or W < TILE:
+                            rgb_pad = np.pad(rgb_u8, ((0, max(0, TILE - H)), (0, max(0, TILE - W)), (0, 0)), mode="reflect")
+                        else:
+                            rgb_pad = rgb_u8
+                        tile_arrs = [rgb_pad[y0 : y0 + TILE, x0 : x0 + TILE] for y0 in ys for x0 in xs]
+                        tiles_t = torch.from_numpy(np.stack(tile_arrs, axis=0).astype(np.float32) / 255.0).permute(0, 3, 1, 2).contiguous().to(self.dev)
+                        from PIL import Image as _PILImage
+                        g_t = torch.from_numpy(np.asarray(pil_rgb.resize((TILE, TILE), _PILImage.BICUBIC), dtype=np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0).contiguous().to(self.dev)
+                        if str(name) in self.store.map:
+                            base_phys_36 = np.asarray(self.store.map[str(name)]["phys_vec"], dtype=np.float32)
+                        else:
+                            base_phys_36 = np.asarray(self.store.lazy_extractor.analyze_pil_image(pil_rgb)["phys_vec"], dtype=np.float32)
+                        phys_rep = torch.from_numpy(base_phys_36).to(self.dev).view(1, -1).expand(len(tile_boxes), -1)
+
+                        def _one_tile_pass(tv, gv):
+                            with torch.no_grad(), torch.autocast(device_type="cuda" if self.dev.type == "cuda" else "cpu", dtype=torch.bfloat16, enabled=(self.dev.type == "cuda")):
+                                ntv = ntg_m._norm_img(tv)
+                                ft = torch.cat([ntg_m._encode_single_view(ntv[s : s + 16]) for s in range(0, tv.shape[0], 16)], dim=0).float()
+                                ge = ntg_m._encode_single_view(ntg_m._norm_img(gv)).float()
+                            with torch.no_grad():
+                                lg = ntg_m.view_agg.gate(ft.unsqueeze(0)).squeeze(0).squeeze(-1)
+                                wm = torch.softmax(lg.float(), dim=0)
+                                ho = ntg_m.head(torch.cat([ge.expand(ft.shape[0], -1), ft, ft], dim=-1), phys_feat=phys_rep)
+                                return ho["probs_6x4"].float().cpu().numpy(), ho["severity_s"].float().cpu().numpy(), wm.float().cpu().numpy()
+
+                        # Reuse `buf[0]` (flip=False) directly when H>=TILE & W>=TILE (bit-identical, skips 1 full PE multi-tile pass!)
+                        if H >= TILE and W >= TILE and len(buf[0][2]) == len(tile_boxes):
+                            tp0, ts0, tw0 = buf[0]
+                        else:
+                            tp0, ts0, tw0 = _one_tile_pass(tiles_t, g_t)
+                        tp1, ts1, tw1 = _one_tile_pass(torch.flip(tiles_t, dims=[-1]), torch.flip(g_t, dims=[-1]))
+                        tp_m, ts_m, tw_m = 0.5 * (tp0 + tp1), 0.5 * (ts0 + ts1), 0.5 * (tw0 + tw1)
+
+                        aux_ph = getattr(self, "_last_phoenix_aux", None)
+                        self._last_phoenix_aux = None
+                        if aux_ph is not None:
+                            phys_maps, z_hat_half = aux_ph
+                        else:
+                            phys_maps = compute_1to1_wavelet_and_artifact_maps(rgb_u8)
+                            z_hat_half = self.coc.estimate_depth_half_res(pil_rgb, phys_maps["bipolar_halo"].shape)
+                        skin_half = _compute_skin_prob_half(rgb_u8, phys_maps["bipolar_halo"].shape)
+                        if self.p12_store is not None and str(name) in self.p12_store.map:
+                            sem_meta = self.p12_store.map[str(name)]
+                        elif str(name) in self.store.map:
+                            sem_meta = analyze_semantic_rois_pil(pil_rgb, base_phys_36=self.store.map[str(name)]["phys_vec"])
+                        else:
+                            sem_meta = analyze_semantic_rois_pil(pil_rgb, base_phys_36=self.store.lazy_extractor.analyze_pil_image(pil_rgb)["phys_vec"])
+
+                        probs["_spatial_20d"] = aggregate_spatial_salience_features(
+                            tile_probs=tp_m,
+                            tile_sev=ts_m,
+                            tile_mil_w=tw_m,
+                            tile_boxes=tile_boxes,
+                            z_hat_half=z_hat_half,
+                            phys_maps=phys_maps,
+                            sem_meta=sem_meta,
+                            skin_half=skin_half,
+                        ).astype(np.float32)
+        finally:
+            if _owns_img_cache:
+                self._img_cache.pop(str(name), None)
+            self.store.map.pop(str(name), None)                    # keep the on-the-fly meta store from growing
+            if self.p12_store is not None:
+                self.p12_store.map.pop(str(name), None)
         return probs, sec
 
 
@@ -757,6 +1574,29 @@ def load_decoder(set_name, rule):
             q = pool(P, members)
             return dec.predict(q), q
         return decode, dec
+    if rule in ("deconf_v2", "deconf_v3", "deconf_v4_tile", "deconf_v5_boundary", "deconf_v6_boundary"):
+        import routed_eu_decoder  # noqa: F401
+        import deconfound_calibrator  # noqa: F401
+        import upgrade_os_og_bokeh_deconf  # noqa: F401
+        if rule in ("deconf_v3", "deconf_v4_tile", "deconf_v5_boundary", "deconf_v6_boundary"):
+            import upgrade_deconf_v3_cleanlocked  # noqa: F401
+        if rule in ("deconf_v4_tile", "deconf_v5_boundary", "deconf_v6_boundary"):
+            import upgrade_deconf_v4_tile  # noqa: F401
+        if rule in ("deconf_v5_boundary", "deconf_v6_boundary"):
+            import upgrade_deconf_v5_boundary  # noqa: F401
+        if rule == "deconf_v6_boundary":
+            import upgrade_deconf_v6_boundary  # noqa: F401
+            try:
+                import build_v8_novlm_iv6b_decoder  # noqa: F401
+            except ImportError:
+                pass
+        rp = os.path.join(OUT, f"{set_name}_decoder_{rule}.pkl")
+        assert os.path.exists(rp), f"missing {rule} decoder bundle ({rp})"
+        bnd = pickle.load(open(rp, "rb"))["decoder"]
+
+        def decode(P):
+            return bnd.predict(P)
+        return decode, bnd.eu_decoder
     if rule in ("routed_eu", "routed_gate_eu"):
         import routed_eu_decoder  # noqa: F401
         rp = os.path.join(OUT, f"{set_name}_decoder_{rule}.pkl")
@@ -785,7 +1625,8 @@ _FP_MODES = ("midblock_4x4", "sub8_blk15")
 def _attr_tower_keys(t1_members):
     pe_key = "pe_v3" if "pe_v3" in t1_members else ("peg" if "peg" in t1_members else ("pe" if "pe" in t1_members else None))
     peg_extra = "peg" if ("peg" in t1_members and pe_key != "peg") else None
-    return pe_key, peg_extra
+    bk_extra = "pe_bkseg1" if ("pe_bkseg1" in t1_members and pe_key != "pe_bkseg1") else None
+    return pe_key, peg_extra, bk_extra
 
 
 def build_clean_footprint(set_name, half=True):
@@ -796,10 +1637,10 @@ def build_clean_footprint(set_name, half=True):
     from defect_attribution_map import PEAttributionOperator
     import measured_evidence as ME
     from qingyu.config_and_paths import DIMS
-    pe_key, peg_extra = _attr_tower_keys([m for m in SETS[set_name] if m in TIER1])
+    pe_key, peg_extra, bk_extra = _attr_tower_keys([m for m in SETS[set_name] if m in TIER1])
     assert pe_key is not None, f"set {set_name} has no PE tower for attribution"
-    towers = [pe_key] + ([peg_extra] if peg_extra else [])
-    eng = FinalEngine(towers, half=half)
+    towers = [pe_key] + ([peg_extra] if peg_extra else []) + ([bk_extra] if bk_extra else [])
+    eng = FinalEngine(towers, half=half, share_weights=True)
     clean = []
     for r in csv.DictReader(open(os.path.join(REPO, "data/manifest_combined.csv"), encoding="utf-8")):
         if all(int(r[d]) == 0 for d in DIMS):
@@ -844,7 +1685,7 @@ class AttributionRuntime:
         self.meta = json.loads(str(z["meta_json"]))
         self.fp_path = fp_path
         self.clean_ref = {k: z[k] for k in z.files if k.startswith("phys_")}
-        self.pe_key, self.peg_extra = _attr_tower_keys(list(eng.t1))
+        self.pe_key, self.peg_extra, self.bk_extra = _attr_tower_keys(list(eng.t1))
         assert self.pe_key in self.meta["towers"], (self.pe_key, self.meta["towers"])
         self.eng = eng
 
@@ -855,7 +1696,8 @@ class AttributionRuntime:
             op.footprints["midblock_hier8"] = np.zeros((6, 8, 8), dtype=np.float32)
             return op
         self.op_main = mk(self.pe_key)
-        self.op_peg = mk(self.peg_extra) if self.peg_extra else None
+        self.op_peg = mk(self.peg_extra) if (self.peg_extra and f"fp__{self.peg_extra}__midblock_4x4" in z.files) else None
+        self.op_bk = mk(self.bk_extra) if (self.bk_extra and f"fp__{self.bk_extra}__midblock_4x4" in z.files) else None
 
     def attribute(self, pil, pred_6d, probs_6x4):
         """-> (attribution dict, seconds).  Clean predictions skip the GPU localisation and the physics entirely."""
@@ -870,6 +1712,9 @@ class AttributionRuntime:
                 if self.op_peg is not None and int(pred_6d[3]) > 0:
                     peg_map, _ = self.op_peg.calibrated_map(pil, mode="midblock_hier8")
                     cal_map[3] = peg_map[3]
+                if self.op_bk is not None and int(pred_6d[5]) > 0:
+                    bk_map, _ = self.op_bk.calibrated_map(pil, mode="midblock_hier8")
+                    cal_map[5] = bk_map[5]
         att = generate_evidence_attribution(pred_6d, probs_6x4, ow, oh, cal_map_6xGxG=cal_map, pil=pil, clean_ref=self.clean_ref)
         return att, time.perf_counter() - t
 
@@ -877,7 +1722,7 @@ class AttributionRuntime:
 class N1Service:
     """Engine + decoder + attribution, one image at a time (shared by the template loop and serve_engine.py)."""
 
-    def __init__(self, eng, set_name, rule="routed_gate_eu", attribution=True):
+    def __init__(self, eng, set_name, rule="deconf_v6_boundary", attribution=True):
         self.eng, self.set, self.rule = eng, set_name, rule
         self.decode, self.sf_decoder = load_decoder(set_name, rule)
         self.attr = AttributionRuntime(eng, set_name) if attribution else None
@@ -916,20 +1761,13 @@ def _run_stage4_sidecars(a, eng, names, P, pp, primary_pred, primary_probs, per_
     )
 
     if a.video_mode:
-        vap = os.path.join(OUT, f"{a.set}_video_aggregator.pkl")
+        vap = _resolve_pack_path(f"results/r55/final/{a.set}_video_aggregator.pkl", f"decoders/{a.set}_video_aggregator.pkl")
         if os.path.exists(vap):
             vid_agg = pickle.load(open(vap, "rb"))["video_aggregator"]
         else:
             vid_agg = EffectiveFrameORVideoAggregator()
 
-        # Load single-frame decoder object for multi-frame calibration
-        rule0 = a.decoder[0]
-        if rule0 in ("routed_gate_eu", "routed_eu"):
-            rp = os.path.join(OUT, f"{a.set}_decoder_{rule0}.pkl")
-            sf_dec = pickle.load(open(rp, "rb"))["decoder"].eu
-        else:
-            rp = os.path.join(OUT, f"{a.set}_decoder.pkl")
-            sf_dec = pickle.load(open(rp, "rb"))["decoder"]
+        _, sf_dec = load_decoder(a.set, a.decoder[0])
 
         vid_groups = {}
         for idx_i, nm in enumerate(names):
@@ -990,18 +1828,24 @@ def main():
     if os.environ.get("R55_AUDIT_TRAIN_READS") == "1":
         install_training_read_audit()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--set", default="primary", choices=list(SETS))
+    ap.add_argument("--set", default="resident_v8_boundary", choices=list(SETS))
     ap.add_argument("--gpu", type=int, default=0)
     ap.add_argument("--fit-decoder", action="store_true")
     ap.add_argument("--bench", type=int, default=0)
     ap.add_argument("--v16-chunk", type=int, default=0, help="run V16 backbones on this many views at a time (lower activation peak)")
     ap.add_argument("--half", action="store_true", help="store Tier-1 and V16 backbone weights in bf16 (halves their memory)")
+    ap.add_argument("--embed-on-host", action="store_true",
+                    help="keep the p1_qy token-embedding table (1.16 GB) in host memory; only the prompt's rows go to the GPU per call; outputs unchanged")
+    ap.add_argument("--share-weights", action="store_true",
+                    help="keep one GPU copy of weight tensors that are bit-identical between members (frozen backbone blocks); outputs unchanged")
     ap.add_argument("--template", default="")
     ap.add_argument("--img-dir", default="")
     ap.add_argument("--out", default="")
-    ap.add_argument("--decoder", nargs="+", default=["d55"], choices=["d55", "eu", "vote", "routed_eu", "routed_gate_eu"],
+    ap.add_argument("--decoder", nargs="+", default=["deconf_v6_boundary"], choices=["d55", "eu", "vote", "routed_eu", "routed_gate_eu", "deconf_v2", "deconf_v3", "deconf_v4_tile", "deconf_v5_boundary", "deconf_v6_boundary"],
                     help="decision rule(s): d55 = Decoder55; eu / vote = decoder_eu.py; routed_eu = RoutedEUDecoder; "
-                         "routed_gate_eu = Stage-3 RoutedGateEUDecoder. Several rules -> one file per rule from ONE inference pass")
+                         "routed_gate_eu = Stage-3 RoutedGateEUDecoder; deconf_v2 = Stage-4 Rank-1 Cross-Defect & Cross-Scale Calibrated EU; "
+                         "deconf_v4_tile = Default Stage-4 1:1 Tile Max-vs-Mean Salience + Clean-Locked Rank-1 Calibrated EU. "
+                         "Several rules -> one file per rule from ONE inference pass")
     ap.add_argument("--video-mode", action="store_true", help="Stage 4: emit §5-compliant multi-frame video summary sidecar JSON")
     ap.add_argument("--emit-attribution", default="", help="Stage 4: emit causal spatial defect attribution sidecar JSON + contact sheet")
     ap.add_argument("--tat-out", default="", help="Stage 4: emit Kuaishou 极目/TAT platform payload JSON")
@@ -1023,7 +1867,12 @@ def main():
     v16_chunk = a.v16_chunk if a.v16_chunk else (V16_CHUNK_BY_SET.get(a.set, 0) if a.half else 0)
     torch.cuda.init()
     nv = NvmlPeakSampler()
-    eng = FinalEngine(members, img_dir=a.img_dir, half=a.half, v16_chunk=v16_chunk)
+    eng = FinalEngine(members, img_dir=a.img_dir, half=a.half, v16_chunk=v16_chunk, share_weights=a.share_weights,
+                      embed_on_host=a.embed_on_host)
+    if a.embed_on_host:
+        print(f"[final_engine] --embed-on-host: {getattr(eng, 'embed_host_bytes', 0) / 2 ** 30:.2f} GB token-embedding table kept in host memory", flush=True)
+    if a.share_weights:
+        print(f"[final_engine] --share-weights: {eng.shared_bytes / 2 ** 30:.2f} GB of bit-identical weights now held once", flush=True)
     peak_load = torch.cuda.max_memory_allocated() / 2 ** 30
     nv_peak_load = nv.peak_mib
     nv.reset()
@@ -1031,6 +1880,7 @@ def main():
     dec = pickle.load(open(dp, "rb"))["decoder"] if os.path.exists(dp) else None
 
     if a.bench:
+        eng.profile_sync = True
         names, gold, fold, p_oof, P_oof = oof_pool(members)
         rs = np.random.RandomState(0)
         idx = sorted(rs.choice(len(names), a.bench, replace=False))
@@ -1091,7 +1941,10 @@ def main():
                        load_s=float(eng.load_s), total_median=float(np.median(tot)),
                        nvidia_smi_peak_load_mib=float(nv_peak_load), nvidia_smi_after_warmup_mib=float(nv_after_warm),
                        nvidia_smi_peak_infer_mib=float(nv_peak_inf), torch_reserved_gb=round(float(reserved_gb), 3),
-                       pytorch_cuda_alloc_conf=os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")),
+                       pytorch_cuda_alloc_conf=os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""),
+                       share_weights=bool(a.share_weights), shared_weights_gb=round(float(eng.shared_bytes) / 2 ** 30, 3),
+                       embed_on_host=bool(a.embed_on_host), embed_host_gb=round(float(getattr(eng, "embed_host_bytes", 0)) / 2 ** 30, 3),
+                       int8_saved_gb=round(float(getattr(eng, "int8_saved_bytes", 0)) / 2 ** 30, 3)),
                   open(os.path.join(OUT, f"{a.set}_bench{'_half' if a.half else ''}{a.bench_tag}.json"), "w"), indent=2)
         return
 
@@ -1103,19 +1956,33 @@ def main():
     names = c.load_template_names(a.template)
     rows, per_img_secs, n1_preds, attr_records, tat_records, t0 = [], [], [], [], [], time.time()
     attr_secs = []
-    for k, n in enumerate(names):
-        r = svc.predict(n, with_attribution=want_attr)
-        rows.append(r["member_probs"])
-        per_img_secs.append(r["total_s"])
-        n1_preds.append(r["pred"])
-        if want_attr:
-            attr_secs.append(r["attr_s"])
-            attr_records.append({"image": n, "label": r["label"], "attribution": r["attribution"],
-                                 "latency_s": {kk: round(float(r[kk]), 4) for kk in ("infer_s", "decode_s", "attr_s", "total_s")}})
-            tat_records.append(r["tat_jimu_payload"])
-        if (k + 1) % 25 == 0:
-            print(f"  [{k + 1}/{len(names)}] {(time.time() - t0) / (k + 1):.2f}s per image", flush=True)
+    from concurrent.futures import ThreadPoolExecutor
+    prefetch_q = {}
+    with ThreadPoolExecutor(max_workers=2) as pf_pool:
+        for pk in range(min(2, len(names))):
+            prefetch_q[pk] = pf_pool.submit(eng.prefetch_cpu, names[pk])
+        for k, n in enumerate(names):
+            if k in prefetch_q:
+                eng._prefetch_cache[str(n)] = prefetch_q.pop(k).result()
+            nxt = k + 2
+            if nxt < len(names):
+                prefetch_q[nxt] = pf_pool.submit(eng.prefetch_cpu, names[nxt])
+            r = svc.predict(n, with_attribution=want_attr)
+            rows.append(r["member_probs"])
+            per_img_secs.append(r["total_s"])
+            n1_preds.append(r["pred"])
+            if want_attr:
+                attr_secs.append(r["attr_s"])
+                attr_records.append({"image": n, "label": r["label"], "attribution": r["attribution"],
+                                     "latency_s": {kk: round(float(r[kk]), 4) for kk in ("infer_s", "decode_s", "attr_s", "total_s")}})
+                tat_records.append(r["tat_jimu_payload"])
+            if (k + 1) % 25 == 0:
+                print(f"  [{k + 1}/{len(names)}] {(time.time() - t0) / (k + 1):.2f}s per image", flush=True)
     P = {m: np.stack([r[m] for r in rows]) for m in members}
+    P_dec = dict(P)
+    for aux_k in ("_spatial_20d", "_tile_peaks_6x12"):
+        if rows and aux_k in rows[0]:
+            P_dec[aux_k] = np.stack([r[aux_k] for r in rows])
     pp = pool(P, members)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
 
@@ -1123,7 +1990,7 @@ def main():
     primary_probs = pp
     for idx_r, rule in enumerate(a.decoder):
         decode_r, _ = load_decoder(a.set, rule)
-        pred, q_used = decode_r(P)                                # batch (N = len(template)) decode
+        pred, q_used = decode_r(P_dec)                            # batch (N = len(template)) decode
         if idx_r == 0:
             primary_pred = pred
             primary_probs = q_used
@@ -1146,6 +2013,7 @@ def main():
         pooled=pp,
         routed=primary_probs,
         **{f"p_{m}": v for m, v in P.items()},
+        **{f"aux_{k}": P_dec[k] for k in ("_spatial_20d", "_tile_peaks_6x12") if k in P_dec},
     )
 
     if (a.video_mode or a.emit_attribution or a.tat_out) and primary_pred is not None:

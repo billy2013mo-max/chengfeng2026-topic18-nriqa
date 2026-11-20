@@ -1,0 +1,73 @@
+{
+  "n_real_multiframe_videos_oof": 320,
+  "n_clean_multiframe_videos": 100,
+  "n_p0_video_defect_instances": 238,
+  "fitted_within_video_rho_p0": {
+    "模糊": 0.3944,
+    "纹理损失": 0.4793,
+    "过锐": 0.19,
+    "花屏": 0.15,
+    "过度生成": 0.3915,
+    "虚化突兀": 0.2872
+  },
+  "fitted_base_tau_p0": {
+    "模糊": 0.4555,
+    "纹理损失": 0.3958,
+    "过锐": 0.3564,
+    "花屏": 0.504,
+    "过度生成": 0.3084,
+    "虚化突兀": 0.3214
+  },
+  "real_multiframe_oof_comparison": {
+    "legacy_cusum_mean": {
+      "video_p0_recall": 0.6092,
+      "clean_video_specificity": 1.0,
+      "clean_video_fp_rate": 0.0,
+      "video_doc2_strict": 46.655
+    },
+    "naive_frame_or": {
+      "video_p0_recall": 0.8529,
+      "clean_video_specificity": 1.0,
+      "clean_video_fp_rate": 0.0,
+      "video_doc2_strict": 52.442
+    },
+    "effective_frame_or_ours": {
+      "video_p0_recall": 0.8529,
+      "clean_video_specificity": 0.99,
+      "clean_video_fp_rate": 0.01,
+      "video_doc2_strict": 51.746
+    }
+  },
+  "multi_frame_sampling_fp_sweep": {
+    "M=1": {
+      "naive_or_any_fp_pct": 1.2,
+      "meff_or_any_fp_pct": 1.2,
+      "naive_or_p0_fp_pct": 0.43,
+      "meff_or_p0_fp_pct": 0.43
+    },
+    "M=4": {
+      "naive_or_any_fp_pct": 0.9,
+      "meff_or_any_fp_pct": 0.77,
+      "naive_or_p0_fp_pct": 0.17,
+      "meff_or_p0_fp_pct": 0.17
+    },
+    "M=8": {
+      "naive_or_any_fp_pct": 1.0,
+      "meff_or_any_fp_pct": 0.2,
+      "naive_or_p0_fp_pct": 0.37,
+      "meff_or_p0_fp_pct": 0.17
+    },
+    "M=16": {
+      "naive_or_any_fp_pct": 1.73,
+      "meff_or_any_fp_pct": 0.2,
+      "naive_or_p0_fp_pct": 0.83,
+      "meff_or_p0_fp_pct": 0.13
+    },
+    "M=30": {
+      "naive_or_any_fp_pct": 2.53,
+      "meff_or_any_fp_pct": 0.63,
+      "naive_or_p0_fp_pct": 1.57,
+      "meff_or_p0_fp_pct": 0.37
+    }
+  }
+}

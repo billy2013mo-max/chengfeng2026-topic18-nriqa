@@ -23,11 +23,7 @@ from pathlib import Path
 
 QINGYU_DIR = os.path.dirname(os.path.abspath(__file__))
 CODE_DIR = os.path.dirname(QINGYU_DIR)
-REPO_ROOT = (
-    "/wanqing-develop/luowenjing/18"
-    if os.path.exists("/wanqing-develop/luowenjing/18")
-    else os.path.abspath(os.path.join(QINGYU_DIR, "../.."))
-)
+REPO_ROOT = os.path.abspath(os.path.join(QINGYU_DIR, "../.."))
 QINGYU_CKPT_DIR = Path(REPO_ROOT) / "checkpoints" / "qingyu"
 QINGYU_RESULTS_DIR = Path(REPO_ROOT) / "results" / "qingyu"
 QINGYU_SPLITS_DIR = Path(REPO_ROOT) / "data" / "qingyu_splits"
@@ -197,13 +193,47 @@ def enforce_deterministic_runtime(seed: int = 2026, deterministic_algos: bool = 
         pass
 
 
+def seed_hf_dynamic_modules(repo_dir: str) -> None:
+    """Pre-seeds all local `*.py` files into `HF_MODULES_CACHE/transformers_modules/<repo>` so `trust_remote_code=True`
+    (e.g. `c-radio-v4-h` with `from . import utils / dual_hybrid_vit`) succeeds on a brand-new air-gapped `HF_HOME`."""
+    if not os.path.isdir(repo_dir):
+        return
+    try:
+        import glob as _glob
+        import shutil as _shutil
+        from transformers.dynamic_module_utils import HF_MODULES_CACHE, create_dynamic_module
+        mod_sub = os.path.join(
+            "transformers_modules",
+            os.path.basename(os.path.normpath(repo_dir)).replace("-", "_hyphen_").replace(".", "_dot_"),
+        )
+        create_dynamic_module(mod_sub)
+        dst = os.path.join(str(HF_MODULES_CACHE), mod_sub)
+        os.makedirs(dst, exist_ok=True)
+        for pyf in _glob.glob(os.path.join(repo_dir, "*.py")):
+            bn = os.path.basename(pyf)
+            if not os.path.exists(os.path.join(dst, bn)):
+                _shutil.copy2(pyf, os.path.join(dst, bn))
+    except Exception:
+        pass
+
+
 def resolve_model_path(model_key: str, root: str = REPO_ROOT) -> str:
     """Resolves local weight directory/file first, falling back cleanly to HF repo ID."""
     info = MODEL_POOL_BUDGET[model_key]
+    extra_base = os.environ.get("R55_BASE_MODELS_DIR", "").strip()
+    roots = [root, os.path.dirname(root), os.path.join(os.path.dirname(root), "03_模型产物")]
     for cand in info["candidates"]:
-        abs_cand = cand if os.path.isabs(cand) else os.path.join(root, cand)
-        if os.path.exists(abs_cand):
-            return abs_cand
+        if os.path.isabs(cand) and os.path.exists(cand):
+            return cand
+        if extra_base and cand.startswith("models/"):
+            p_env = os.path.join(extra_base, cand[len("models/"):])
+            if os.path.exists(p_env):
+                return p_env
+        for rt in roots:
+            for rel_c in (cand, cand.replace("models/", "base_models/", 1)):
+                abs_cand = os.path.join(rt, rel_c)
+                if os.path.exists(abs_cand):
+                    return abs_cand
     return str(info["candidates"][-1])
 
 

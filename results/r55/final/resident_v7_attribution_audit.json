@@ -1,0 +1,466 @@
+{
+  "decoder": "deconf_v4_tile",
+  "test_150_attribution_audit": {
+    "n_images": 150,
+    "clean_images_consistent": "19/19",
+    "total_positive_defect_cells": 334,
+    "label_attribution_exact_match": "334/334 (100.0%)",
+    "max_reason_40ch_len": 38,
+    "over_40ch_count": 0,
+    "truncated_ellipsis_count": 0,
+    "self_contradiction_count": 0,
+    "uncertainty_note_coverage": "334/334",
+    "evidence_verdict_counts": {
+      "inconclusive": 278,
+      "supports": 50,
+      "contradicts": 6
+    },
+    "localization_by_dim": {
+      "模糊": {
+        "局部框": 67,
+        "全图": 8
+      },
+      "纹理损失": {
+        "局部框": 96,
+        "全图": 32
+      },
+      "过度生成": {
+        "局部框": 43
+      },
+      "虚化突兀": {
+        "局部框": 14
+      },
+      "过锐": {
+        "局部框": 62,
+        "全图": 2
+      },
+      "花屏": {
+        "局部框": 10
+      }
+    },
+    "sample_examples": [
+      {
+        "image": "137212400938_frame14.png",
+        "defect": "模糊",
+        "severity": "P2",
+        "location": "画面中下区",
+        "box_xyxy": [
+          96,
+          512,
+          544,
+          960
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面中下区P2级模糊：局部或边缘清晰度轻度衰减（临界复核）",
+        "len_reason": 29,
+        "uncertainty_note": "单帧仅能确认高频边缘衰减，无法区分源拍摄失焦、运动模糊或转码压缩模糊（需结合相邻帧时序确证）；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动；当前等级置信度0.31，与相邻等级（无问题）处于主观感知临界带"
+      },
+      {
+        "image": "137212400938_frame14.png",
+        "defect": "纹理损失",
+        "severity": "P1",
+        "location": "画面中上区",
+        "box_xyxy": [
+          96,
+          334,
+          544,
+          782
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面中上区P1级纹理损失：中高频表面纹理中度平滑涂抹（临界复核）",
+        "len_reason": 32,
+        "uncertainty_note": "单帧仅能确认中高频表面纹理平滑，无法剥离源素材低码率涂抹与服务端降噪前处理贡献；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动；当前等级置信度0.46，与相邻等级（P2）处于主观感知临界带"
+      },
+      {
+        "image": "137212400938_frame14.png",
+        "defect": "花屏",
+        "severity": "P0",
+        "location": "画面右上区",
+        "box_xyxy": [
+          96,
+          190,
+          544,
+          638
+        ],
+        "evidence_verdict": "supports",
+        "reason_40ch": "画面右上区P0级花屏：实测8px块边界跳变1.18（洁净P94）",
+        "len_reason": 32,
+        "uncertainty_note": "单帧可见局部宏块阶跃或色度错乱，具体发生于上传解码或转码传输环节需结合流媒体日志定位"
+      },
+      {
+        "image": "151918507262_000175.png",
+        "defect": "纹理损失",
+        "severity": "P2",
+        "location": "全图",
+        "box_xyxy": null,
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "全图P2级纹理损失：暗部或皮肤等微纹理轻度平滑（临界复核）",
+        "len_reason": 29,
+        "uncertainty_note": "单帧仅能确认中高频表面纹理平滑，无法剥离源素材低码率涂抹与服务端降噪前处理贡献；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动"
+      },
+      {
+        "image": "151918507262_000175.png",
+        "defect": "过度生成",
+        "severity": "P1",
+        "location": "画面左中区",
+        "box_xyxy": [
+          0,
+          280,
+          448,
+          728
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面左中区P1级过度生成：局部细节存在AI生成伪纹理或结构异常（临界复核）",
+        "len_reason": 37,
+        "uncertainty_note": "单帧可见局部非自然生成结构/纹理异常，无法仅凭单帧区分源AIGC生成伪影或后处理超分重绘伪影；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动；同一区域同时存在生成结构异常与景深边缘跳变响应，两类现象在单帧下局部耦合；当前等级置信度0.39，与相邻等级（P2）处于主观感知临界带"
+      },
+      {
+        "image": "151918507262_000175.png",
+        "defect": "过锐",
+        "severity": "P2",
+        "location": "画面左中区",
+        "box_xyxy": [
+          0,
+          96,
+          448,
+          544
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面左中区P2级过锐：局部轮廓边缘存在轻度锐化强化感（临界复核）",
+        "len_reason": 32,
+        "uncertainty_note": "单帧可见高反差边缘过冲光晕，无法单独区分拍摄端ISP锐化与服务端超分/增强后处理引入；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动；当前等级置信度0.31，与相邻等级（无问题）处于主观感知临界带"
+      },
+      {
+        "image": "152861394819_53.png",
+        "defect": "模糊",
+        "severity": "P1",
+        "location": "全图",
+        "box_xyxy": null,
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "全图P1级模糊：轮廓边缘中度发虚、细节清晰度下降（临界复核）",
+        "len_reason": 30,
+        "uncertainty_note": "单帧仅能确认高频边缘衰减，无法区分源拍摄失焦、运动模糊或转码压缩模糊（需结合相邻帧时序确证）；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动；当前等级置信度0.41，与相邻等级（P0）处于主观感知临界带"
+      },
+      {
+        "image": "152861394819_53.png",
+        "defect": "纹理损失",
+        "severity": "P1",
+        "location": "画面左中区",
+        "box_xyxy": [
+          0,
+          556,
+          448,
+          1004
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面左中区P1级纹理损失：中高频表面纹理中度平滑涂抹（临界复核）",
+        "len_reason": 32,
+        "uncertainty_note": "单帧仅能确认中高频表面纹理平滑，无法剥离源素材低码率涂抹与服务端降噪前处理贡献；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动；当前等级置信度0.35，与相邻等级（P0）处于主观感知临界带"
+      },
+      {
+        "image": "152861394819_53.png",
+        "defect": "过度生成",
+        "severity": "P0",
+        "location": "画面中心区",
+        "box_xyxy": [
+          238,
+          952,
+          686,
+          1400
+        ],
+        "evidence_verdict": "supports",
+        "reason_40ch": "画面中心区P0级过度生成：实测局部/全局高频比2.69（洁净P95）",
+        "len_reason": 34,
+        "uncertainty_note": "单帧可见局部非自然生成结构/纹理异常，无法仅凭单帧区分源AIGC生成伪影或后处理超分重绘伪影"
+      },
+      {
+        "image": "152863271821_302.png",
+        "defect": "模糊",
+        "severity": "P0",
+        "location": "画面中上区",
+        "box_xyxy": [
+          635,
+          0,
+          1083,
+          448
+        ],
+        "evidence_verdict": "supports",
+        "reason_40ch": "画面中上区P0级模糊：实测拉普拉斯方差0.00011（洁净P8）",
+        "len_reason": 32,
+        "uncertainty_note": "单帧仅能确认高频边缘衰减，无法区分源拍摄失焦、运动模糊或转码压缩模糊（需结合相邻帧时序确证）"
+      },
+      {
+        "image": "152863271821_302.png",
+        "defect": "纹理损失",
+        "severity": "P0",
+        "location": "全图",
+        "box_xyxy": null,
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "全图P0级纹理损失：表面微纹理严重涂抹、质感大面积丢失（置信0.70）",
+        "len_reason": 35,
+        "uncertainty_note": "单帧仅能确认中高频表面纹理平滑，无法剥离源素材低码率涂抹与服务端降噪前处理贡献；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动"
+      },
+      {
+        "image": "152863271821_302.png",
+        "defect": "过度生成",
+        "severity": "P0",
+        "location": "画面中心区",
+        "box_xyxy": [
+          247,
+          134,
+          695,
+          582
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面中心区P0级过度生成：多塔聚焦局部结构畸变或违背常理伪影（临界复核）",
+        "len_reason": 36,
+        "uncertainty_note": "单帧可见局部非自然生成结构/纹理异常，无法仅凭单帧区分源AIGC生成伪影或后处理超分重绘伪影；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动"
+      }
+    ]
+  },
+  "final_644_spot_check": {
+    "spot_check_images": 20,
+    "spot_check_changed_vs_v2_included": 13,
+    "spot_check_cells": "120/120 exact match",
+    "spot_check_max_prob_diff": 0.000204,
+    "attr_mean_s": 0.2672,
+    "attr_p95_s": 0.5068,
+    "attr_max_s": 1.2059,
+    "n_video_groups_644": 616,
+    "n_multiframe_groups_644": 27,
+    "train_reads": 0
+  },
+  "final_644_attribution_audit": {
+    "n_images": 644,
+    "clean_images_consistent": "110/110",
+    "total_positive_defect_cells": 1362,
+    "label_attribution_exact_match": "1362/1362 (100.0%)",
+    "max_reason_40ch_len": 38,
+    "over_40ch_count": 0,
+    "truncated_ellipsis_count": 0,
+    "self_contradiction_count": 0,
+    "uncertainty_note_coverage": "1362/1362",
+    "evidence_verdict_counts": {
+      "inconclusive": 1079,
+      "contradicts": 36,
+      "supports": 247
+    },
+    "localization_by_dim": {
+      "模糊": {
+        "局部框": 251,
+        "全图": 52
+      },
+      "纹理损失": {
+        "局部框": 399,
+        "全图": 124
+      },
+      "过度生成": {
+        "局部框": 171
+      },
+      "虚化突兀": {
+        "局部框": 47
+      },
+      "过锐": {
+        "局部框": 274,
+        "全图": 4
+      },
+      "花屏": {
+        "局部框": 40
+      }
+    },
+    "sample_examples": [
+      {
+        "image": "05762ac6668f4e46_v7L3HiV2_001.png",
+        "defect": "模糊",
+        "severity": "P2",
+        "location": "画面左中区",
+        "box_xyxy": [
+          0,
+          397,
+          448,
+          845
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面左中区P2级模糊：局部或边缘清晰度轻度衰减（临界复核）",
+        "len_reason": 29,
+        "uncertainty_note": "单帧仅能确认高频边缘衰减，无法区分源拍摄失焦、运动模糊或转码压缩模糊（需结合相邻帧时序确证）；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动；当前等级置信度0.39，与相邻等级（无问题）处于主观感知临界带"
+      },
+      {
+        "image": "05762ac6668f4e46_v7L3HiV2_001.png",
+        "defect": "纹理损失",
+        "severity": "P2",
+        "location": "画面左中区",
+        "box_xyxy": [
+          0,
+          190,
+          448,
+          638
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面左中区P2级纹理损失：暗部或皮肤等微纹理轻度平滑（置信0.55）",
+        "len_reason": 34,
+        "uncertainty_note": "单帧仅能确认中高频表面纹理平滑，无法剥离源素材低码率涂抹与服务端降噪前处理贡献；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动"
+      },
+      {
+        "image": "05762ac6668f4e46_v7L3HiV2_001.png",
+        "defect": "过度生成",
+        "severity": "P0",
+        "location": "画面左中区",
+        "box_xyxy": [
+          0,
+          585,
+          448,
+          1033
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面左中区P0级过度生成：多塔聚焦局部结构畸变或违背常理伪影（临界复核）",
+        "len_reason": 36,
+        "uncertainty_note": "单帧可见局部非自然生成结构/纹理异常，无法仅凭单帧区分源AIGC生成伪影或后处理超分重绘伪影；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动；当前等级置信度0.51，与相邻等级（P1）处于主观感知临界带"
+      },
+      {
+        "image": "0fb4612192987b0f_v8L3HiV1_0002.png",
+        "defect": "模糊",
+        "severity": "P2",
+        "location": "画面中心区",
+        "box_xyxy": [
+          0,
+          585,
+          448,
+          1033
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面中心区P2级模糊：局部或边缘清晰度轻度衰减（临界复核）",
+        "len_reason": 29,
+        "uncertainty_note": "单帧仅能确认高频边缘衰减，无法区分源拍摄失焦、运动模糊或转码压缩模糊（需结合相邻帧时序确证）；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动；当前等级置信度0.46，与相邻等级（P1）处于主观感知临界带"
+      },
+      {
+        "image": "0fb4612192987b0f_v8L3HiV1_0002.png",
+        "defect": "纹理损失",
+        "severity": "P1",
+        "location": "画面中下区",
+        "box_xyxy": [
+          118,
+          832,
+          566,
+          1280
+        ],
+        "evidence_verdict": "contradicts",
+        "reason_40ch": "画面中下区P1级纹理损失：中高频表面纹理中度平滑涂抹（置信0.74）",
+        "len_reason": 34,
+        "uncertainty_note": "单帧仅能确认中高频表面纹理平滑，无法剥离源素材低码率涂抹与服务端降噪前处理贡献；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动"
+      },
+      {
+        "image": "0fb4612192987b0f_v8L3HiV1_0002.png",
+        "defect": "过度生成",
+        "severity": "P2",
+        "location": "画面中心区",
+        "box_xyxy": [
+          0,
+          590,
+          448,
+          1038
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面中心区P2级过度生成：局部微小纹理或边缘呈轻度合成感（临界复核）",
+        "len_reason": 34,
+        "uncertainty_note": "单帧可见局部非自然生成结构/纹理异常，无法仅凭单帧区分源AIGC生成伪影或后处理超分重绘伪影；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动；当前等级置信度0.32，与相邻等级（无问题）处于主观感知临界带"
+      },
+      {
+        "image": "0fb4612192987b0f_v8L3HiV1_0002.png",
+        "defect": "过锐",
+        "severity": "P2",
+        "location": "画面中上区",
+        "box_xyxy": [
+          0,
+          0,
+          448,
+          448
+        ],
+        "evidence_verdict": "supports",
+        "reason_40ch": "画面中上区P2级过锐：实测边缘过冲均值0.202（洁净P93）",
+        "len_reason": 31,
+        "uncertainty_note": "单帧可见高反差边缘过冲光晕，无法单独区分拍摄端ISP锐化与服务端超分/增强后处理引入；当前等级置信度0.36，与相邻等级（无问题）处于主观感知临界带"
+      },
+      {
+        "image": "107951211280_049.png",
+        "defect": "花屏",
+        "severity": "P0",
+        "location": "画面中心区",
+        "box_xyxy": [
+          505,
+          194,
+          953,
+          642
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面中心区P0级花屏：出现明显解码色块错乱或像素撕裂（置信1.00）",
+        "len_reason": 34,
+        "uncertainty_note": "单帧可见局部宏块阶跃或色度错乱，具体发生于上传解码或转码传输环节需结合流媒体日志定位；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动"
+      },
+      {
+        "image": "134553355848_183.png",
+        "defect": "模糊",
+        "severity": "P2",
+        "location": "画面中心区",
+        "box_xyxy": [
+          160,
+          620,
+          608,
+          1068
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面中心区P2级模糊：局部或边缘清晰度轻度衰减（临界复核）",
+        "len_reason": 29,
+        "uncertainty_note": "单帧仅能确认高频边缘衰减，无法区分源拍摄失焦、运动模糊或转码压缩模糊（需结合相邻帧时序确证）；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动；当前等级置信度0.34，与相邻等级（无问题）处于主观感知临界带"
+      },
+      {
+        "image": "134553355848_183.png",
+        "defect": "纹理损失",
+        "severity": "P2",
+        "location": "画面中心区",
+        "box_xyxy": [
+          350,
+          578,
+          798,
+          1026
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面中心区P2级纹理损失：暗部或皮肤等微纹理轻度平滑（置信0.62）",
+        "len_reason": 34,
+        "uncertainty_note": "单帧仅能确认中高频表面纹理平滑，无法剥离源素材低码率涂抹与服务端降噪前处理贡献；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动"
+      },
+      {
+        "image": "148556065529_v8L3HiV6_00-01-38.000.png",
+        "defect": "模糊",
+        "severity": "P1",
+        "location": "画面中上区",
+        "box_xyxy": [
+          168,
+          0,
+          616,
+          448
+        ],
+        "evidence_verdict": "supports",
+        "reason_40ch": "画面中上区P1级模糊：实测拉普拉斯方差0.00014（洁净P8）",
+        "len_reason": 32,
+        "uncertainty_note": "单帧仅能确认高频边缘衰减，无法区分源拍摄失焦、运动模糊或转码压缩模糊（需结合相邻帧时序确证）；当前等级置信度0.36，与相邻等级（P2）处于主观感知临界带"
+      },
+      {
+        "image": "148556065529_v8L3HiV6_00-01-38.000.png",
+        "defect": "纹理损失",
+        "severity": "P1",
+        "location": "画面中上区",
+        "box_xyxy": [
+          154,
+          0,
+          602,
+          448
+        ],
+        "evidence_verdict": "inconclusive",
+        "reason_40ch": "画面中上区P1级纹理损失：中高频表面纹理中度平滑涂抹（置信0.56）",
+        "len_reason": 34,
+        "uncertainty_note": "单帧仅能确认中高频表面纹理平滑，无法剥离源素材低码率涂抹与服务端降噪前处理贡献；一阶像素梯度统计位于常规区间，该判级主要由多专家深度视觉与结构语义表征驱动"
+      }
+    ]
+  }
+}

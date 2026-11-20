@@ -18,7 +18,9 @@ from multiprocessing import Pool
 import cv2
 import numpy as np
 
-os.chdir('/wanqing-develop/luowenjing/18')
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if os.path.isdir(_REPO):
+    os.chdir(_REPO)
 
 IMG_DIRS = [
     '/dev/shm/v17_synth_quads',
@@ -42,10 +44,17 @@ if os.environ.get('NEXT55_EXTRA_IMG_DIR'):
 
 
 def find_img_path(name):
-    for d in IMG_DIRS:
-        p = os.path.join(d, name)
-        if os.path.exists(p):
-            return p
+    if os.path.isabs(name) and os.path.exists(name):
+        return name
+    extra = os.environ.get('NEXT55_EXTRA_IMG_DIR', '').strip()
+    dirs = ([extra] if extra else []) + IMG_DIRS
+    for d in dirs:
+        for cand in (
+            os.path.join(d, name) if os.path.isabs(d) else os.path.join(_REPO, d, name),
+            os.path.join(d, name),
+        ):
+            if os.path.exists(cand):
+                return cand
     return None
 
 
@@ -56,6 +65,12 @@ def compute_one_image_feats(name):
     img = cv2.imread(p, cv2.IMREAD_COLOR)
     if img is None:
         return name, np.zeros(60, dtype=np.float32)
+    return name, compute_feats_from_bgr(img)
+
+
+def compute_feats_from_bgr(img):
+    if img is None or img.size == 0:
+        return np.zeros(60, dtype=np.float32)
 
     h, w = img.shape[:2]
     # Cap max side to 1600 for speed while preserving 1:1 native pixel fidelity on 1080p images
@@ -265,7 +280,7 @@ def compute_one_image_feats(name):
     ])
 
     arr = np.nan_to_num(np.array(feats[:60], dtype=np.float32), nan=0.0, posinf=10.0, neginf=-10.0)
-    return name, arr
+    return arr
 
 
 def extract_for_names(names, cache_path='results/v8_experts/native_phys_feats.npz'):

@@ -1,0 +1,274 @@
+{
+  "set": "resident_v8_boundary",
+  "decoder": "deconf_v6_boundary",
+  "tested_images": [
+    "196160772653_10.03s.png",
+    "137212400938_frame14.png",
+    "207550292858_v8L3HiV6_16.33s.png",
+    "181204643103_v7L3HiV2_18101.png"
+  ],
+  "fastapi": {
+    "backend": "fastapi",
+    "port": 8065,
+    "health_after": {
+      "status": "ok",
+      "set": "resident_v8_boundary",
+      "members": [
+        "cradio_v3",
+        "pe_v3",
+        "peg",
+        "sig_v3",
+        "v16",
+        "p3_qy",
+        "ntg_pe",
+        "p12_pe",
+        "p1_qy",
+        "pe_bkseg1",
+        "ntg_convnext",
+        "bndry_pe",
+        "bndry_dual",
+        "qwen_hr"
+      ],
+      "decoder": "deconf_v6_boundary",
+      "attribution": true,
+      "load_s": 169.94,
+      "warmup_s": 7.93,
+      "torch_peak_gb": 18.748,
+      "torch_allocated_gb": 15.847,
+      "torch_reserved_gb": 17.191,
+      "nvidia_smi_mib": 19003.6,
+      "nvidia_smi_peak_mib": 20459.6,
+      "params_b": 13.262,
+      "shared_weights_gb": 5.808,
+      "embed_host_gb": 1.159,
+      "requests": 7,
+      "uptime_s": 26.4,
+      "clean_footprint": "results/r55/final/resident_v8_boundary_clean_footprint.npz",
+      "pytorch_cuda_alloc_conf": "expandable_segments:True"
+    },
+    "infer_checks": [
+      {
+        "image": "196160772653_10.03s.png",
+        "mode": "image_path",
+        "latency_ms": {
+          "infer": 6228.98,
+          "decode": 10.07,
+          "attr": 0.04,
+          "total": 6240.38,
+          "request": 6636.49
+        },
+        "match": true
+      },
+      {
+        "image": "137212400938_frame14.png",
+        "mode": "image_path",
+        "latency_ms": {
+          "infer": 2721.26,
+          "decode": 10.28,
+          "attr": 350.39,
+          "total": 3082.32,
+          "request": 3206.67
+        },
+        "match": true
+      },
+      {
+        "image": "207550292858_v8L3HiV6_16.33s.png",
+        "mode": "image_base64",
+        "latency_ms": {
+          "infer": 2549.99,
+          "decode": 10.16,
+          "attr": 236.64,
+          "total": 2797.05,
+          "request": 2929.3
+        },
+        "match": true
+      }
+    ],
+    "batch_video_summary": {
+      "video_id": "clip_v8_audit_01",
+      "num_frames": 4,
+      "frames": [
+        "196160772653_10.03s.png",
+        "137212400938_frame14.png",
+        "207550292858_v8L3HiV6_16.33s.png",
+        "181204643103_v7L3HiV2_18101.png"
+      ],
+      "video_label": {
+        "模糊": "P2",
+        "纹理损失": "P1",
+        "过锐": "P2",
+        "花屏": "P0",
+        "过度生成": "P2",
+        "虚化突兀": "P0"
+      },
+      "trigger_frames": {
+        "模糊": [
+          1,
+          2
+        ],
+        "纹理损失": [
+          1,
+          2
+        ],
+        "过锐": [
+          3
+        ],
+        "花屏": [
+          1
+        ],
+        "过度生成": [
+          2,
+          3
+        ],
+        "虚化突兀": [
+          3
+        ]
+      },
+      "m_eff_p0": [
+        2.828,
+        2.569,
+        3.43,
+        3.55,
+        2.759,
+        3.113
+      ]
+    },
+    "error_checks": {
+      "missing_file_status": 404,
+      "empty_payload_status": 400
+    },
+    "sigterm_rc": 0
+  },
+  "stdlib": {
+    "backend": "stdlib",
+    "port": 8066,
+    "health_after": {
+      "status": "ok",
+      "set": "resident_v8_boundary",
+      "members": [
+        "cradio_v3",
+        "pe_v3",
+        "peg",
+        "sig_v3",
+        "v16",
+        "p3_qy",
+        "ntg_pe",
+        "p12_pe",
+        "p1_qy",
+        "pe_bkseg1",
+        "ntg_convnext",
+        "bndry_pe",
+        "bndry_dual",
+        "qwen_hr"
+      ],
+      "decoder": "deconf_v6_boundary",
+      "attribution": true,
+      "load_s": 171.26,
+      "warmup_s": 7.93,
+      "torch_peak_gb": 18.748,
+      "torch_allocated_gb": 15.847,
+      "torch_reserved_gb": 17.191,
+      "nvidia_smi_mib": 19009.6,
+      "nvidia_smi_peak_mib": 20459.6,
+      "params_b": 13.262,
+      "shared_weights_gb": 5.808,
+      "embed_host_gb": 1.159,
+      "requests": 7,
+      "uptime_s": 35.4,
+      "clean_footprint": "results/r55/final/resident_v8_boundary_clean_footprint.npz",
+      "pytorch_cuda_alloc_conf": "expandable_segments:True"
+    },
+    "infer_checks": [
+      {
+        "image": "196160772653_10.03s.png",
+        "mode": "image_path",
+        "latency_ms": {
+          "infer": 6421.42,
+          "decode": 10.18,
+          "attr": 0.06,
+          "total": 6433.01,
+          "request": 6825.03
+        },
+        "match": true
+      },
+      {
+        "image": "137212400938_frame14.png",
+        "mode": "image_path",
+        "latency_ms": {
+          "infer": 4960.67,
+          "decode": 10.12,
+          "attr": 347.81,
+          "total": 5319.01,
+          "request": 5445.64
+        },
+        "match": true
+      },
+      {
+        "image": "207550292858_v8L3HiV6_16.33s.png",
+        "mode": "image_base64",
+        "latency_ms": {
+          "infer": 4979.34,
+          "decode": 9.65,
+          "attr": 303.6,
+          "total": 5293.02,
+          "request": 5423.69
+        },
+        "match": true
+      }
+    ],
+    "batch_video_summary": {
+      "video_id": "clip_v8_audit_01",
+      "num_frames": 4,
+      "frames": [
+        "196160772653_10.03s.png",
+        "137212400938_frame14.png",
+        "207550292858_v8L3HiV6_16.33s.png",
+        "181204643103_v7L3HiV2_18101.png"
+      ],
+      "video_label": {
+        "模糊": "P2",
+        "纹理损失": "P1",
+        "过锐": "P2",
+        "花屏": "P0",
+        "过度生成": "P2",
+        "虚化突兀": "P0"
+      },
+      "trigger_frames": {
+        "模糊": [
+          1,
+          2
+        ],
+        "纹理损失": [
+          1,
+          2
+        ],
+        "过锐": [
+          3
+        ],
+        "花屏": [
+          1
+        ],
+        "过度生成": [
+          2,
+          3
+        ],
+        "虚化突兀": [
+          3
+        ]
+      },
+      "m_eff_p0": [
+        2.828,
+        2.569,
+        3.43,
+        3.55,
+        2.759,
+        3.113
+      ]
+    },
+    "error_checks": {
+      "missing_file_status": 404,
+      "empty_payload_status": 400
+    },
+    "sigterm_rc": 0
+  }
+}

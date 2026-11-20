@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-code/r55/serve_engine.py — online + batch HTTP service for the resident engine (default: resident_v6_core,
-RoutedGateEUDecoder).  All members are loaded ONCE at startup and stay resident on one GPU; every request is
+code/r55/serve_engine.py — online + batch HTTP service for the resident engine (default: resident_v8_boundary,
+deconf_v6_boundary).  All members are loaded ONCE at startup and stay resident on one GPU; every request is
 served image-by-image through exactly the same N = 1 path as `final_engine.py` (FinalEngine.infer ->
 row-wise decoder -> AttributionRuntime), so a label returned here equals the label in the submission JSON.
 
@@ -43,15 +43,17 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 def _parse():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--set", default="resident_v6_core")
+    ap.add_argument("--set", default="resident_v8_boundary")
     ap.add_argument("--gpu", type=int, default=0)
-    ap.add_argument("--decoder", default="routed_gate_eu", choices=["d55", "eu", "vote", "routed_eu", "routed_gate_eu"])
+    ap.add_argument("--decoder", default="deconf_v6_boundary", choices=["d55", "eu", "vote", "routed_eu", "routed_gate_eu", "deconf_v2", "deconf_v3", "deconf_v4_tile", "deconf_v5_boundary", "deconf_v6_boundary"])
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8055)
     ap.add_argument("--spool-dir", default="/tmp/r55_serve_spool")
     ap.add_argument("--path-root", default="", help="if set, /infer image_path must lie under this directory")
     ap.add_argument("--no-attribution", action="store_true")
     ap.add_argument("--no-half", action="store_true", help="fp32 backbone weights (default: bf16 weights, like the submission run)")
+    ap.add_argument("--no-share-weights", action="store_true", help="disable lossless shared-trunk deduplication (enabled by default)")
+    ap.add_argument("--no-embed-on-host", action="store_true", help="disable host token-embedding offload (enabled by default)")
     ap.add_argument("--backend", default="auto", choices=["auto", "fastapi", "stdlib"])
     ap.add_argument("--max-batch", type=int, default=256)
     ap.add_argument("--no-warmup", action="store_true", help="skip the start-up warm-up on a synthetic image")
@@ -104,10 +106,17 @@ class Service:
         torch.cuda.init()
         self.nv = fe.NvmlPeakSampler()
         t0 = time.time()
-        self.eng = fe.FinalEngine(self.members, img_dir=a.spool_dir, half=half, v16_chunk=v16_chunk)
+        self.eng = fe.FinalEngine(
+            self.members,
+            img_dir=a.spool_dir,
+            half=half,
+            v16_chunk=v16_chunk,
+            share_weights=not a.no_share_weights,
+            embed_on_host=not a.no_embed_on_host,
+        )
         self.peak_load_gb = torch.cuda.max_memory_allocated() / 2 ** 30
         self.svc = fe.N1Service(self.eng, a.set, rule=a.decoder, attribution=not a.no_attribution)
-        vap = os.path.join(fe.OUT, f"{a.set}_video_aggregator.pkl")
+        vap = fe._resolve_pack_path(f"results/r55/final/{a.set}_video_aggregator.pkl", f"decoders/{a.set}_video_aggregator.pkl")
         from subjective_engineering import EffectiveFrameORVideoAggregator
         self.vid_agg = pickle.load(open(vap, "rb"))["video_aggregator"] if os.path.exists(vap) else EffectiveFrameORVideoAggregator()
         self.vid_agg_src = vap if os.path.exists(vap) else "default (no fitted aggregator found)"
@@ -143,9 +152,11 @@ class Service:
 
     # ------------------------------------------------------------------ helpers
     def _stage(self, item):
-        """-> (spool name, original name, path to remove)."""
+        """Pure-CPU staging (runs OUTSIDE GPU lock): decodes PIL RGB once + precomputes V16 physics."""
+        from PIL import Image
         if not isinstance(item, dict):
             raise ApiError(400, "each request item must be a JSON object")
+        dst = None
         if item.get("image_path"):
             src = os.path.abspath(str(item["image_path"]))
             if self.a.path_root and not src.startswith(os.path.abspath(self.a.path_root) + os.sep):
@@ -154,8 +165,12 @@ class Service:
                 raise ApiError(404, f"image_path not found: {src}")
             orig = os.path.basename(src)
             spool = f"srv_{uuid.uuid4().hex[:12]}_{orig}"
-            dst = os.path.join(self.a.spool_dir, spool)
-            os.symlink(src, dst)
+            try:
+                with Image.open(src) as im:
+                    im.load()
+                    pil_rgb = im.convert("RGB")
+            except Exception as e:
+                raise ApiError(400, f"not a decodable image: {e}")
         elif item.get("image_base64"):
             try:
                 raw = base64.b64decode(str(item["image_base64"]), validate=False)
@@ -163,28 +178,31 @@ class Service:
                 raise ApiError(400, f"bad base64: {e}")
             orig = os.path.basename(str(item.get("image_name") or "upload.png"))
             spool = f"srv_{uuid.uuid4().hex[:12]}_{orig}"
-            dst = os.path.join(self.a.spool_dir, spool)
-            with open(dst, "wb") as f:
-                f.write(raw)
+            try:
+                with Image.open(io.BytesIO(raw)) as im:
+                    im.load()
+                    pil_rgb = im.convert("RGB")
+            except Exception as e:
+                raise ApiError(400, f"not a decodable image: {e}")
         else:
             raise ApiError(400, "need image_path or image_base64")
-        try:
-            from PIL import Image
-            with Image.open(dst) as im:
-                im.verify()
-        except Exception as e:
-            os.remove(dst)
-            raise ApiError(400, f"not a decodable image: {e}")
-        return spool, orig, dst
+        pref = self.eng.prefetch_cpu(spool, pil_rgb=pil_rgb)
+        return spool, orig, dst, pil_rgb, pref
 
     def _one(self, item, with_attr):
-        spool, orig, dst = self._stage(item)
+        spool, orig, dst, pil_rgb, pref = self._stage(item)
         try:
             with self.lock:
-                rec = self.svc.predict(spool, with_attribution=with_attr)
+                self.eng._prefetch_cache[spool] = pref
+                self.eng._img_cache[spool] = pil_rgb
+                try:
+                    rec = self.svc.predict(spool, with_attribution=with_attr)
+                finally:
+                    self.eng._img_cache.pop(spool, None)
+                    self.eng._prefetch_cache.pop(spool, None)
                 self.n_req += 1
         finally:
-            if os.path.lexists(dst):
+            if dst is not None and os.path.lexists(dst):
                 os.remove(dst)
         out = dict(image=orig, label=rec["label"], pred_6d=rec["pred"], probs_6x4=np.round(rec["probs"], 5),
                    latency_ms={k[:-2]: round(rec[k] * 1000.0, 2) for k in ("infer_s", "decode_s", "attr_s", "total_s")})
@@ -205,7 +223,10 @@ class Service:
                     torch_allocated_gb=round(self.torch.cuda.memory_allocated() / 2 ** 30, 3),
                     torch_reserved_gb=round(self.torch.cuda.memory_reserved() / 2 ** 30, 3),
                     nvidia_smi_mib=round(self.nv.read_mib(), 1), nvidia_smi_peak_mib=round(self.nv.peak_mib, 1),
-                    params_b=self.eng.total_params_b, requests=self.n_req, uptime_s=round(time.time() - self.started, 1),
+                    params_b=self.eng.total_params_b,
+                    shared_weights_gb=round(float(getattr(self.eng, "shared_bytes", 0)) / 2 ** 30, 3),
+                    embed_host_gb=round(float(getattr(self.eng, "embed_host_bytes", 0)) / 2 ** 30, 3),
+                    requests=self.n_req, uptime_s=round(time.time() - self.started, 1),
                     clean_footprint=os.path.relpath(self.svc.attr.fp_path, fe.REPO) if self.svc.attr else None,
                     pytorch_cuda_alloc_conf=os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""))
 
@@ -271,13 +292,19 @@ def _run_fastapi(S):
 
     @app.post("/infer")
     async def infer(req: Request):
-        body = await req.json()
+        try:
+            body = await req.json()
+        except Exception as e:
+            return JSONResponse({"error": f"bad JSON: {e}"}, status_code=400)
         import anyio
         return await anyio.to_thread.run_sync(wrap, S.infer, body)
 
     @app.post("/infer_batch")
     async def infer_batch(req: Request):
-        body = await req.json()
+        try:
+            body = await req.json()
+        except Exception as e:
+            return JSONResponse({"error": f"bad JSON: {e}"}, status_code=400)
         import anyio
         return await anyio.to_thread.run_sync(wrap, S.infer_batch, body)
 

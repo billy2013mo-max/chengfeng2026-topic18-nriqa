@@ -103,12 +103,18 @@ class V16NativeMicroscopeDataset(Dataset):
             off = int(self.offsets[j])
             arr = np.asarray(self.data[off:off + h * w * 3]).reshape(h, w, 3)
             return Image.fromarray(arr)
+        if os.path.isabs(name) and os.path.exists(name):
+            return Image.open(name).convert('RGB')
+        _repo = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
         extra = [os.environ['NEXT55_EXTRA_IMG_DIR']] if os.environ.get('NEXT55_EXTRA_IMG_DIR') else []
         for d in extra + ['/tmp/v9_authentic_imgs', '/tmp/v8_ladder_imgs', '/tmp/v7_overgen_pro_imgs', '/tmp/v6_synth_imgs',
                   'data/train', 'data/images', 'data/images_supp', 'data/test_150', 'data/test']:
-            p = os.path.join('/wanqing-develop/luowenjing/18', d, name) if not d.startswith('/') else os.path.join(d, name)
-            if os.path.exists(p):
-                return Image.open(p).convert('RGB')
+            for p in (
+                os.path.join(d, name) if os.path.isabs(d) else os.path.join(_repo, d, name),
+                os.path.join(d, name),
+            ):
+                if os.path.exists(p):
+                    return Image.open(p).convert('RGB')
         raise FileNotFoundError(f'Cannot find {name}')
 
     def _extract_native_microscope_crops(self, im):
